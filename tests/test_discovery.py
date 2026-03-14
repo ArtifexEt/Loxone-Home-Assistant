@@ -429,6 +429,30 @@ class BridgeTextStateUpdateTests(unittest.TestCase):
             1,
         )
 
+    def test_listener_exception_does_not_break_state_processing(self) -> None:
+        candidate = self._new_bridge()
+        state_uuid = "12345678-1234-5678-1234-567812345678"
+        healthy_calls = 0
+
+        def broken_listener() -> None:
+            raise RuntimeError("boom")
+
+        def healthy_listener() -> None:
+            nonlocal healthy_calls
+            healthy_calls += 1
+
+        candidate._listeners = {
+            broken_listener: {state_uuid},
+            healthy_listener: {state_uuid},
+        }
+
+        candidate._deliver_text(
+            '{"LL":{"control":"dev/sps/io/12345678-1234-5678-1234-567812345678","value":1}}'
+        )
+
+        self.assertEqual(candidate.state_values[state_uuid], 1)
+        self.assertEqual(healthy_calls, 1)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -654,7 +654,12 @@ class LoxoneBridge:
     def _notify_listeners(self, changed_uuids: set[str] | None = None) -> None:
         for callback_fn, watched in list(self._listeners.items()):
             if changed_uuids is None or watched is None or watched.intersection(changed_uuids):
-                callback_fn()
+                try:
+                    callback_fn()
+                except Exception:  # noqa: BLE001
+                    _LOGGER.exception(
+                        "Loxone listener callback failed; keeping websocket connection alive."
+                    )
 
 
 async def async_discover_miniservers(
