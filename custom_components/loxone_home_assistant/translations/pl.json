@@ -1,0 +1,60 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Połącz z Loxone",
+        "description": "Podaj login i hasło Loxone. Integracja przeskanuje lokalną sieć i spróbuje znaleźć serwer Loxone (Miniserver, Miniserver Go, Miniserver Compact).",
+        "data": {
+          "username": "Login",
+          "password": "Hasło"
+        }
+      },
+      "select": {
+        "title": "Wybierz serwer Loxone",
+        "description": "W sieci znaleziono więcej niż jeden serwer Loxone. Wybierz urządzenie do połączenia.",
+        "data": {
+          "device": "Znalezione urządzenie"
+        }
+      },
+      "manual": {
+        "title": "Ręczna konfiguracja serwera Loxone",
+        "description": "Automatyczne wyszukiwanie nie zakończyło się powodzeniem. Wpisz lokalny adres serwera Loxone ręcznie.",
+        "data": {
+          "host": "Host",
+          "port": "Port",
+          "username": "Login",
+          "password": "Hasło",
+          "verify_ssl": "Weryfikuj certyfikat TLS"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Nie można połączyć się z serwerem Loxone.",
+      "invalid_auth": "Nieprawidłowy login lub hasło.",
+      "legacy_not_supported": "Ta integracja obsługuje obecnie tylko serwery Loxone z lokalnym TLS/WSS.",
+      "unsupported_version": "Nieobsługiwana wersja oprogramowania serwera Loxone. Minimalna wspierana wersja to 10.2.",
+      "no_device_found": "Nie znaleziono wspieranego serwera Loxone w lokalnej sieci."
+    },
+    "abort": {
+      "already_configured": "Ten serwer Loxone jest już skonfigurowany."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Opcje Loxone",
+        "description": "Hub: {entry_title}\nNumer seryjny: {serial}\nWersja struktury LoxAPP: {loxapp_version}\nWykryta wersja oprogramowania API Loxone: {current_api_version}\nMinimalna wspierana wersja API: {min_api_version}\n\nOstrzeżenie: Wyłączenie opcji indywidualnych świateł usuwa te encje z Home Assistant (mogą zniknąć z dashboardów i automatyzacji).",
+        "data": {
+          "host": "Host",
+          "port": "Port",
+          "username": "Login",
+          "password": "Hasło (zostaw puste, aby zachować obecne)",
+          "verify_ssl": "Weryfikuj certyfikat TLS",
+          "scan_timeout": "Limit czasu wyszukiwania (sekundy)",
+          "enable_light_mood_select": "Wystaw selektor nastroju LightController",
+          "expose_controller_child_lights": "Wystaw indywidualne światła w LightController"
+        }
+      }
+    }
+  }
+}

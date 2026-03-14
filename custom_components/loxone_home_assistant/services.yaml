@@ -1,0 +1,40 @@
+send_command:
+  name: Send command
+  description: Send a command to a specific Loxone control UUID.
+  fields:
+    entry_id:
+      name: Entry ID
+      description: Optional when only one Loxone config entry exists.
+      required: false
+      example: a1b2c3d4e5
+      selector:
+        text:
+    uuid_action:
+      name: UUID Action
+      description: The Loxone `uuidAction` to control.
+      required: true
+      selector:
+        text:
+    command:
+      name: Command
+      description: The Loxone command to send.
+      required: true
+      selector:
+        text:
+
+send_raw_command:
+  name: Send raw command
+  description: Send a raw authenticated Loxone command over the websocket.
+  fields:
+    entry_id:
+      name: Entry ID
+      description: Optional when only one Loxone config entry exists.
+      required: false
+      selector:
+        text:
+    command:
+      name: Command
+      description: The full Loxone command string.
+      required: true
+      selector:
+        text:

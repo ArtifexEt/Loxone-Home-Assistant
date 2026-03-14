@@ -1,0 +1,17 @@
+.DS_Store
+._*
+.env
+.env.*
+secrets.yaml
+secrets.*.yaml
+local_test_credentials.json
+local_test_credentials.*
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.venv/
+venv/

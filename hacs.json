@@ -1,0 +1,9 @@
+{
+  "name": "Loxone",
+  "content_in_root": false,
+  "domains": [
+    "loxone_home_assistant"
+  ],
+  "homeassistant": "2025.1.0",
+  "render_readme": true
+}
