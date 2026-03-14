@@ -95,7 +95,10 @@ class LoxoneIconProxyView(HomeAssistantView):
 
     url = f"/api/{DOMAIN}/icon/{{serial}}/{{icon_key}}"
     name = f"api:{DOMAIN}:icon"
-    requires_auth = True
+    # Keep icon URLs usable in plain <img> contexts where HA auth headers/cookies
+    # may not be attached. Path validation in `decode_icon_key` limits fetch scope
+    # to safe relative Miniserver icon paths only.
+    requires_auth = False
 
     async def get(self, request: web.Request, serial: str, icon_key: str) -> web.Response:
         del request
