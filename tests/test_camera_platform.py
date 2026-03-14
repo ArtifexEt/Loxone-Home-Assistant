@@ -143,6 +143,7 @@ class _FakeBridge:
         controls,
         values,
         session: _FakeSession,
+        secured_details_by_uuid_action: dict | None = None,
         host: str = "mini.local",
         port: int = 443,
         use_tls: bool = True,
@@ -155,6 +156,8 @@ class _FakeBridge:
         self.port = port
         self.use_tls = use_tls
         self._ws_path_prefix = ws_path_prefix
+        self._secured_details_by_uuid_action = secured_details_by_uuid_action or {}
+        self.action_calls: list[tuple[str, str]] = []
 
     def add_listener(self, _callback_fn, _watched_uuids):
         return lambda: None
@@ -181,6 +184,14 @@ class _FakeBridge:
         default_port = 443 if self.use_tls else 80
         port_part = "" if self.port == default_port else f":{self.port}"
         return f"{scheme}://{self.host}{port_part}{path}"
+
+    async def async_send_action(self, uuid_action: str, command: str):
+        self.action_calls.append((uuid_action, command))
+        if command == "securedDetails":
+            return {
+                "value": self._secured_details_by_uuid_action.get(uuid_action, {}),
+            }
+        return {"value": None}
 
 
 class _FakeConfigEntry:
@@ -339,6 +350,63 @@ class CameraPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             entity.extra_state_attributes["snapshot_url"],
             "https://mini.local/dev/variant-live.jpg",
+        )
+
+    async def test_camera_uses_secured_details_for_door_controller_variant(self) -> None:
+        control = LoxoneControl(
+            uuid="door-controller-uuid",
+            uuid_action="door-controller-action",
+            name="Intercom Front",
+            type="DoorController",
+            states={
+                "bell": "state-bell",
+                "lastBellEvents": "state-events",
+            },
+            details={},
+        )
+        expected_stream_url = "https://mini.local/dev/secured-stream.mjpg"
+        expected_snapshot_url = "https://mini.local/dev/secured-alert.jpg"
+        session = _FakeSession(
+            {
+                (expected_snapshot_url, True): (200, b"secured-alert"),
+            }
+        )
+        bridge = _FakeBridge(
+            [control],
+            {
+                "state-bell": 0,
+                "state-events": "20260101120000",
+            },
+            session,
+            secured_details_by_uuid_action={
+                "door-controller-action": {
+                    "videoInfo": {
+                        "streamUrl": "/dev/secured-stream.mjpg",
+                        "alertImage": "/dev/secured-alert.jpg",
+                    }
+                }
+            },
+        )
+        entry = _FakeConfigEntry("entry-1")
+        hass = _FakeHass(entry.entry_id, bridge, const.DOMAIN)
+        entities: list = []
+
+        await camera_module.async_setup_entry(
+            hass,
+            entry,
+            lambda new_entities: entities.extend(new_entities),
+        )
+
+        self.assertEqual(len(entities), 1)
+        entity = entities[0]
+        self.assertEqual(await entity.stream_source(), expected_stream_url)
+        self.assertEqual(entity.extra_state_attributes["snapshot_url"], expected_snapshot_url)
+        image = await entity.async_camera_image()
+        self.assertEqual(image, b"secured-alert")
+        self.assertEqual(session.calls, [(expected_snapshot_url, True)])
+        self.assertEqual(
+            bridge.action_calls,
+            [("door-controller-action", "securedDetails")],
         )
 
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Mapping
 from typing import Any
@@ -30,7 +31,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import DOMAIN, INTERCOM_CAMERA_CONTROL_TYPES
+from .const import DOORBELL_STATE_CANDIDATES, DOMAIN, INTERCOM_CAMERA_CONTROL_TYPES
 from .entity import LoxoneEntity, first_matching_state_name, normalize_state_name
 from .models import LoxoneControl
 
@@ -48,18 +49,49 @@ SNAPSHOT_STATE_CANDIDATES = (
     "snapshot",
 )
 STREAM_DETAIL_PATHS = (
+    "securedDetails.videoInfo.streamUrl",
     "videoInfo.streamUrl",
     "streamUrl",
 )
 SNAPSHOT_DETAIL_PATHS = (
+    "securedDetails.videoInfo.alertImage",
+    "securedDetails.videoInfo.liveImageUrl",
+    "securedDetails.videoInfo.imageUrl",
     "videoInfo.liveImageUrl",
+    "videoInfo.alertImage",
     "videoInfo.imageUrl",
+    "alertImage",
     "liveImageUrl",
 )
 LAST_BELL_EVENTS_DETAIL_PATHS = ("lastBellEvents",)
 INTERCOM_CAMERA_CONTROL_TYPES_NORMALIZED = {
-    value.casefold() for value in INTERCOM_CAMERA_CONTROL_TYPES
+    normalize_state_name(value) for value in INTERCOM_CAMERA_CONTROL_TYPES
 }
+INTERCOM_TYPE_HINTS_NORMALIZED = {
+    normalize_state_name(value)
+    for value in ("intercom", "doorcontroller", "door station", "doorstation")
+}
+STREAM_OR_SNAPSHOT_STATE_CANDIDATES = (
+    *STREAM_STATE_CANDIDATES,
+    *SNAPSHOT_STATE_CANDIDATES,
+)
+INTERCOM_SIGNAL_STATE_CANDIDATES = (
+    *DOORBELL_STATE_CANDIDATES,
+    "lastBellEvents",
+    "lastBellTimestamp",
+)
+SECURED_STREAM_DETAIL_PATHS = (
+    "videoInfo.streamUrl",
+    "streamUrl",
+)
+SECURED_SNAPSHOT_DETAIL_PATHS = (
+    "videoInfo.alertImage",
+    "videoInfo.liveImageUrl",
+    "videoInfo.imageUrl",
+    "alertImage",
+    "liveImageUrl",
+    "imageUrl",
+)
 
 
 async def async_setup_entry(
@@ -84,8 +116,15 @@ class LoxoneIntercomCameraEntity(LoxoneEntity, Camera):
         super().__init__(bridge, control, "Video")
         self._stream_state_name = first_matching_state_name(control, STREAM_STATE_CANDIDATES)
         self._snapshot_state_name = first_matching_state_name(control, SNAPSHOT_STATE_CANDIDATES)
+        self._last_bell_events_state_name = first_matching_state_name(
+            control, ("lastBellEvents",)
+        )
+        self._secured_details: dict[str, Any] | None = None
+        self._secured_details_loaded = False
+        self._secured_details_lock = asyncio.Lock()
 
     async def stream_source(self) -> str | None:
+        await self._ensure_secured_details_loaded()
         return self._stream_url()
 
     @property
@@ -97,7 +136,7 @@ class LoxoneIntercomCameraEntity(LoxoneEntity, Camera):
         snapshot_url = self._snapshot_url()
         if snapshot_url is not None:
             attrs["snapshot_url"] = snapshot_url
-        bell_events = _resolve_control_detail_url(self.bridge, self.control, LAST_BELL_EVENTS_DETAIL_PATHS)
+        bell_events = self._last_bell_events_url()
         if bell_events is not None:
             attrs["last_bell_events_url"] = bell_events
         return attrs
@@ -107,6 +146,7 @@ class LoxoneIntercomCameraEntity(LoxoneEntity, Camera):
     ) -> bytes | None:
         del width, height
 
+        await self._ensure_secured_details_loaded()
         image_url = self._snapshot_url() or self._stream_url()
         if image_url is None:
             return None
@@ -138,19 +178,75 @@ class LoxoneIntercomCameraEntity(LoxoneEntity, Camera):
         resolved_state = self.bridge.resolve_http_url(_coerce_text(from_state))
         if resolved_state is not None:
             return resolved_state
-        return _resolve_control_detail_url(self.bridge, self.control, STREAM_DETAIL_PATHS)
+        from_details = _resolve_control_detail_url(self.bridge, self.control, STREAM_DETAIL_PATHS)
+        if from_details is not None:
+            return from_details
+        if self._secured_details is not None:
+            return _resolve_detail_url(self.bridge, self._secured_details, SECURED_STREAM_DETAIL_PATHS)
+        return None
 
     def _snapshot_url(self) -> str | None:
         from_state = self.state_value(self._snapshot_state_name) if self._snapshot_state_name else None
         resolved_state = self.bridge.resolve_http_url(_coerce_text(from_state))
         if resolved_state is not None:
             return resolved_state
-        return _resolve_control_detail_url(self.bridge, self.control, SNAPSHOT_DETAIL_PATHS)
+        from_details = _resolve_control_detail_url(self.bridge, self.control, SNAPSHOT_DETAIL_PATHS)
+        if from_details is not None:
+            return from_details
+        if self._secured_details is not None:
+            return _resolve_detail_url(
+                self.bridge, self._secured_details, SECURED_SNAPSHOT_DETAIL_PATHS
+            )
+        return None
+
+    def _last_bell_events_url(self) -> str | None:
+        from_state = (
+            self.state_value(self._last_bell_events_state_name)
+            if self._last_bell_events_state_name
+            else None
+        )
+        resolved_state = self.bridge.resolve_http_url(_coerce_text(from_state))
+        if resolved_state is not None:
+            return resolved_state
+        return _resolve_control_detail_url(self.bridge, self.control, LAST_BELL_EVENTS_DETAIL_PATHS)
+
+    async def _ensure_secured_details_loaded(self) -> None:
+        if self._secured_details_loaded:
+            return
+
+        async with self._secured_details_lock:
+            if self._secured_details_loaded:
+                return
+
+            send_action = getattr(self.bridge, "async_send_action", None)
+            if send_action is None:
+                self._secured_details_loaded = True
+                return
+
+            try:
+                response = await send_action(self.control.uuid_action, "securedDetails")
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.debug(
+                    "Could not load securedDetails for %s (%s)",
+                    self.control.uuid_action,
+                    err,
+                )
+                self._secured_details_loaded = True
+                return
+
+            value = response.get("value") if isinstance(response, Mapping) else None
+            if isinstance(value, Mapping):
+                self._secured_details = dict(value)
+            self._secured_details_loaded = True
 
 
 def _resolve_control_detail_url(bridge, control: LoxoneControl, detail_paths: tuple[str, ...]) -> str | None:
+    return _resolve_detail_url(bridge, control.details, detail_paths)
+
+
+def _resolve_detail_url(bridge, details: Mapping[str, Any], detail_paths: tuple[str, ...]) -> str | None:
     for path in detail_paths:
-        raw_value = _nested_detail_value(control.details, path)
+        raw_value = _nested_detail_value(details, path)
         resolved = bridge.resolve_http_url(_coerce_text(raw_value))
         if resolved is not None:
             return resolved
@@ -158,18 +254,27 @@ def _resolve_control_detail_url(bridge, control: LoxoneControl, detail_paths: tu
 
 
 def _is_intercom_camera_control(control: LoxoneControl) -> bool:
-    normalized_type = control.type.casefold()
+    normalized_type = normalize_state_name(control.type)
     if normalized_type in INTERCOM_CAMERA_CONTROL_TYPES_NORMALIZED:
         return True
-    if "intercom" in normalized_type:
+    if any(hint in normalized_type for hint in INTERCOM_TYPE_HINTS_NORMALIZED):
         return True
 
     normalized_states = {
         normalize_state_name(state_name) for state_name in control.states
     }
-    for candidate in (*STREAM_STATE_CANDIDATES, *SNAPSHOT_STATE_CANDIDATES):
+    for candidate in STREAM_OR_SNAPSHOT_STATE_CANDIDATES:
         if normalize_state_name(candidate) in normalized_states:
             return True
+
+    intercom_signal_state_found = any(
+        normalize_state_name(candidate) in normalized_states
+        for candidate in INTERCOM_SIGNAL_STATE_CANDIDATES
+    )
+    if intercom_signal_state_found and (
+        "door" in normalized_type or "intercom" in normalized_type or "station" in normalized_type
+    ):
+        return True
 
     detail_paths = (
         *STREAM_DETAIL_PATHS,

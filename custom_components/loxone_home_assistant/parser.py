@@ -50,7 +50,7 @@ def parse_structure(payload: Mapping[str, Any]) -> LoxoneStructure:
             category_uuid=category_uuid,
             category_name=categories.get(category_uuid),
             states=_coerce_state_map(raw.get("states", {})),
-            details=dict(raw.get("details", {})),
+            details=_coerce_details(raw),
             parent_uuid_action=parent.uuid_action if parent else None,
             path=path,
             is_secured=bool(raw.get("isSecured", False)),
@@ -97,6 +97,20 @@ def _coerce_state_map(raw_states: Mapping[str, Any]) -> dict[str, str]:
         if isinstance(state_uuid, str):
             states[state_name] = _normalize_uuid(state_uuid)
     return states
+
+
+def _coerce_details(raw_control: Mapping[str, Any]) -> dict[str, Any]:
+    details: dict[str, Any] = {}
+
+    raw_details = raw_control.get("details")
+    if isinstance(raw_details, Mapping):
+        details.update(raw_details)
+
+    raw_secured_details = raw_control.get("securedDetails")
+    if isinstance(raw_secured_details, Mapping):
+        details["securedDetails"] = dict(raw_secured_details)
+
+    return details
 
 
 def _safe_name(value: Any) -> str:

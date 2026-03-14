@@ -140,6 +140,38 @@ class ParseStructureTests(unittest.TestCase):
         self.assertEqual(structure.server_model, "Miniserver Go")
         self.assertEqual(structure.miniserver_name, "Loxone Miniserver Go")
 
+    def test_parse_structure_keeps_secured_details(self) -> None:
+        payload = {
+            "msInfo": {
+                "msName": "Dom",
+                "serialNr": "1234567890",
+            },
+            "controls": {
+                "intercom-1": {
+                    "name": "Intercom Front",
+                    "type": "DoorController",
+                    "uuidAction": "action-intercom",
+                    "details": {
+                        "deviceType": 1,
+                    },
+                    "securedDetails": {
+                        "videoInfo": {
+                            "streamUrl": "/dev/secured-stream.mjpg",
+                        }
+                    },
+                }
+            },
+        }
+
+        structure = parse_structure(payload)
+        control = structure.controls_by_action["action-intercom"]
+
+        self.assertEqual(control.details["deviceType"], 1)
+        self.assertEqual(
+            control.details["securedDetails"]["videoInfo"]["streamUrl"],
+            "/dev/secured-stream.mjpg",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
