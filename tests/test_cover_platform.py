@@ -247,6 +247,7 @@ class CoverPlatformTests(unittest.IsolatedAsyncioTestCase):
         )
         entity = cover_module.LoxoneCoverEntity(bridge, control)
 
+        self.assertEqual(entity.device_class, "blind")
         self.assertEqual(entity.current_cover_position, 70)
         self.assertEqual(entity.current_cover_tilt_position, 75)
         self.assertTrue(entity.supported_features & cover_module.CoverEntityFeature.SET_POSITION)
@@ -294,6 +295,34 @@ class CoverPlatformTests(unittest.IsolatedAsyncioTestCase):
             bridge.commands,
             [("jalousie-details-action", "manualLamelle/60")],
         )
+
+    async def test_jalousie_named_zacienienie_defaults_to_curtain(self) -> None:
+        control = LoxoneControl(
+            uuid="shade-uuid",
+            uuid_action="shade-action",
+            name="Zacienienie Taras",
+            type="Jalousie",
+            states={"position": "state-position"},
+            details={"animation": 1},
+        )
+        bridge = _FakeBridge([control], {"state-position": 20})
+        entity = cover_module.LoxoneCoverEntity(bridge, control)
+
+        self.assertEqual(entity.device_class, "curtain")
+
+    async def test_jalousie_named_roleta_detects_blind(self) -> None:
+        control = LoxoneControl(
+            uuid="roller-uuid",
+            uuid_action="roller-action",
+            name="Roleta Salon",
+            type="Jalousie",
+            states={"position": "state-position"},
+            details={"animation": 1},
+        )
+        bridge = _FakeBridge([control], {"state-position": 20})
+        entity = cover_module.LoxoneCoverEntity(bridge, control)
+
+        self.assertEqual(entity.device_class, "blind")
 
     async def test_window_is_supported_and_uses_target_position_state(self) -> None:
         control = LoxoneControl(
