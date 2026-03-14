@@ -334,6 +334,53 @@ def _is_air_quality_state_name(state_name: str) -> bool:
     return _state_name_matches_any_key(state_name, AIR_QUALITY_STATE_KEYS)
 
 
+def _has_climate_state_trailing_index(state_name: str) -> bool:
+    return CLIMATE_STATE_TRAILING_INDEX_RE.search(state_name) is not None
+
+
+def _climate_metric_state_group_key(state_name: str) -> str | None:
+    if _is_humidity_state_name(state_name):
+        return "humidity"
+    if _is_co2_state_name(state_name):
+        return "co2"
+    if _is_air_quality_state_name(state_name):
+        return "air_quality"
+    if _state_name_matches_any_key(state_name, {normalize_state_name("voc")}):
+        return "voc"
+    return None
+
+
+def _select_climate_state_names(
+    control: LoxoneControl, excluded_states: set[str]
+) -> list[str]:
+    ordered_state_names: list[str] = []
+    latest_metric_state: dict[str, str] = {}
+    metrics_with_indexed_states: set[str] = set()
+
+    for state_name in control.states:
+        if state_name in excluded_states:
+            continue
+        ordered_state_names.append(state_name)
+
+        metric_key = _climate_metric_state_group_key(state_name)
+        if metric_key is None:
+            continue
+        latest_metric_state[metric_key] = state_name
+        if _has_climate_state_trailing_index(state_name):
+            metrics_with_indexed_states.add(metric_key)
+
+    selected_state_names: list[str] = []
+    for state_name in ordered_state_names:
+        metric_key = _climate_metric_state_group_key(state_name)
+        if metric_key is None or metric_key not in metrics_with_indexed_states:
+            selected_state_names.append(state_name)
+            continue
+        if latest_metric_state.get(metric_key) == state_name:
+            selected_state_names.append(state_name)
+
+    return selected_state_names
+
+
 def _is_energy_unit(value: str | None) -> bool:
     normalized = _normalized_unit(value)
     return normalized in ENERGY_UNITS if normalized else False
@@ -1050,9 +1097,7 @@ def _build_climate_state_sensors(bridge, control: LoxoneControl) -> list[SensorE
         )
 
     used_suffixes: set[str] = set()
-    for state_name in control.states:
-        if state_name in excluded_states:
-            continue
+    for state_name in _select_climate_state_names(control, excluded_states):
         suffix = _climate_state_suffix(state_name)
         unique_suffix = suffix
         if unique_suffix in used_suffixes:

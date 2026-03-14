@@ -281,6 +281,54 @@ class ClimateExtraSensorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(mode_sensor.native_value, "comfort")
         self.assertIsNone(mode_sensor.native_unit_of_measurement)
 
+    async def test_climate_state_sensors_keep_only_last_tagged_humidity_and_co2_state(self) -> None:
+        climate_control = LoxoneControl(
+            uuid="climate-tagged-uuid",
+            uuid_action="climate-tagged-action",
+            name="Inteligentny Regulator",
+            type="IRoomControllerV2",
+            details={"format": "%.1f°"},
+            states={
+                "tempActual": "state-temp-actual",
+                "tempTarget": "state-temp-target",
+                "humidity_5": "state-humidity-5",
+                "humidity_6": "state-humidity-6",
+                "humidity_7": "state-humidity-7",
+                "co2_6": "state-co2-6",
+                "co2_7": "state-co2-7",
+                "operatingMode": "state-mode",
+            },
+        )
+        bridge = _FakeBridge(
+            [climate_control],
+            {
+                "state-temp-actual": 21.5,
+                "state-temp-target": 22.0,
+                "state-humidity-5": 40,
+                "state-humidity-6": 44,
+                "state-humidity-7": 48,
+                "state-co2-6": 760,
+                "state-co2-7": 810,
+                "state-mode": "comfort",
+            },
+        )
+        entry = _FakeConfigEntry("entry-1")
+        hass = _FakeHass(entry.entry_id, bridge, const.DOMAIN)
+        entities = []
+
+        await sensor_module.async_setup_entry(
+            hass,
+            entry,
+            lambda new_entities: entities.extend(new_entities),
+        )
+
+        by_state = {entity._state_name: entity for entity in entities}
+        self.assertEqual(set(by_state), {"humidity_7", "co2_7", "operatingMode"})
+        self.assertEqual(by_state["humidity_7"].native_value, 48.0)
+        self.assertEqual(by_state["humidity_7"].native_unit_of_measurement, "%")
+        self.assertEqual(by_state["co2_7"].native_value, 810.0)
+        self.assertEqual(by_state["co2_7"].native_unit_of_measurement, "ppm")
+
     async def test_setup_creates_air_condition_state_sensors_except_temperatures(self) -> None:
         climate_control = LoxoneControl(
             uuid="ac-uuid",

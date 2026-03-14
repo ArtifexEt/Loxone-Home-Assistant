@@ -81,6 +81,22 @@ def _install_homeassistant_stubs() -> None:
     helpers.__path__ = []
     sys.modules["homeassistant.helpers"] = helpers
 
+    device_registry = types.ModuleType("homeassistant.helpers.device_registry")
+
+    class DeviceInfo(dict):
+        pass
+
+    device_registry.DeviceInfo = DeviceInfo
+    sys.modules["homeassistant.helpers.device_registry"] = device_registry
+
+    entity = types.ModuleType("homeassistant.helpers.entity")
+
+    class Entity:
+        pass
+
+    entity.Entity = Entity
+    sys.modules["homeassistant.helpers.entity"] = entity
+
     aiohttp_client = types.ModuleType("homeassistant.helpers.aiohttp_client")
 
     def async_get_clientsession(_hass, verify_ssl=True):
@@ -174,6 +190,22 @@ class BridgeSystemStatsTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(third["cpu"], 55.0)
         self.assertEqual(len(calls), 8)
+
+    async def test_send_loxone_command_wraps_invalid_json_as_loxone_error(self) -> None:
+        bridge = bridge_module.LoxoneBridge.__new__(bridge_module.LoxoneBridge)
+
+        async def fake_send_text(command: str, *, ensure_connected: bool = True) -> str:
+            del command, ensure_connected
+            return ""
+
+        bridge._send_text_command = fake_send_text
+
+        with self.assertRaises(bridge_module.LoxoneConnectionError):
+            await bridge_module.LoxoneBridge._send_loxone_command(
+                bridge,
+                "dev/sys/cpu",
+                ensure_connected=False,
+            )
 
 
 if __name__ == "__main__":

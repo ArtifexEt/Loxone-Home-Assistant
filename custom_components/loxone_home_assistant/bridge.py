@@ -1110,7 +1110,12 @@ def _state_uuid_from_control_path(control: str) -> str | None:
 
 
 def _deserialize_json(value: str) -> dict[str, Any]:
-    parsed = json.loads(value)
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError as err:
+        raise LoxoneConnectionError(
+            "Invalid JSON response received from the Miniserver."
+        ) from err
     if not isinstance(parsed, dict):
         raise LoxoneConnectionError("Expected a JSON object from the Miniserver.")
     return parsed
