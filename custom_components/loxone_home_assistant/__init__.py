@@ -101,8 +101,12 @@ class LoxoneIconProxyView(HomeAssistantView):
     requires_auth = False
 
     async def get(self, request: web.Request, serial: str, icon_key: str) -> web.Response:
-        del request
-        bridge = _resolve_bridge_for_serial(self.hass, serial)
+        hass = getattr(self, "hass", None) or request.app.get("hass")
+        if hass is None:
+            _LOGGER.error("Icon proxy request received without Home Assistant context.")
+            return web.Response(status=500)
+
+        bridge = _resolve_bridge_for_serial(hass, serial)
         if bridge is None:
             return web.Response(status=404)
 
@@ -110,7 +114,7 @@ class LoxoneIconProxyView(HomeAssistantView):
         if icon_path is None:
             return web.Response(status=400)
 
-        cached = _cached_icon_payload(self.hass, bridge.serial, icon_path)
+        cached = _cached_icon_payload(hass, bridge.serial, icon_path)
         if cached is not None:
             return _icon_web_response(cached)
 
@@ -118,7 +122,7 @@ class LoxoneIconProxyView(HomeAssistantView):
         if payload is None:
             return web.Response(status=404)
 
-        _store_cached_icon_payload(self.hass, bridge.serial, icon_path, payload)
+        _store_cached_icon_payload(hass, bridge.serial, icon_path, payload)
         return _icon_web_response(payload)
 
 
