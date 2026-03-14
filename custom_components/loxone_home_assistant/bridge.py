@@ -44,6 +44,7 @@ from .const import (
     EVENT_INTERCOM,
     WEB_PERMISSION,
 )
+from .icons import icon_proxy_url
 from .intercom import (
     intercom_call_state_name,
     intercom_doorbell_state_name,
@@ -287,6 +288,10 @@ class LoxoneBridge:
         default_port = 443 if self.use_tls else 80
         port_part = "" if self.port == default_port else f":{self.port}"
         return f"{scheme}://{self.host}{port_part}{path}"
+
+    def resolve_icon_proxy_url(self, value: str | None) -> str | None:
+        """Resolve one Loxone icon path to a local Home Assistant proxy URL."""
+        return icon_proxy_url(self.serial, value)
 
     def state_value(self, state_uuid: str | None) -> Any:
         """Return the latest state value for a UUID."""

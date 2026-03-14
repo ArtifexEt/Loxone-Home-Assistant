@@ -5,6 +5,7 @@ from __future__ import annotations
 import sys
 import types
 import unittest
+from urllib.parse import quote
 
 from tests._loader import load_integration_module
 
@@ -102,6 +103,14 @@ class _FakeBridge:
         path = normalized if normalized.startswith("/") else f"/{normalized}"
         return f"https://mini.local{path}"
 
+    def resolve_icon_proxy_url(self, value: str | None) -> str | None:
+        if not isinstance(value, str):
+            return None
+        normalized = value.strip().replace("\\", "/").lstrip("/")
+        if not normalized:
+            return None
+        return f"/api/loxone_home_assistant/icon/{self.serial}/{quote(normalized, safe='')}"
+
 
 class _FakeMiniserverEntity(LoxoneEntity):
     def uses_miniserver_device(self) -> bool:
@@ -118,6 +127,10 @@ class _FakeBridgeB:
     @staticmethod
     def resolve_http_url(value: str | None) -> str | None:
         return _FakeBridge.resolve_http_url(value)
+
+
+class _FakeBridgeNoProxy(_FakeBridge):
+    resolve_icon_proxy_url = None
 
 
 class EntityDeviceInfoTests(unittest.TestCase):
@@ -214,7 +227,7 @@ class EntityDeviceInfoTests(unittest.TestCase):
 
         self.assertEqual(
             icon_entity._attr_entity_picture,
-            "https://mini.local/IconsFilled/night-mode.svg",
+            "/api/loxone_home_assistant/icon/1234567890/IconsFilled%2Fnight-mode.svg",
         )
         self.assertEqual(
             icon_entity.extra_state_attributes["loxone_icon"],
@@ -222,6 +235,22 @@ class EntityDeviceInfoTests(unittest.TestCase):
         )
         self.assertEqual(
             icon_entity.extra_state_attributes["loxone_icon_url"],
+            "/api/loxone_home_assistant/icon/1234567890/IconsFilled%2Fnight-mode.svg",
+        )
+
+    def test_entity_icon_uses_direct_url_when_proxy_is_unavailable(self) -> None:
+        control = LoxoneControl(
+            uuid="icon-uuid",
+            uuid_action="icon-action",
+            name="Noc",
+            type="Switch",
+            icon="IconsFilled/night-mode.svg",
+        )
+
+        icon_entity = LoxoneEntity(_FakeBridgeNoProxy(), control)
+
+        self.assertEqual(
+            icon_entity._attr_entity_picture,
             "https://mini.local/IconsFilled/night-mode.svg",
         )
 

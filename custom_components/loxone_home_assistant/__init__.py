@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from urllib.parse import quote
 
+from aiohttp import BasicAuth, ClientError, web
 import voluptuous as vol
+from homeassistant.components.http import HomeAssistantView
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_PASSWORD
 from homeassistant.core import HomeAssistant, ServiceCall
@@ -34,10 +37,13 @@ from .const import (
     SERVICE_SEND_TTS,
 )
 from .entity import miniserver_device_identifier
+from .icons import decode_icon_key, normalize_icon_path
 from .intercom import is_intercom_control, resolve_intercom_command
 from .models import LoxoneControl
 from .runtime import bridges_by_entry_id, remove_entry_bridge, set_entry_bridge
 from .server_model import DEFAULT_SERVER_MODEL
+
+_LOGGER = logging.getLogger(__name__)
 SEND_COMMAND_SCHEMA = vol.Schema(
     {
         vol.Optional(SERVICE_ATTR_ENTRY_ID): cv.string,
@@ -80,6 +86,37 @@ CALL_INTERCOM_COMMAND_SCHEMA = vol.Schema(
     }
 )
 NON_ALNUM_RE = re.compile(r"[^a-z0-9]+")
+DATA_ICON_CACHE = "icon_cache"
+DATA_ICON_VIEW_REGISTERED = "icon_view_registered"
+
+
+class LoxoneIconProxyView(HomeAssistantView):
+    """Serve Loxone icons through authenticated HA endpoint."""
+
+    url = f"/api/{DOMAIN}/icon/{{serial}}/{{icon_key}}"
+    name = f"api:{DOMAIN}:icon"
+    requires_auth = True
+
+    async def get(self, request: web.Request, serial: str, icon_key: str) -> web.Response:
+        del request
+        bridge = _resolve_bridge_for_serial(self.hass, serial)
+        if bridge is None:
+            return web.Response(status=404)
+
+        icon_path = decode_icon_key(icon_key)
+        if icon_path is None:
+            return web.Response(status=400)
+
+        cached = _cached_icon_payload(self.hass, bridge.serial, icon_path)
+        if cached is not None:
+            return _icon_web_response(cached)
+
+        payload = await _async_fetch_icon_payload(bridge, icon_path)
+        if payload is None:
+            return web.Response(status=404)
+
+        _store_cached_icon_payload(self.hass, bridge.serial, icon_path, payload)
+        return _icon_web_response(payload)
 
 
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:
@@ -87,6 +124,10 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
     del config
     hass.data.setdefault(DOMAIN, {})
     hass.data[DOMAIN].setdefault(DATA_BRIDGES, {})
+    hass.data[DOMAIN].setdefault(DATA_ICON_CACHE, {})
+    if not hass.data[DOMAIN].get(DATA_ICON_VIEW_REGISTERED):
+        hass.http.register_view(LoxoneIconProxyView())
+        hass.data[DOMAIN][DATA_ICON_VIEW_REGISTERED] = True
 
     if not hass.services.has_service(DOMAIN, SERVICE_SEND_COMMAND):
         hass.services.async_register(
@@ -138,6 +179,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     merged_data = {**entry.data, **entry.options}
     bridge = LoxoneBridge(hass, merged_data)
     await bridge.async_initialize()
+    hass.async_create_task(_async_prefetch_icons(hass, bridge))
 
     _async_register_miniserver_device(hass, entry, bridge)
 
@@ -163,6 +205,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     bridge = remove_entry_bridge(hass, entry)
     if bridge is not None:
+        _clear_cached_bridge_icons(hass, bridge.serial)
         await bridge.async_shutdown()
 
     return unload_ok
@@ -396,4 +439,118 @@ def _async_register_miniserver_device(
         name=bridge.miniserver_name,
         sw_version=bridge.software_version,
         serial_number=bridge.serial,
+    )
+
+
+def _resolve_bridge_for_serial(hass: HomeAssistant, serial: str) -> LoxoneBridge | None:
+    normalized = str(serial).strip()
+    if not normalized:
+        return None
+    for bridge in bridges_by_entry_id(hass).values():
+        if str(bridge.serial).strip() == normalized:
+            return bridge
+    return None
+
+
+def _icon_cache(hass: HomeAssistant) -> dict[str, dict[str, tuple[str, bytes]]]:
+    hass.data.setdefault(DOMAIN, {})
+    domain_data = hass.data[DOMAIN]
+    domain_data.setdefault(DATA_ICON_CACHE, {})
+    return domain_data[DATA_ICON_CACHE]
+
+
+def _cached_icon_payload(
+    hass: HomeAssistant, serial: str, icon_path: str
+) -> tuple[str, bytes] | None:
+    serial_cache = _icon_cache(hass).get(str(serial))
+    if not isinstance(serial_cache, dict):
+        return None
+    payload = serial_cache.get(icon_path)
+    if not isinstance(payload, tuple) or len(payload) != 2:
+        return None
+    content_type, body = payload
+    if not isinstance(content_type, str) or not isinstance(body, bytes):
+        return None
+    return content_type, body
+
+
+def _store_cached_icon_payload(
+    hass: HomeAssistant, serial: str, icon_path: str, payload: tuple[str, bytes]
+) -> None:
+    cache = _icon_cache(hass)
+    serial_key = str(serial)
+    serial_cache = cache.setdefault(serial_key, {})
+    serial_cache[icon_path] = payload
+
+
+def _clear_cached_bridge_icons(hass: HomeAssistant, serial: str) -> None:
+    _icon_cache(hass).pop(str(serial), None)
+
+
+def _icon_web_response(payload: tuple[str, bytes]) -> web.Response:
+    content_type, body = payload
+    return web.Response(body=body, content_type=content_type or "image/svg+xml")
+
+
+async def _async_fetch_icon_payload(
+    bridge: LoxoneBridge, icon_path: str
+) -> tuple[str, bytes] | None:
+    icon_url = bridge.resolve_http_url(icon_path)
+    if icon_url is None:
+        return None
+    session = getattr(bridge, "_session", None)
+    if session is None:
+        return None
+
+    auth = BasicAuth(bridge.username, bridge.password)
+    for request_auth in (auth, None):
+        try:
+            async with session.get(icon_url, auth=request_auth) as response:
+                if response.status == 401 and request_auth is not None:
+                    continue
+                if response.status != 200:
+                    return None
+                body = await response.read()
+                if not body:
+                    return None
+                content_type = response.headers.get("Content-Type", "image/svg+xml")
+                if ";" in content_type:
+                    content_type = content_type.split(";", 1)[0].strip()
+                return content_type or "image/svg+xml", body
+        except (ClientError, RuntimeError) as err:
+            _LOGGER.debug(
+                "Loxone icon fetch failed for serial=%s path=%s (%s)",
+                bridge.serial,
+                icon_path,
+                err,
+            )
+            if request_auth is None:
+                return None
+    return None
+
+
+async def _async_prefetch_icons(hass: HomeAssistant, bridge: LoxoneBridge) -> None:
+    icon_paths = {
+        icon_path
+        for control in bridge.controls
+        if (icon_path := normalize_icon_path(control.icon))
+    }
+    if not icon_paths:
+        return
+
+    fetched = 0
+    for icon_path in sorted(icon_paths):
+        if _cached_icon_payload(hass, bridge.serial, icon_path) is not None:
+            continue
+        payload = await _async_fetch_icon_payload(bridge, icon_path)
+        if payload is None:
+            continue
+        _store_cached_icon_payload(hass, bridge.serial, icon_path, payload)
+        fetched += 1
+
+    _LOGGER.debug(
+        "Loxone icon prefetch finished for serial=%s cached=%s requested=%s",
+        bridge.serial,
+        fetched,
+        len(icon_paths),
     )

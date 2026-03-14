@@ -42,7 +42,8 @@ OPERATING_MODE_LIST_STATE_CANDIDATES = (
     "modeList",
     "modes",
 )
-PRESET_MODE_FEATURE = int(getattr(ClimateEntityFeature, "PRESET_MODE", 0))
+TARGET_TEMPERATURE_FEATURE = getattr(ClimateEntityFeature, "TARGET_TEMPERATURE", 0)
+PRESET_MODE_FEATURE = getattr(ClimateEntityFeature, "PRESET_MODE", 0)
 
 
 def _coerce_first_float(values: tuple[object, ...], default: float) -> float:
@@ -259,10 +260,12 @@ class LoxoneClimateEntity(LoxoneEntity, ClimateEntity):
         return coerce_float(self.first_state_value(*state_names))
 
     @property
-    def supported_features(self) -> ClimateEntityFeature:
-        features = int(ClimateEntityFeature.TARGET_TEMPERATURE)
+    def supported_features(self) -> set[Any]:
+        features: set[Any] = set()
+        if TARGET_TEMPERATURE_FEATURE:
+            features.add(TARGET_TEMPERATURE_FEATURE)
         if PRESET_MODE_FEATURE and self.preset_modes:
-            features |= PRESET_MODE_FEATURE
+            features.add(PRESET_MODE_FEATURE)
         return features
 
     @property

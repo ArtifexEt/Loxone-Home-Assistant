@@ -14,6 +14,11 @@ from homeassistant.components.light import (
     ColorMode,
     LightEntity,
 )
+try:
+    from homeassistant.components.light import LightEntityFeature
+except ImportError:  # pragma: no cover - fallback for lightweight test stubs
+    class LightEntityFeature:  # type: ignore[no-redef]
+        EFFECT = 4
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import device_registry as dr
@@ -47,7 +52,7 @@ COLOR_LIGHT_TYPES = {"ColorPicker", "ColorPickerV2", "LightsceneRGB"}
 OFF_MOOD_IDS = {0, 778}
 NON_DIGIT_RE = re.compile(r"[^0-9,.-]+")
 ATTR_EFFECT = "effect"
-LIGHT_EFFECT_FEATURE = 4
+LIGHT_EFFECT_FEATURE = getattr(LightEntityFeature, "EFFECT", 4)
 
 
 async def async_setup_entry(
@@ -249,10 +254,11 @@ class LoxoneLightEntity(LoxoneEntity, LightEntity):
         return {ColorMode.ONOFF}
 
     @property
-    def supported_features(self) -> int:
+    def supported_features(self) -> set[Any]:
+        features: set[Any] = set()
         if self.control.type in CONTROLLER_TYPES and self._effect_list:
-            return LIGHT_EFFECT_FEATURE
-        return 0
+            features.add(LIGHT_EFFECT_FEATURE)
+        return features
 
     @property
     def effect_list(self) -> list[str] | None:

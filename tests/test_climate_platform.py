@@ -196,6 +196,14 @@ class ClimatePlatformTests(unittest.TestCase):
         )
         self.assertEqual(entity.extra_state_attributes["co2"], 720.0)
         self.assertEqual(entity.extra_state_attributes["air_quality"], 42.0)
+        self.assertIn(
+            climate_module.ClimateEntityFeature.TARGET_TEMPERATURE,
+            entity.supported_features,
+        )
+        self.assertNotIn(
+            climate_module.ClimateEntityFeature.PRESET_MODE,
+            entity.supported_features,
+        )
 
     def test_climate_matches_state_names_even_with_case_and_separator_variants(self) -> None:
         control = LoxoneControl(
@@ -312,6 +320,10 @@ class ClimateCommandMappingTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(entity.preset_modes, ["Auto", "Comfort", "Eco"])
         self.assertEqual(entity.preset_mode, "Comfort")
+        self.assertIn(
+            climate_module.ClimateEntityFeature.PRESET_MODE,
+            entity.supported_features,
+        )
 
         await entity.async_set_preset_mode("Eco")
 

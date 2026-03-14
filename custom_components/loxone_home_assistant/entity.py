@@ -157,6 +157,11 @@ def slugify_state_name(value: str) -> str:
 def control_icon_url(bridge: Any, control: LoxoneControl) -> str | None:
     if not control.icon:
         return None
+    proxy_resolver = getattr(bridge, "resolve_icon_proxy_url", None)
+    if callable(proxy_resolver):
+        proxied = proxy_resolver(control.icon)
+        if isinstance(proxied, str) and proxied.strip():
+            return proxied
     resolver = getattr(bridge, "resolve_http_url", None)
     if not callable(resolver):
         return None
