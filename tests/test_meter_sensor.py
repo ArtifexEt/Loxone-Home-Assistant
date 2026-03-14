@@ -121,8 +121,9 @@ class _FakeBridge:
     serial = "1234567890"
     available = True
 
-    def __init__(self, values):
+    def __init__(self, values, controls=None):
         self._values = values
+        self.controls = controls or []
 
     def add_listener(self, _callback_fn, _watched_uuids):
         return lambda: None
@@ -188,6 +189,99 @@ class MeterSensorTests(unittest.TestCase):
         entity = LoxoneWebpageSensor(bridge, control)
 
         self.assertEqual(entity.native_value, "https://example.local/cam")
+
+
+class MeterSensorSetupTests(unittest.IsolatedAsyncioTestCase):
+    """Verify meter discovery handles non-standard state naming."""
+
+    async def test_setup_maps_alias_states_for_actual_and_total(self) -> None:
+        control = LoxoneControl(
+            uuid="meter-uuid",
+            uuid_action="meter-action",
+            name="Energia",
+            type="Meter",
+            states={
+                "CurrentPower": "state-power",
+                "TotalConsumption": "state-total",
+            },
+            details={
+                "actualFormat": "%.1f W",
+                "totalFormat": "%.3f kWh",
+            },
+        )
+        bridge = _FakeBridge(
+            {
+                "state-power": 312.4,
+                "state-total": 1456.7,
+            },
+            controls=[control],
+        )
+        hass = types.SimpleNamespace(
+            data={sensor_module.DOMAIN: {"bridges": {"entry-id": bridge}}}
+        )
+        entry = types.SimpleNamespace(entry_id="entry-id")
+        entities: list = []
+
+        await sensor_module.async_setup_entry(
+            hass,
+            entry,
+            lambda new_entities: entities.extend(new_entities),
+        )
+
+        self.assertEqual(len(entities), 2)
+        by_state_class = {entity.state_class: entity for entity in entities}
+        actual_entity = by_state_class[sensor_module.SensorStateClass.MEASUREMENT]
+        total_entity = by_state_class[sensor_module.SensorStateClass.TOTAL_INCREASING]
+
+        self.assertEqual(actual_entity.native_value, 312.4)
+        self.assertEqual(actual_entity.native_unit_of_measurement, "W")
+        self.assertEqual(
+            actual_entity.device_class,
+            sensor_module.SensorDeviceClass.POWER,
+        )
+
+        self.assertEqual(total_entity.native_value, 1456.7)
+        self.assertEqual(total_entity.native_unit_of_measurement, "kWh")
+        self.assertEqual(
+            total_entity.device_class,
+            sensor_module.SensorDeviceClass.ENERGY,
+        )
+
+    async def test_setup_creates_total_energy_entity_from_single_counter_state(self) -> None:
+        control = LoxoneControl(
+            uuid="meter-uuid",
+            uuid_action="meter-action",
+            name="Energia",
+            type="Meter",
+            states={
+                "EnergyCounter": "state-total",
+            },
+            details={
+                "format": "%.3f kWh",
+            },
+        )
+        bridge = _FakeBridge({"state-total": 99.5}, controls=[control])
+        hass = types.SimpleNamespace(
+            data={sensor_module.DOMAIN: {"bridges": {"entry-id": bridge}}}
+        )
+        entry = types.SimpleNamespace(entry_id="entry-id")
+        entities: list = []
+
+        await sensor_module.async_setup_entry(
+            hass,
+            entry,
+            lambda new_entities: entities.extend(new_entities),
+        )
+
+        self.assertEqual(len(entities), 1)
+        entity = entities[0]
+        self.assertEqual(
+            entity.state_class,
+            sensor_module.SensorStateClass.TOTAL_INCREASING,
+        )
+        self.assertEqual(entity.device_class, sensor_module.SensorDeviceClass.ENERGY)
+        self.assertEqual(entity.native_unit_of_measurement, "kWh")
+        self.assertEqual(entity.native_value, 99.5)
 
 
 if __name__ == "__main__":

@@ -52,6 +52,29 @@ POWER_SUPPLY_REMAINING_TIME_STATE_CANDIDATES = (
     "remainingDuration",
     "batteryRuntime",
 )
+METER_STATE_KIND_ACTUAL = "actual"
+METER_STATE_KIND_TOTAL = "total"
+METER_ACTUAL_STATE_CANDIDATES = (
+    "actual",
+    "act",
+    "current",
+    "currentValue",
+    "power",
+    "momentaryPower",
+    "instantPower",
+    "value",
+)
+METER_TOTAL_STATE_CANDIDATES = (
+    "total",
+    "sum",
+    "counter",
+    "energy",
+    "consumption",
+    "totalEnergy",
+    "totalConsumption",
+    "energyCounter",
+    "consumptionCounter",
+)
 POWER_SUPPLY_KIND_BATTERY = "battery_level"
 POWER_SUPPLY_KIND_REMAINING_TIME = "remaining_time"
 
@@ -81,6 +104,12 @@ CO2_STATE_KEYS = {
 }
 AIR_QUALITY_STATE_KEYS = {
     normalize_state_name(value) for value in CLIMATE_AIR_QUALITY_STATE_CANDIDATES
+}
+METER_ACTUAL_STATE_KEYS = {
+    normalize_state_name(value) for value in METER_ACTUAL_STATE_CANDIDATES
+}
+METER_TOTAL_STATE_KEYS = {
+    normalize_state_name(value) for value in METER_TOTAL_STATE_CANDIDATES
 }
 
 
@@ -152,6 +181,167 @@ def _find_power_supply_remaining_time_state(control: LoxoneControl) -> str | Non
     return None
 
 
+def _meter_state_kind_from_name(state_name: str) -> str:
+    normalized = normalize_state_name(state_name)
+    if normalized in METER_TOTAL_STATE_KEYS:
+        return METER_STATE_KIND_TOTAL
+    return METER_STATE_KIND_ACTUAL
+
+
+def _score_meter_total_state(normalized_state_name: str) -> int:
+    score = 0
+    if normalized_state_name in METER_TOTAL_STATE_KEYS:
+        score += 100
+    if "total" in normalized_state_name:
+        score += 50
+    if "energy" in normalized_state_name:
+        score += 40
+    if "consumption" in normalized_state_name:
+        score += 30
+    if "counter" in normalized_state_name:
+        score += 20
+    if "current" in normalized_state_name or "actual" in normalized_state_name:
+        score -= 35
+    if "power" in normalized_state_name:
+        score -= 25
+    if any(
+        period in normalized_state_name
+        for period in (
+            "day",
+            "daily",
+            "week",
+            "weekly",
+            "month",
+            "monthly",
+            "year",
+            "yearly",
+            "today",
+            "yesterday",
+        )
+    ):
+        score -= 20
+    return score
+
+
+def _score_meter_actual_state(normalized_state_name: str) -> int:
+    score = 0
+    if normalized_state_name in METER_ACTUAL_STATE_KEYS:
+        score += 100
+    if "actual" in normalized_state_name:
+        score += 45
+    if "current" in normalized_state_name:
+        score += 40
+    if "power" in normalized_state_name:
+        score += 35
+    if "instant" in normalized_state_name or "moment" in normalized_state_name:
+        score += 25
+    if "total" in normalized_state_name:
+        score -= 45
+    if "consumption" in normalized_state_name or "energy" in normalized_state_name:
+        score -= 25
+    return score
+
+
+def _pick_best_meter_state(
+    control: LoxoneControl,
+    score_fn,
+    excluded: set[str] | None = None,
+) -> str | None:
+    excluded = excluded or set()
+    best_state: str | None = None
+    best_score = 0
+    for state_name in control.states:
+        if state_name in excluded or state_is_boolean(control, state_name):
+            continue
+        score = score_fn(normalize_state_name(state_name))
+        if score > best_score:
+            best_score = score
+            best_state = state_name
+    return best_state
+
+
+def _find_meter_total_state(control: LoxoneControl) -> str | None:
+    state_name = first_matching_state_name(control, METER_TOTAL_STATE_CANDIDATES)
+    if state_name is not None and not state_is_boolean(control, state_name):
+        return state_name
+
+    scored_state = _pick_best_meter_state(control, _score_meter_total_state)
+    if scored_state is not None:
+        return scored_state
+
+    for candidate in control.states:
+        if state_is_boolean(control, candidate):
+            continue
+        unit = infer_unit(control, candidate) or infer_unit(control, METER_STATE_KIND_TOTAL)
+        if _is_energy_unit(unit):
+            return candidate
+    return None
+
+
+def _find_meter_actual_state(control: LoxoneControl, excluded: set[str] | None = None) -> str | None:
+    excluded = excluded or set()
+
+    state_name = first_matching_state_name(control, METER_ACTUAL_STATE_CANDIDATES)
+    if state_name is not None and state_name not in excluded and not state_is_boolean(control, state_name):
+        return state_name
+
+    scored_state = _pick_best_meter_state(
+        control,
+        _score_meter_actual_state,
+        excluded=excluded,
+    )
+    if scored_state is not None:
+        return scored_state
+
+    for candidate in control.states:
+        if candidate in excluded or state_is_boolean(control, candidate):
+            continue
+        return candidate
+    return None
+
+
+def _build_meter_sensors(bridge, control: LoxoneControl) -> list["LoxoneMeterSensor"]:
+    total_state = _find_meter_total_state(control)
+    excluded_states = {state_name for state_name in (total_state,) if state_name}
+    actual_state = _find_meter_actual_state(control, excluded=excluded_states)
+
+    entities: list[LoxoneMeterSensor] = []
+    if actual_state is not None:
+        entities.append(
+            LoxoneMeterSensor(
+                bridge,
+                control,
+                actual_state,
+                METER_STATE_KIND_ACTUAL,
+            )
+        )
+    if total_state is not None and total_state != actual_state:
+        entities.append(
+            LoxoneMeterSensor(
+                bridge,
+                control,
+                total_state,
+                METER_STATE_KIND_TOTAL,
+            )
+        )
+
+    if entities:
+        return entities
+
+    for fallback_state in control.states:
+        if state_is_boolean(control, fallback_state):
+            continue
+        fallback_kind = _meter_state_kind_from_name(fallback_state)
+        if fallback_kind != METER_STATE_KIND_TOTAL:
+            fallback_unit = infer_unit(control, fallback_state) or infer_unit(
+                control, METER_STATE_KIND_TOTAL
+            )
+            if _is_energy_unit(fallback_unit):
+                fallback_kind = METER_STATE_KIND_TOTAL
+        return [LoxoneMeterSensor(bridge, control, fallback_state, fallback_kind)]
+    return []
+
+
 async def async_setup_entry(
     hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
 ) -> None:
@@ -164,9 +354,7 @@ async def async_setup_entry(
             continue
 
         if control.type == "Meter":
-            entities.append(LoxoneMeterSensor(bridge, control, "actual"))
-            if control.state_uuid("total"):
-                entities.append(LoxoneMeterSensor(bridge, control, "total"))
+            entities.extend(_build_meter_sensors(bridge, control))
             continue
 
         if control.type in POWER_SUPPLY_CONTROL_TYPES:
@@ -298,9 +486,17 @@ class LoxonePrimarySensor(LoxoneEntity, SensorEntity):
 class LoxoneMeterSensor(LoxoneEntity, SensorEntity):
     """Specialized meter sensor."""
 
-    def __init__(self, bridge, control: LoxoneControl, state_name: str) -> None:
-        super().__init__(bridge, control, state_name)
+    def __init__(
+        self,
+        bridge,
+        control: LoxoneControl,
+        state_name: str,
+        meter_kind: str | None = None,
+    ) -> None:
         self._state_name = state_name
+        self._meter_kind = meter_kind or _meter_state_kind_from_name(state_name)
+        entity_suffix = self._meter_kind if meter_kind is not None else state_name
+        super().__init__(bridge, control, entity_suffix)
 
     def relevant_state_uuids(self):
         state_uuid = self.control.state_uuid(self._state_name)
@@ -312,12 +508,17 @@ class LoxoneMeterSensor(LoxoneEntity, SensorEntity):
 
     @property
     def native_unit_of_measurement(self) -> str | None:
-        return infer_unit(self.control, self._state_name)
+        unit = (
+            infer_unit(self.control, self._meter_kind)
+            if self._meter_kind in {METER_STATE_KIND_ACTUAL, METER_STATE_KIND_TOTAL}
+            else None
+        )
+        return unit or infer_unit(self.control, self._state_name)
 
     @property
     def device_class(self) -> SensorDeviceClass | None:
         unit = self.native_unit_of_measurement
-        if self._state_name == "total":
+        if self._meter_kind == METER_STATE_KIND_TOTAL:
             return SensorDeviceClass.ENERGY if _is_energy_unit(unit) else None
         if _is_power_unit(unit):
             return SensorDeviceClass.POWER
@@ -327,7 +528,11 @@ class LoxoneMeterSensor(LoxoneEntity, SensorEntity):
 
     @property
     def state_class(self) -> SensorStateClass | None:
-        return SensorStateClass.TOTAL_INCREASING if self._state_name == "total" else SensorStateClass.MEASUREMENT
+        return (
+            SensorStateClass.TOTAL_INCREASING
+            if self._meter_kind == METER_STATE_KIND_TOTAL
+            else SensorStateClass.MEASUREMENT
+        )
 
 
 class LoxonePowerSupplySensor(LoxoneEntity, SensorEntity):
