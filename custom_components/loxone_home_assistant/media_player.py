@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+import ipaddress
+import re
+from collections.abc import Iterable, Mapping
 from datetime import datetime, timezone
 from typing import Any
+from urllib.parse import urlsplit
 
 from homeassistant.components.media_player import (
     MediaPlayerDeviceClass,
@@ -18,7 +21,13 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import MEDIA_PLAYER_CONTROL_TYPES
-from .entity import LoxoneEntity, coerce_bool, coerce_float, first_matching_state_name
+from .entity import (
+    LoxoneEntity,
+    coerce_bool,
+    coerce_float,
+    first_matching_state_name,
+    normalize_state_name,
+)
 from .runtime import entry_bridge
 
 try:  # Home Assistant >= 2022.10
@@ -47,6 +56,9 @@ IMAGE_STATE_CANDIDATES = ("cover",)
 SERVER_STATE_CANDIDATES = ("serverState",)
 CLIENT_STATE_CANDIDATES = ("clientState",)
 TTS_STATE_CANDIDATES = ("tts",)
+MEDIA_SERVER_CONN_STATE_CANDIDATES = ("connState", "connectionState")
+MEDIA_SERVER_CERTIFICATE_STATE_CANDIDATES = ("certificateValid", "certValid")
+MEDIA_SERVER_HOST_STATE_CANDIDATES = ("host",)
 
 REPEAT_OFF = "off"
 REPEAT_ONE = "one"
@@ -70,6 +82,8 @@ STATE_PLAYING = 2
 DEFAULT_VOLUME_STEP = 3
 MIN_VOLUME_STEP = 1
 MAX_VOLUME_STEP = 20
+
+_MAC_NON_HEX_RE = re.compile(r"[^0-9A-Fa-f]")
 
 SUPPORTED_FEATURES = (
     MediaPlayerEntityFeature.PAUSE
@@ -125,15 +139,68 @@ class LoxoneAudioZoneEntity(LoxoneEntity, MediaPlayerEntity):
         self._server_state_name = first_matching_state_name(control, SERVER_STATE_CANDIDATES)
         self._client_state_name = first_matching_state_name(control, CLIENT_STATE_CANDIDATES)
         self._tts_state_name = first_matching_state_name(control, TTS_STATE_CANDIDATES)
+        self._media_server = _resolve_media_server(bridge, control)
+        media_server_states = (
+            self._media_server.states
+            if self._media_server is not None
+            else {}
+        )
+        self._media_server_state_uuid = _first_matching_state_uuid(
+            media_server_states, SERVER_STATE_CANDIDATES
+        )
+        self._media_server_conn_state_uuid = _first_matching_state_uuid(
+            media_server_states, MEDIA_SERVER_CONN_STATE_CANDIDATES
+        )
+        self._media_server_certificate_state_uuid = _first_matching_state_uuid(
+            media_server_states, MEDIA_SERVER_CERTIFICATE_STATE_CANDIDATES
+        )
+        self._media_server_host_uuid = _first_matching_state_uuid(
+            media_server_states, MEDIA_SERVER_HOST_STATE_CANDIDATES
+        )
+
+    def relevant_state_uuids(self) -> Iterable[str]:
+        watched = set(super().relevant_state_uuids())
+        for state_uuid in (
+            self._media_server_state_uuid,
+            self._media_server_conn_state_uuid,
+            self._media_server_certificate_state_uuid,
+            self._media_server_host_uuid,
+        ):
+            if state_uuid:
+                watched.add(state_uuid)
+        return watched
+
+    def _state_raw(self, state_name: str | None) -> Any:
+        if state_name is None:
+            return None
+        return self.state_value(state_name)
+
+    def _state_int(self, state_name: str | None) -> int | None:
+        return _coerce_int(self._state_raw(state_name))
+
+    def _state_text(self, state_name: str | None) -> str | None:
+        return _coerce_text(self._state_raw(state_name))
+
+    def _state_positive_float(self, state_name: str | None) -> float | None:
+        return _positive_float(self._state_raw(state_name))
+
+    def _is_audio_zone_v2(self) -> bool:
+        return self.control.type == AUDIO_ZONE_V2_CONTROL_TYPE
+
+    def _is_central_audio_zone(self) -> bool:
+        return self.control.type == CENTRAL_AUDIO_ZONE_CONTROL_TYPE
+
+    async def _async_send_action(self, command: str) -> None:
+        await self.bridge.async_send_action(self.control.uuid_action, command)
 
     @property
     def state(self) -> MediaPlayerState | None:
-        power = coerce_bool(self.state_value(self._power_state_name)) if self._power_state_name else None
-        play_state = _coerce_int(self.state_value(self._play_state_name))
+        power = coerce_bool(self._state_raw(self._power_state_name))
+        play_state = self._state_int(self._play_state_name)
 
         # AudioZoneV2 commonly reports `power=0` together with `playState=0` (stopped),
         # but still allows full playback control like in the Loxone app.
-        if self.control.type == AUDIO_ZONE_V2_CONTROL_TYPE and play_state == STATE_IDLE:
+        if self._is_audio_zone_v2() and play_state == STATE_IDLE:
             return MediaPlayerState.IDLE
 
         if power is False:
@@ -154,9 +221,7 @@ class LoxoneAudioZoneEntity(LoxoneEntity, MediaPlayerEntity):
 
     @property
     def volume_level(self) -> float | None:
-        if self._volume_state_name is None:
-            return None
-        raw = coerce_float(self.state_value(self._volume_state_name))
+        raw = coerce_float(self._state_raw(self._volume_state_name))
         if raw is None:
             return None
         if 0.0 <= raw <= 1.0:
@@ -165,39 +230,27 @@ class LoxoneAudioZoneEntity(LoxoneEntity, MediaPlayerEntity):
 
     @property
     def is_volume_muted(self) -> bool | None:
-        if self._mute_state_name is None:
-            return None
-        return coerce_bool(self.state_value(self._mute_state_name))
+        return coerce_bool(self._state_raw(self._mute_state_name))
 
     @property
     def media_title(self) -> str | None:
-        if self._title_state_name is None:
-            return None
-        return _coerce_text(self.state_value(self._title_state_name))
+        return self._state_text(self._title_state_name)
 
     @property
     def media_artist(self) -> str | None:
-        if self._artist_state_name is None:
-            return None
-        return _coerce_text(self.state_value(self._artist_state_name))
+        return self._state_text(self._artist_state_name)
 
     @property
     def media_album_name(self) -> str | None:
-        if self._album_state_name is None:
-            return None
-        return _coerce_text(self.state_value(self._album_state_name))
+        return self._state_text(self._album_state_name)
 
     @property
     def media_image_url(self) -> str | None:
-        if self._image_state_name is None:
-            return None
-        return _coerce_text(self.state_value(self._image_state_name))
+        return self._state_text(self._image_state_name)
 
     @property
     def media_channel(self) -> str | None:
-        if self._station_state_name is None:
-            return None
-        return _coerce_text(self.state_value(self._station_state_name))
+        return self._state_text(self._station_state_name)
 
     @property
     def media_content_type(self) -> str:
@@ -205,15 +258,11 @@ class LoxoneAudioZoneEntity(LoxoneEntity, MediaPlayerEntity):
 
     @property
     def media_duration(self) -> float | None:
-        if self._duration_state_name is None:
-            return None
-        return _positive_float(self.state_value(self._duration_state_name))
+        return self._state_positive_float(self._duration_state_name)
 
     @property
     def media_position(self) -> float | None:
-        if self._progress_state_name is None:
-            return None
-        return _positive_float(self.state_value(self._progress_state_name))
+        return self._state_positive_float(self._progress_state_name)
 
     @property
     def media_position_updated_at(self) -> datetime | None:
@@ -221,16 +270,11 @@ class LoxoneAudioZoneEntity(LoxoneEntity, MediaPlayerEntity):
 
     @property
     def shuffle(self) -> bool | None:
-        if self._shuffle_state_name is None:
-            return None
-        return coerce_bool(self.state_value(self._shuffle_state_name))
+        return coerce_bool(self._state_raw(self._shuffle_state_name))
 
     @property
     def repeat(self) -> str | None:
-        if self._repeat_state_name is None:
-            return None
-        repeat_mode = _coerce_int(self.state_value(self._repeat_state_name))
-        return _repeat_mode_to_ha_value(repeat_mode)
+        return _repeat_mode_to_ha_value(self._state_int(self._repeat_state_name))
 
     @property
     def source_list(self) -> list[str] | None:
@@ -242,7 +286,7 @@ class LoxoneAudioZoneEntity(LoxoneEntity, MediaPlayerEntity):
     @property
     def source(self) -> str | None:
         source_options = self._source_options()
-        raw = self.state_value(self._source_state_name) if self._source_state_name else None
+        raw = self._state_raw(self._source_state_name)
         slot = _coerce_int(raw)
         if slot is not None:
             return source_options.get(slot, f"Source {slot}")
@@ -270,86 +314,149 @@ class LoxoneAudioZoneEntity(LoxoneEntity, MediaPlayerEntity):
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         attrs = super().extra_state_attributes
-        play_state = _coerce_int(self.state_value(self._play_state_name))
-        if play_state is not None:
-            attrs["play_state"] = play_state
-        server_state = _coerce_int(self.state_value(self._server_state_name))
-        if server_state is not None:
-            attrs["server_state"] = server_state
-        client_state = _coerce_int(self.state_value(self._client_state_name))
-        if client_state is not None:
-            attrs["client_state"] = client_state
-        source_slot = _coerce_int(self.state_value(self._source_state_name))
-        if source_slot is not None:
-            attrs["source_id"] = source_slot
-        genre = _coerce_text(self.state_value(self._genre_state_name))
-        if genre is not None:
-            attrs["genre"] = genre
+        _set_if_not_none(attrs, "play_state", self._state_int(self._play_state_name))
+        _set_if_not_none(
+            attrs,
+            "server_state",
+            _coerce_int(
+                self._state_value_with_fallback(
+                    self._server_state_name, self._media_server_state_uuid
+                )
+            ),
+        )
+        _set_if_not_none(attrs, "client_state", self._state_int(self._client_state_name))
+        _set_if_not_none(attrs, "source_id", self._state_int(self._source_state_name))
+        _set_if_not_none(attrs, "genre", self._state_text(self._genre_state_name))
+        self._append_audio_server_attributes(attrs)
         return attrs
 
+    def _append_audio_server_attributes(self, attrs: dict[str, Any]) -> None:
+        if self._media_server is None:
+            return
+
+        attrs["audio_server_name"] = self._media_server.name
+        attrs["audio_server_uuid_action"] = self._media_server.uuid_action
+
+        audio_server_host = self._audio_server_host()
+        if audio_server_host is not None:
+            attrs["audio_server_host"] = audio_server_host
+            local_hint = _host_local_hint(audio_server_host)
+            if local_hint is not None:
+                attrs["audio_server_local_hint"] = local_hint
+
+        masked_mac = _mask_mac(self._media_server.mac)
+        if masked_mac is not None:
+            attrs["audio_server_mac"] = masked_mac
+
+        _set_if_not_none(
+            attrs,
+            "audio_server_conn_state",
+            _coerce_int(self.bridge.state_value(self._media_server_conn_state_uuid)),
+        )
+        _set_if_not_none(
+            attrs,
+            "audio_server_certificate_valid",
+            coerce_bool(self.bridge.state_value(self._media_server_certificate_state_uuid)),
+        )
+
     async def async_turn_on(self) -> None:
-        await self.bridge.async_send_action(self.control.uuid_action, "on")
+        await self._async_send_action("on")
 
     async def async_turn_off(self) -> None:
-        await self.bridge.async_send_action(self.control.uuid_action, "off")
+        await self._async_send_action("off")
 
     async def async_media_play(self) -> None:
-        await self.bridge.async_send_action(self.control.uuid_action, "play")
+        await self._async_send_action("play")
 
     async def async_media_pause(self) -> None:
-        await self.bridge.async_send_action(self.control.uuid_action, "pause")
+        await self._async_send_action("pause")
 
     async def async_media_stop(self) -> None:
-        await self.bridge.async_send_action(self.control.uuid_action, "pause")
+        await self._async_send_action("pause")
 
     async def async_media_next_track(self) -> None:
-        await self.bridge.async_send_action(self.control.uuid_action, "next")
+        await self._async_send_action("next")
 
     async def async_media_previous_track(self) -> None:
-        await self.bridge.async_send_action(self.control.uuid_action, "prev")
+        await self._async_send_action("prev")
 
     async def async_set_volume_level(self, volume: float) -> None:
         clamped = max(0.0, min(1.0, volume))
         volume_percent = round(clamped * 100)
-        await self.bridge.async_send_action(
-            self.control.uuid_action,
-            f"volume/{volume_percent}",
-        )
+        await self._async_send_action(f"volume/{volume_percent}")
 
     async def async_mute_volume(self, mute: bool) -> None:
         command_value = 1 if mute else 0
-        await self.bridge.async_send_action(
-            self.control.uuid_action,
-            f"mute/{command_value}",
-        )
+        await self._async_send_action(f"mute/{command_value}")
+
+    def _volume_step_command(self, *, up: bool) -> str:
+        if self._is_audio_zone_v2():
+            return "volUp" if up else "volDown"
+        if self._is_central_audio_zone():
+            return "volup" if up else "voldown"
+        signed_step = self._volume_step() if up else -self._volume_step()
+        return f"volstep/{signed_step}"
 
     async def async_volume_up(self) -> None:
-        if self.control.type == AUDIO_ZONE_V2_CONTROL_TYPE:
-            await self.bridge.async_send_action(self.control.uuid_action, "volUp")
-            return
-        if self.control.type == CENTRAL_AUDIO_ZONE_CONTROL_TYPE:
-            await self.bridge.async_send_action(self.control.uuid_action, "volup")
-            return
-        await self.bridge.async_send_action(
-            self.control.uuid_action, f"volstep/{self._volume_step()}"
-        )
+        await self._async_send_action(self._volume_step_command(up=True))
 
     async def async_volume_down(self) -> None:
-        if self.control.type == AUDIO_ZONE_V2_CONTROL_TYPE:
-            await self.bridge.async_send_action(self.control.uuid_action, "volDown")
-            return
-        if self.control.type == CENTRAL_AUDIO_ZONE_CONTROL_TYPE:
-            await self.bridge.async_send_action(self.control.uuid_action, "voldown")
-            return
-        await self.bridge.async_send_action(
-            self.control.uuid_action, f"volstep/{-self._volume_step()}"
-        )
+        await self._async_send_action(self._volume_step_command(up=False))
 
     async def async_select_source(self, source: str) -> None:
         slot = _source_slot_for_name(source, self._source_options())
         if slot is None:
             return
         await self._async_send_source_slot(slot)
+
+    async def _async_handle_source_media(self, kind: str, media_id: str) -> bool:
+        if kind not in {"source", "favorite", "favourite", "playlist", "music"}:
+            return False
+        slot = _coerce_int(media_id)
+        if slot is None:
+            slot = _source_slot_for_name(media_id, self._source_options())
+        if slot is not None:
+            await self._async_send_source_slot(slot)
+        return True
+
+    async def _async_handle_tts_media(
+        self,
+        kind: str,
+        media_id: str,
+        kwargs: Mapping[str, Any],
+    ) -> bool:
+        if kind not in {"tts", "announce", "announcement"}:
+            return False
+        if self.control.type not in {
+            AUDIO_ZONE_V2_CONTROL_TYPE,
+            CENTRAL_AUDIO_ZONE_CONTROL_TYPE,
+        }:
+            return True
+
+        text = _coerce_text(media_id)
+        if not text:
+            return True
+        volume = _coerce_tts_volume(kwargs)
+        encoded_text = _encode_tts_text(text)
+        command = (
+            f"tts/{encoded_text}" if volume is None else f"tts/{encoded_text}/{volume}"
+        )
+        await self._async_send_action(command)
+        return True
+
+    async def _async_handle_command_media(self, kind: str, media_id: str) -> bool:
+        if kind not in {"command", "raw", "event", "loxone"}:
+            return False
+        command = _coerce_text(media_id)
+        if command:
+            await self._async_send_action(command)
+        return True
+
+    async def _async_handle_alarm_media(self, kind: str) -> bool:
+        if kind not in {"alarm", "firealarm", "fire_alarm", "bell", "buzzer"}:
+            return False
+        await self._async_send_action(kind.replace("_", ""))
+        return True
 
     async def async_play_media(
         self,
@@ -358,39 +465,14 @@ class LoxoneAudioZoneEntity(LoxoneEntity, MediaPlayerEntity):
         **kwargs: Any,
     ) -> None:
         kind = (media_type or "").strip().casefold()
-        if kind in {"source", "favorite", "favourite", "playlist", "music"}:
-            slot = _coerce_int(media_id)
-            if slot is None:
-                slot = _source_slot_for_name(media_id, self._source_options())
-            if slot is not None:
-                await self._async_send_source_slot(slot)
-            return
 
-        if kind in {"tts", "announce", "announcement"} and self.control.type in {
-            AUDIO_ZONE_V2_CONTROL_TYPE,
-            CENTRAL_AUDIO_ZONE_CONTROL_TYPE,
-        }:
-            text = _coerce_text(media_id)
-            if text:
-                volume = _coerce_tts_volume(kwargs)
-                encoded_text = _encode_tts_text(text)
-                command = (
-                    f"tts/{encoded_text}"
-                    if volume is None
-                    else f"tts/{encoded_text}/{volume}"
-                )
-                await self.bridge.async_send_action(self.control.uuid_action, command)
+        if await self._async_handle_source_media(kind, media_id):
             return
-
-        if kind in {"command", "raw", "event", "loxone"}:
-            command = _coerce_text(media_id)
-            if command:
-                await self.bridge.async_send_action(self.control.uuid_action, command)
+        if await self._async_handle_tts_media(kind, media_id, kwargs):
             return
-
-        if kind in {"alarm", "firealarm", "fire_alarm", "bell", "buzzer"}:
-            command = kind.replace("_", "")
-            await self.bridge.async_send_action(self.control.uuid_action, command)
+        if await self._async_handle_command_media(kind, media_id):
+            return
+        if await self._async_handle_alarm_media(kind):
             return
 
         if kind in {"play", "resume"}:
@@ -404,18 +486,13 @@ class LoxoneAudioZoneEntity(LoxoneEntity, MediaPlayerEntity):
         if self._progress_state_name is None:
             return
         position_seconds = max(0, round(position))
-        await self.bridge.async_send_action(
-            self.control.uuid_action,
-            f"progress/{position_seconds}",
-        )
+        await self._async_send_action(f"progress/{position_seconds}")
 
     async def async_set_shuffle(self, shuffle: bool) -> None:
         if self._shuffle_state_name is None:
             return
         command_value = 1 if shuffle else 0
-        await self.bridge.async_send_action(
-            self.control.uuid_action, f"shuffle/{command_value}"
-        )
+        await self._async_send_action(f"shuffle/{command_value}")
 
     async def async_set_repeat(self, repeat: str) -> None:
         if self._repeat_state_name is None:
@@ -423,9 +500,7 @@ class LoxoneAudioZoneEntity(LoxoneEntity, MediaPlayerEntity):
         repeat_mode = _ha_repeat_to_repeat_mode(repeat)
         if repeat_mode is None:
             return
-        await self.bridge.async_send_action(
-            self.control.uuid_action, f"repeat/{repeat_mode}"
-        )
+        await self._async_send_action(f"repeat/{repeat_mode}")
 
     def _handle_bridge_update(self) -> None:
         if self.media_position is None:
@@ -437,9 +512,7 @@ class LoxoneAudioZoneEntity(LoxoneEntity, MediaPlayerEntity):
         super()._handle_bridge_update()
 
     def _volume_step(self) -> int:
-        raw_value = None
-        if self._volume_step_state_name:
-            raw_value = self.state_value(self._volume_step_state_name)
+        raw_value = self._state_raw(self._volume_step_state_name)
         step_value = _coerce_int(raw_value)
         if step_value is None:
             step_value = _coerce_int(self.control.details.get("volumeStep"))
@@ -449,7 +522,7 @@ class LoxoneAudioZoneEntity(LoxoneEntity, MediaPlayerEntity):
 
     def _source_options(self) -> dict[int, str]:
         raw = (
-            self.state_value(self._source_list_state_name)
+            self._state_raw(self._source_list_state_name)
             if self._source_list_state_name
             else self.control.details.get("sourceList")
         )
@@ -458,16 +531,252 @@ class LoxoneAudioZoneEntity(LoxoneEntity, MediaPlayerEntity):
             return {}
         return _extract_source_slots(parsed)
 
-    async def _async_send_source_slot(self, slot: int) -> None:
-        command_name = (
+    def _source_command_name(self) -> str:
+        return (
             "playZoneFav"
-            if self.control.type in {AUDIO_ZONE_V2_CONTROL_TYPE, CENTRAL_AUDIO_ZONE_CONTROL_TYPE}
+            if self.control.type
+            in {AUDIO_ZONE_V2_CONTROL_TYPE, CENTRAL_AUDIO_ZONE_CONTROL_TYPE}
             else "source"
         )
-        await self.bridge.async_send_action(
-            self.control.uuid_action,
-            f"{command_name}/{slot}",
+
+    async def _async_send_source_slot(self, slot: int) -> None:
+        await self._async_send_action(f"{self._source_command_name()}/{slot}")
+
+    def _state_value_with_fallback(
+        self, state_name: str | None, fallback_state_uuid: str | None
+    ) -> Any:
+        if state_name is not None:
+            value = self.state_value(state_name)
+            if value is not None:
+                return value
+        return self.bridge.state_value(fallback_state_uuid)
+
+    def _audio_server_host(self) -> str | None:
+        state_host = _coerce_text(self.bridge.state_value(self._media_server_host_uuid))
+        if state_host is not None:
+            return state_host
+        if self._media_server is None:
+            return None
+        return _coerce_text(self._media_server.host)
+
+
+def _resolve_media_server(bridge: Any, control: Any) -> Any | None:
+    raw_servers = getattr(bridge, "media_servers_by_uuid_action", None)
+    if not isinstance(raw_servers, Mapping) or not raw_servers:
+        return None
+
+    media_servers = [server for server in raw_servers.values() if server is not None]
+    if not media_servers:
+        return None
+
+    direct = raw_servers.get(control.uuid_action)
+    if direct is not None:
+        return direct
+
+    matched_by_states = _match_media_server_by_state_overlap(control, media_servers)
+    if matched_by_states is not None:
+        return matched_by_states
+
+    details = control.details if isinstance(control.details, Mapping) else {}
+    detail_tokens = _extract_text_tokens(details)
+    host_state_name = first_matching_state_name(control, MEDIA_SERVER_HOST_STATE_CANDIDATES)
+    if host_state_name is not None:
+        runtime_host = _coerce_text(
+            getattr(bridge, "control_state", lambda *_: None)(control, host_state_name)
         )
+        if runtime_host is not None:
+            detail_tokens.add(runtime_host)
+    if detail_tokens:
+        uuid_lookup = {
+            str(uuid_action).casefold(): server
+            for uuid_action, server in raw_servers.items()
+            if server is not None
+        }
+        for token in detail_tokens:
+            by_uuid = uuid_lookup.get(token.casefold())
+            if by_uuid is not None:
+                return by_uuid
+
+        matched_by_host = _match_media_server_by_host(detail_tokens, media_servers)
+        if matched_by_host is not None:
+            return matched_by_host
+
+        matched_by_mac = _match_media_server_by_mac(detail_tokens, media_servers)
+        if matched_by_mac is not None:
+            return matched_by_mac
+
+    if len(media_servers) == 1:
+        return media_servers[0]
+    return None
+
+
+def _first_matching_state_uuid(
+    states: Mapping[str, str], candidates: tuple[str, ...]
+) -> str | None:
+    normalized_to_uuid: dict[str, str] = {}
+    for state_name, state_uuid in states.items():
+        normalized_to_uuid.setdefault(normalize_state_name(state_name), state_uuid)
+
+    for candidate in candidates:
+        matched = normalized_to_uuid.get(normalize_state_name(candidate))
+        if matched:
+            return matched
+    return None
+
+
+def _match_media_server_by_state_overlap(control: Any, media_servers: list[Any]) -> Any | None:
+    control_uuids = {
+        str(state_uuid).strip().casefold()
+        for state_uuid in getattr(control, "states", {}).values()
+        if isinstance(state_uuid, str) and state_uuid.strip()
+    }
+    if not control_uuids:
+        return None
+
+    best_match: Any | None = None
+    best_score = 0
+    is_ambiguous = False
+    for media_server in media_servers:
+        server_states = getattr(media_server, "states", {})
+        if not isinstance(server_states, Mapping):
+            continue
+        server_uuids = {
+            str(state_uuid).strip().casefold()
+            for state_uuid in server_states.values()
+            if isinstance(state_uuid, str) and state_uuid.strip()
+        }
+        overlap = len(control_uuids & server_uuids)
+        if overlap == 0:
+            continue
+        if overlap > best_score:
+            best_match = media_server
+            best_score = overlap
+            is_ambiguous = False
+        elif overlap == best_score:
+            is_ambiguous = True
+
+    if is_ambiguous:
+        return None
+    return best_match
+
+
+def _extract_text_tokens(raw: Any) -> set[str]:
+    tokens: set[str] = set()
+    stack: list[Any] = [raw]
+    while stack:
+        current = stack.pop()
+        if isinstance(current, Mapping):
+            stack.extend(current.values())
+            continue
+        if isinstance(current, list):
+            stack.extend(current)
+            continue
+        if not isinstance(current, str):
+            continue
+        cleaned = current.strip()
+        if cleaned:
+            tokens.add(cleaned)
+    return tokens
+
+
+def _match_media_server_by_host(tokens: set[str], media_servers: list[Any]) -> Any | None:
+    host_hints: set[str] = set()
+    for token in tokens:
+        host_hints.update(_host_match_keys(token))
+    if not host_hints:
+        return None
+
+    matches = [
+        media_server
+        for media_server in media_servers
+        if host_hints & _host_match_keys(getattr(media_server, "host", None))
+    ]
+    if len(matches) == 1:
+        return matches[0]
+    return None
+
+
+def _host_match_keys(value: Any) -> set[str]:
+    if not isinstance(value, str):
+        return set()
+
+    raw = value.strip()
+    if not raw:
+        return set()
+
+    parsed = urlsplit(raw if "://" in raw else f"//{raw}")
+    hostname = parsed.hostname
+    if not hostname:
+        return set()
+
+    normalized_host = hostname.casefold()
+    if "." not in normalized_host and normalized_host != "localhost" and parsed.port is None:
+        try:
+            ipaddress.ip_address(normalized_host)
+        except ValueError:
+            return set()
+    keys = {normalized_host}
+    if parsed.port is not None:
+        keys.add(f"{normalized_host}:{parsed.port}")
+    return keys
+
+
+def _match_media_server_by_mac(tokens: set[str], media_servers: list[Any]) -> Any | None:
+    normalized_hints = {
+        normalized
+        for token in tokens
+        if (normalized := _normalize_mac(token)) is not None
+    }
+    if not normalized_hints:
+        return None
+
+    matches = [
+        media_server
+        for media_server in media_servers
+        if _normalize_mac(getattr(media_server, "mac", None)) in normalized_hints
+    ]
+    if len(matches) == 1:
+        return matches[0]
+    return None
+
+
+def _normalize_mac(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    compact = _MAC_NON_HEX_RE.sub("", value.strip())
+    if len(compact) != 12:
+        return None
+    return compact.upper()
+
+
+def _mask_mac(value: Any) -> str | None:
+    normalized = _normalize_mac(value)
+    if normalized is None:
+        return None
+    return f"{normalized[:6]}****{normalized[-2:]}"
+
+
+def _host_local_hint(value: str) -> bool | None:
+    host_keys = _host_match_keys(value)
+    if not host_keys:
+        return None
+    host_only = next(iter(sorted(host_keys, key=len)))
+    try:
+        host_ip = ipaddress.ip_address(host_only)
+    except ValueError:
+        host_ip = None
+    if host_ip is not None:
+        return bool(host_ip.is_private or host_ip.is_link_local or host_ip.is_loopback)
+    if host_only.endswith(".local") or host_only.endswith(".lan"):
+        return True
+    if host_only == "localhost":
+        return True
+    return None
+
+
+def _set_if_not_none(attrs: dict[str, Any], key: str, value: Any) -> None:
+    if value is not None:
+        attrs[key] = value
 
 
 def _coerce_text(value: Any) -> str | None:

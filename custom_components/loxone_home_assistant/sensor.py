@@ -31,6 +31,9 @@ except ImportError:  # pragma: no cover - fallback for test stubs
     MAX_LENGTH_STATE_STATE = 255
 
 from .const import (
+    ACCESS_DENIED_STATE_CANDIDATES,
+    ACCESS_GRANTED_STATE_CANDIDATES,
+    ACCESS_TYPE_HINTS,
     CLIMATE_AIR_QUALITY_STATE_CANDIDATES,
     CLIMATE_CO2_STATE_CANDIDATES,
     CLIMATE_CONTROL_TYPES,
@@ -41,7 +44,10 @@ from .const import (
     HANDLED_CONTROL_TYPES,
     INTERCOM_HISTORY_STATE_CANDIDATES,
     POWER_SUPPLY_CONTROL_TYPES,
+    PRESENCE_ILLUMINANCE_STATE_CANDIDATES,
+    PRESENCE_SOUND_STATE_CANDIDATES,
     SENSOR_CONTROL_TYPES,
+    TRACKER_CONTROL_TYPES,
 )
 from .entity import (
     LoxoneEntity,
@@ -49,13 +55,16 @@ from .entity import (
     coerce_float,
     first_matching_state_name,
     infer_unit,
+    miniserver_device_info,
     normalize_state_name,
     state_is_boolean,
 )
 from .intercom import (
+    intercom_address_state_name,
     intercom_history_state_name,
     is_intercom_control,
     is_intercom_system_schema_webpage,
+    resolve_intercom_http_url,
 )
 from .models import LoxoneControl
 from .runtime import entry_bridge
@@ -104,8 +113,36 @@ METER_TOTAL_STATE_CANDIDATES = (
 )
 POWER_SUPPLY_KIND_BATTERY = "battery_level"
 POWER_SUPPLY_KIND_REMAINING_TIME = "remaining_time"
+PRESENCE_KIND_ILLUMINANCE = "illuminance"
+PRESENCE_KIND_SOUND_LEVEL = "sound_level"
 CLIMATE_OVERRIDE_ENTRIES_STATE_CANDIDATES = ("overrideEntries",)
 LOCK_STATE_CANDIDATES = ("jLocked", "isLocked")
+UNIVERSAL_EVENT_STATE_CANDIDATES = (
+    "events",
+    "event",
+    "eventLog",
+    "eventHistory",
+    "history",
+)
+ACCESS_INFO_STATE_CANDIDATES = (
+    "codeDate",
+    "historyDate",
+    "deviceState",
+    "keyPadAuthType",
+    "lastCode",
+    "lastId",
+    "lastTag",
+    "lastUser",
+    "nfcLearnResult",
+)
+TIMESTAMP_STATE_CANDIDATES = (
+    "codeDate",
+    "historyDate",
+    "lastBellTimestamp",
+    "lastEventTimestamp",
+    "eventTime",
+    "timestamp",
+)
 INTERCOM_HISTORY_DETAIL_PATHS = (
     "lastBellEvents",
     "securedDetails.lastBellEvents",
@@ -113,6 +150,11 @@ INTERCOM_HISTORY_DETAIL_PATHS = (
 INTERCOM_EVENT_COLLECTION_PATHS = (
     "events",
     "items",
+    "entries",
+    "records",
+    "answers",
+    "calls",
+    "ringEvents",
     "history",
     "lastBellEvents",
     "value",
@@ -126,15 +168,56 @@ INTERCOM_EVENT_IMAGE_KEY_CANDIDATES = (
     "photo",
     "thumb",
     "thumbnail",
+    "thumbnailUrl",
+    "snapshotUrl",
+    "photoUrl",
     "liveImageUrl",
 )
 INTERCOM_EVENT_TIMESTAMP_KEY_CANDIDATES = (
     "timestamp",
+    "ts",
     "time",
     "date",
+    "datetime",
+    "dateTime",
+    "createdAt",
     "created",
     "eventTime",
     "lastBellTimestamp",
+)
+SYSTEM_DIAGNOSTIC_METRICS = (
+    {
+        "key": "numtasks",
+        "name": "System Tasks",
+        "unit": None,
+        "icon": "mdi:playlist-check",
+        "integer": True,
+        "state_class": SensorStateClass.MEASUREMENT,
+    },
+    {
+        "key": "cpu",
+        "name": "CPU Load",
+        "unit": "%",
+        "icon": "mdi:cpu-64-bit",
+        "integer": False,
+        "state_class": SensorStateClass.MEASUREMENT,
+    },
+    {
+        "key": "heap",
+        "name": "Memory Usage",
+        "unit": "%",
+        "icon": "mdi:memory",
+        "integer": False,
+        "state_class": SensorStateClass.MEASUREMENT,
+    },
+    {
+        "key": "ints",
+        "name": "System Interrupts",
+        "unit": None,
+        "icon": "mdi:pulse",
+        "integer": True,
+        "state_class": SensorStateClass.TOTAL_INCREASING,
+    },
 )
 
 _DURATION_UNIT_ALIASES = {
@@ -164,11 +247,53 @@ CO2_STATE_KEYS = {
 AIR_QUALITY_STATE_KEYS = {
     normalize_state_name(value) for value in CLIMATE_AIR_QUALITY_STATE_CANDIDATES
 }
+PRESENCE_ILLUMINANCE_STATE_KEYS = {
+    normalize_state_name(value) for value in PRESENCE_ILLUMINANCE_STATE_CANDIDATES
+}
+PRESENCE_SOUND_STATE_KEYS = {
+    normalize_state_name(value) for value in PRESENCE_SOUND_STATE_CANDIDATES
+}
+PRESENCE_BINARY_STATE_KEYS = {
+    normalize_state_name(value)
+    for value in (
+        "active",
+        "presence",
+        "motion",
+        "alarm",
+        "value",
+        "isActive",
+        "enabled",
+    )
+}
+PRESENCE_ILLUMINANCE_HINTS = ("illum", "bright", "lux", "lumi", "light")
+PRESENCE_SOUND_HINTS = ("noise", "sound", "acoust", "loud", "db", "decibel")
+CLIMATE_METADATA_STATE_HINTS = (
+    "mode",
+    "status",
+    "fan",
+    "capabil",
+    "window",
+    "lock",
+    "override",
+    "boundary",
+    "info",
+)
+CLIMATE_TEMPERATURE_STATE_HINTS = ("temp", "temperature")
 METER_ACTUAL_STATE_KEYS = {
     normalize_state_name(value) for value in METER_ACTUAL_STATE_CANDIDATES
 }
 METER_TOTAL_STATE_KEYS = {
     normalize_state_name(value) for value in METER_TOTAL_STATE_CANDIDATES
+}
+ACCESS_TYPE_HINT_KEYS = tuple(hint.casefold() for hint in ACCESS_TYPE_HINTS)
+UNIVERSAL_EVENT_STATE_KEYS = {
+    normalize_state_name(value) for value in UNIVERSAL_EVENT_STATE_CANDIDATES
+}
+ACCESS_INFO_STATE_KEYS = {
+    normalize_state_name(value) for value in ACCESS_INFO_STATE_CANDIDATES
+}
+TIMESTAMP_STATE_KEYS = {
+    normalize_state_name(value) for value in TIMESTAMP_STATE_CANDIDATES
 }
 STATE_HISTORY_SEPARATOR = "|"
 STATE_DETAIL_SEPARATOR = "\x14"
@@ -419,6 +544,123 @@ def _find_meter_total_state(control: LoxoneControl) -> str | None:
     return None
 
 
+def _is_presence_detector_control(control: LoxoneControl) -> bool:
+    return normalize_state_name(control.type).startswith(
+        normalize_state_name("PresenceDetector")
+    )
+
+
+def _is_presence_illuminance_state_name(state_name: str) -> bool:
+    normalized = normalize_state_name(state_name)
+    if normalized in PRESENCE_ILLUMINANCE_STATE_KEYS:
+        return True
+    return any(fragment in normalized for fragment in PRESENCE_ILLUMINANCE_HINTS)
+
+
+def _is_presence_sound_state_name(state_name: str) -> bool:
+    normalized = normalize_state_name(state_name)
+    if normalized in PRESENCE_SOUND_STATE_KEYS:
+        return True
+    return any(fragment in normalized for fragment in PRESENCE_SOUND_HINTS)
+
+
+def _find_presence_illuminance_state(
+    control: LoxoneControl, excluded: set[str] | None = None
+) -> str | None:
+    excluded = excluded or set()
+
+    state_name = first_matching_state_name(control, PRESENCE_ILLUMINANCE_STATE_CANDIDATES)
+    if (
+        state_name is not None
+        and state_name not in excluded
+        and normalize_state_name(state_name) not in PRESENCE_BINARY_STATE_KEYS
+    ):
+        return state_name
+
+    for state_name in control.states:
+        if (
+            state_name in excluded
+            or normalize_state_name(state_name) in PRESENCE_BINARY_STATE_KEYS
+        ):
+            continue
+        if _is_presence_illuminance_state_name(state_name):
+            return state_name
+
+    for state_name in control.states:
+        if (
+            state_name in excluded
+            or normalize_state_name(state_name) in PRESENCE_BINARY_STATE_KEYS
+        ):
+            continue
+        unit = _normalized_unit(infer_unit(control, state_name))
+        if unit in {"lx", "lux"}:
+            return state_name
+    return None
+
+
+def _find_presence_sound_state(
+    control: LoxoneControl, excluded: set[str] | None = None
+) -> str | None:
+    excluded = excluded or set()
+
+    state_name = first_matching_state_name(control, PRESENCE_SOUND_STATE_CANDIDATES)
+    if (
+        state_name is not None
+        and state_name not in excluded
+        and normalize_state_name(state_name) not in PRESENCE_BINARY_STATE_KEYS
+    ):
+        return state_name
+
+    for state_name in control.states:
+        if (
+            state_name in excluded
+            or normalize_state_name(state_name) in PRESENCE_BINARY_STATE_KEYS
+        ):
+            continue
+        if _is_presence_sound_state_name(state_name):
+            return state_name
+
+    for state_name in control.states:
+        if (
+            state_name in excluded
+            or normalize_state_name(state_name) in PRESENCE_BINARY_STATE_KEYS
+        ):
+            continue
+        unit = _normalized_unit(infer_unit(control, state_name))
+        if unit in {"db", "db(a)", "dba"}:
+            return state_name
+    return None
+
+
+def _build_presence_detector_sensors(bridge, control: LoxoneControl) -> list[SensorEntity]:
+    illuminance_state = _find_presence_illuminance_state(control)
+    excluded_states = {state_name for state_name in (illuminance_state,) if state_name}
+    sound_state = _find_presence_sound_state(control, excluded=excluded_states)
+
+    entities: list[SensorEntity] = []
+    if illuminance_state is not None:
+        entities.append(
+            LoxonePresenceAnalogSensor(
+                bridge,
+                control,
+                illuminance_state,
+                "Illuminance",
+                PRESENCE_KIND_ILLUMINANCE,
+            )
+        )
+    if sound_state is not None:
+        entities.append(
+            LoxonePresenceAnalogSensor(
+                bridge,
+                control,
+                sound_state,
+                "Sound Level",
+                PRESENCE_KIND_SOUND_LEVEL,
+            )
+        )
+    return entities
+
+
 def _find_meter_actual_state(control: LoxoneControl, excluded: set[str] | None = None) -> str | None:
     excluded = excluded or set()
 
@@ -483,105 +725,274 @@ def _build_meter_sensors(bridge, control: LoxoneControl) -> list["LoxoneMeterSen
     return []
 
 
+def _matching_universal_event_states(control: LoxoneControl) -> list[str]:
+    event_states: list[str] = []
+    for state_name in control.states:
+        if state_is_boolean(control, state_name):
+            continue
+        if normalize_state_name(state_name) in UNIVERSAL_EVENT_STATE_KEYS:
+            event_states.append(state_name)
+    return event_states
+
+
+def _build_universal_event_sensors(
+    bridge,
+    control: LoxoneControl,
+) -> tuple[list[SensorEntity], set[str]]:
+    entities: list[SensorEntity] = []
+    covered_state_names: set[str] = set()
+    for state_name in _matching_universal_event_states(control):
+        entities.append(LoxoneEventStateSensor(bridge, control, state_name))
+        covered_state_names.add(state_name)
+    return entities, covered_state_names
+
+
+def _build_tracker_sensors(
+    bridge,
+    control: LoxoneControl,
+    excluded_state_names: set[str] | None = None,
+) -> list[SensorEntity]:
+    excluded = excluded_state_names or set()
+    entities: list[SensorEntity] = []
+    for state_name in control.states:
+        if state_name in excluded or state_is_boolean(control, state_name):
+            continue
+        entities.append(LoxoneEventStateSensor(bridge, control, state_name))
+
+    if entities:
+        return entities
+
+    for state_name in control.states:
+        if state_name in excluded:
+            continue
+        return [LoxoneNamedStateSensor(bridge, control, state_name)]
+
+    return []
+
+
+def _is_access_like_control(control: LoxoneControl) -> bool:
+    normalized_type = control.type.casefold()
+    normalized_name = control.name.casefold()
+    if any(hint in normalized_type or hint in normalized_name for hint in ACCESS_TYPE_HINT_KEYS):
+        return True
+
+    if (
+        first_matching_state_name(control, ACCESS_GRANTED_STATE_CANDIDATES) is not None
+        and first_matching_state_name(control, ACCESS_DENIED_STATE_CANDIDATES) is not None
+    ):
+        return True
+
+    return any(
+        normalize_state_name(state_name) in ACCESS_INFO_STATE_KEYS
+        for state_name in control.states
+    )
+
+
+def _build_access_state_sensors(
+    bridge,
+    control: LoxoneControl,
+    excluded_state_names: set[str] | None = None,
+) -> list["LoxoneAccessStateSensor"]:
+    if not _is_access_like_control(control):
+        return []
+
+    excluded = excluded_state_names or set()
+    entities: list[LoxoneAccessStateSensor] = []
+    for state_name in control.states:
+        if state_name in excluded or state_is_boolean(control, state_name):
+            continue
+        entities.append(LoxoneAccessStateSensor(bridge, control, state_name))
+    return entities
+
+
+def _first_non_boolean_state_name(
+    control: LoxoneControl,
+    excluded_state_names: set[str] | None = None,
+) -> str | None:
+    excluded = excluded_state_names or set()
+    for state_name in control.states:
+        if state_name in excluded:
+            continue
+        if state_is_boolean(control, state_name):
+            continue
+        return state_name
+    return None
+
+
+def _build_intercom_sensors(bridge, control: LoxoneControl) -> list[SensorEntity]:
+    history_state_name = intercom_history_state_name(control)
+    if history_state_name is None:
+        history_state_name = first_matching_state_name(
+            control,
+            INTERCOM_HISTORY_STATE_CANDIDATES,
+        )
+    if history_state_name is None and not _has_intercom_history_detail(control):
+        return []
+    return [LoxoneIntercomHistorySensor(bridge, control, history_state_name)]
+
+
+def _build_power_supply_sensors(bridge, control: LoxoneControl) -> list[SensorEntity]:
+    battery_state = _find_power_supply_battery_state(control)
+    remaining_time_state = _find_power_supply_remaining_time_state(control)
+
+    entities: list[SensorEntity] = []
+    if battery_state is not None:
+        entities.append(
+            LoxonePowerSupplySensor(
+                bridge,
+                control,
+                battery_state,
+                "Battery level",
+                POWER_SUPPLY_KIND_BATTERY,
+            )
+        )
+
+    if remaining_time_state is not None and remaining_time_state != battery_state:
+        entities.append(
+            LoxonePowerSupplySensor(
+                bridge,
+                control,
+                remaining_time_state,
+                "Remaining time",
+                POWER_SUPPLY_KIND_REMAINING_TIME,
+            )
+        )
+
+    if entities:
+        return entities
+
+    fallback_state = _first_non_boolean_state_name(control)
+    if fallback_state is None:
+        return []
+    return [
+        LoxonePowerSupplySensor(
+            bridge,
+            control,
+            fallback_state,
+            fallback_state,
+            "",
+        )
+    ]
+
+
+def _build_diagnostic_sensors(
+    bridge,
+    control: LoxoneControl,
+    excluded_state_names: set[str] | None = None,
+) -> list[SensorEntity]:
+    excluded = excluded_state_names or set()
+    return [
+        LoxoneDiagnosticSensor(bridge, control, state_name)
+        for state_name in control.states
+        if state_name not in excluded and not state_is_boolean(control, state_name)
+    ]
+
+
+def _build_control_sensor_entities(bridge, control: LoxoneControl) -> list[SensorEntity]:
+    if control.type == "Webpage":
+        return [
+            LoxoneWebpageSensor(
+                bridge,
+                control,
+                enabled_default=not is_intercom_system_schema_webpage(
+                    control,
+                    bridge.controls_by_action,
+                ),
+            )
+        ]
+
+    if is_intercom_control(control):
+        return _build_intercom_sensors(bridge, control)
+
+    entities, covered_state_names = _build_universal_event_sensors(bridge, control)
+
+    if control.type == "Meter":
+        entities.extend(_build_meter_sensors(bridge, control))
+        return entities
+
+    if control.type in POWER_SUPPLY_CONTROL_TYPES:
+        entities.extend(_build_power_supply_sensors(bridge, control))
+        return entities
+
+    if control.type in CLIMATE_CONTROL_TYPES:
+        entities.extend(_build_climate_state_sensors(bridge, control))
+        return entities
+
+    if _is_presence_detector_control(control):
+        entities.extend(_build_presence_detector_sensors(bridge, control))
+        return entities
+
+    if control.type in TRACKER_CONTROL_TYPES:
+        entities.extend(
+            _build_tracker_sensors(
+                bridge,
+                control,
+                excluded_state_names=covered_state_names,
+            )
+        )
+        return entities
+
+    if control.type in SENSOR_CONTROL_TYPES:
+        entities.append(LoxonePrimarySensor(bridge, control))
+        return entities
+
+    access_entities = _build_access_state_sensors(
+        bridge,
+        control,
+        excluded_state_names=covered_state_names,
+    )
+    if access_entities:
+        entities.extend(access_entities)
+        return entities
+
+    if control.type in HANDLED_CONTROL_TYPES:
+        return entities
+
+    entities.extend(
+        _build_diagnostic_sensors(
+            bridge,
+            control,
+            excluded_state_names=covered_state_names,
+        )
+    )
+    return entities
+
+
 async def async_setup_entry(
     hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
 ) -> None:
     bridge = entry_bridge(hass, entry)
     entities: list[SensorEntity] = []
+    if _supports_miniserver_system_diagnostics(bridge):
+        entities.extend(_build_miniserver_system_sensors(bridge))
 
     for control in bridge.controls:
-        if control.type == "Webpage":
-            entities.append(
-                LoxoneWebpageSensor(
-                    bridge,
-                    control,
-                    enabled_default=not is_intercom_system_schema_webpage(
-                        control,
-                        bridge.controls_by_action,
-                    ),
-                )
-            )
-            continue
-
-        if is_intercom_control(control):
-            history_state_name = intercom_history_state_name(control)
-            if history_state_name is None:
-                history_state_name = first_matching_state_name(
-                    control,
-                    INTERCOM_HISTORY_STATE_CANDIDATES,
-                )
-            if history_state_name is not None or _has_intercom_history_detail(control):
-                entities.append(
-                    LoxoneIntercomHistorySensor(
-                        bridge,
-                        control,
-                        history_state_name,
-                    )
-                )
-            continue
-
-        if control.type == "Meter":
-            entities.extend(_build_meter_sensors(bridge, control))
-            continue
-
-        if control.type in POWER_SUPPLY_CONTROL_TYPES:
-            battery_state = _find_power_supply_battery_state(control)
-            if battery_state is not None:
-                entities.append(
-                    LoxonePowerSupplySensor(
-                        bridge,
-                        control,
-                        battery_state,
-                        "Battery level",
-                        POWER_SUPPLY_KIND_BATTERY,
-                    )
-                )
-
-            remaining_time_state = _find_power_supply_remaining_time_state(control)
-            if remaining_time_state is not None and remaining_time_state != battery_state:
-                entities.append(
-                    LoxonePowerSupplySensor(
-                        bridge,
-                        control,
-                        remaining_time_state,
-                        "Remaining time",
-                        POWER_SUPPLY_KIND_REMAINING_TIME,
-                    )
-                )
-
-            if battery_state is None and remaining_time_state is None:
-                for state_name in control.states:
-                    if state_is_boolean(control, state_name):
-                        continue
-                    entities.append(
-                        LoxonePowerSupplySensor(
-                            bridge,
-                            control,
-                            state_name,
-                            state_name,
-                            "",
-                        )
-                    )
-                    break
-            continue
-
-        if control.type in CLIMATE_CONTROL_TYPES:
-            entities.extend(_build_climate_state_sensors(bridge, control))
-            continue
-
-        if control.type in SENSOR_CONTROL_TYPES:
-            entities.append(LoxonePrimarySensor(bridge, control))
-            continue
-
-        if control.type in HANDLED_CONTROL_TYPES:
-            continue
-
-        for state_name in control.states:
-            if state_is_boolean(control, state_name):
-                continue
-            entities.append(LoxoneDiagnosticSensor(bridge, control, state_name))
+        entities.extend(_build_control_sensor_entities(bridge, control))
 
     async_add_entities(entities)
+
+
+def _supports_miniserver_system_diagnostics(bridge) -> bool:
+    return (
+        callable(getattr(bridge, "system_stat_state_uuid", None))
+        and callable(getattr(bridge, "system_stat_value", None))
+        and callable(getattr(bridge, "system_stat_command", None))
+    )
+
+
+def _build_miniserver_system_sensors(bridge) -> list[SensorEntity]:
+    return [
+        LoxoneMiniserverSystemSensor(
+            bridge=bridge,
+            metric_key=spec["key"],
+            name_suffix=spec["name"],
+            native_unit=spec["unit"],
+            icon=spec["icon"],
+            integer_value=spec["integer"],
+            state_class=spec["state_class"],
+        )
+        for spec in SYSTEM_DIAGNOSTIC_METRICS
+    ]
 
 
 def _build_climate_state_sensors(bridge, control: LoxoneControl) -> list[SensorEntity]:
@@ -646,23 +1057,174 @@ def _climate_state_suffix(state_name: str) -> str:
     return humanized[0].upper() + humanized[1:]
 
 
+def _is_climate_metadata_state_name(state_name: str) -> bool:
+    normalized = normalize_state_name(state_name)
+    return any(fragment in normalized for fragment in CLIMATE_METADATA_STATE_HINTS)
+
+
+def _is_likely_climate_temperature_state_name(state_name: str) -> bool:
+    normalized = normalize_state_name(state_name)
+    if not any(fragment in normalized for fragment in CLIMATE_TEMPERATURE_STATE_HINTS):
+        return False
+    return not _is_climate_metadata_state_name(state_name)
+
+
+def _measurement_state_class(value: Any) -> SensorStateClass | None:
+    return SensorStateClass.MEASUREMENT if coerce_float(value) is not None else None
+
+
+class LoxoneSingleStateSensor(LoxoneEntity, SensorEntity):
+    """Base sensor entity bound to one Loxone state."""
+
+    def __init__(
+        self,
+        bridge,
+        control: LoxoneControl,
+        state_name: str,
+        suffix: str | None = None,
+    ) -> None:
+        super().__init__(bridge, control, state_name if suffix is None else suffix)
+        self._state_name = state_name
+
+    def relevant_state_uuids(self):
+        state_uuid = self.control.state_uuid(self._state_name)
+        return [state_uuid] if state_uuid else []
+
+
 class LoxonePrimarySensor(LoxoneEntity, SensorEntity):
     """Primary read-only sensor for one Loxone control."""
 
+    def _primary_state_name(self) -> str | None:
+        state_name, _ = control_primary_state(self.control)
+        return state_name
+
     @property
     def native_value(self) -> Any:
-        state_name, _ = control_primary_state(self.control)
+        state_name = self._primary_state_name()
         if state_name is None:
             return None
         return _sensor_native_value(self.state_value(state_name))
 
     @property
     def native_unit_of_measurement(self) -> str | None:
-        state_name, _ = control_primary_state(self.control)
+        state_name = self._primary_state_name()
+        if state_name is None:
+            return None
         return infer_unit(self.control, state_name)
 
+    @property
+    def device_class(self) -> SensorDeviceClass | None:
+        unit = self.native_unit_of_measurement
+        if _is_energy_unit(unit):
+            return SensorDeviceClass.ENERGY
+        if _is_power_unit(unit):
+            return SensorDeviceClass.POWER
+        return None
 
-class LoxoneMeterSensor(LoxoneEntity, SensorEntity):
+    @property
+    def state_class(self) -> SensorStateClass | None:
+        state_name = self._primary_state_name()
+        if state_name is None:
+            return None
+
+        if coerce_float(self.state_value(state_name)) is None:
+            return None
+
+        unit = self.native_unit_of_measurement
+        if _is_power_unit(unit):
+            return SensorStateClass.MEASUREMENT
+
+        if _is_energy_unit(unit):
+            normalized_state_name = normalize_state_name(state_name)
+            if any(
+                fragment in normalized_state_name
+                for fragment in ("actual", "current", "power", "instant", "moment")
+            ):
+                return SensorStateClass.MEASUREMENT
+            return SensorStateClass.TOTAL_INCREASING
+
+        return None
+
+
+class LoxoneMiniserverSystemSensor(SensorEntity):
+    """Hub-level Miniserver diagnostics sensor from `dev/sys/*` commands."""
+
+    _attr_has_entity_name = True
+    _attr_should_poll = False
+
+    def __init__(
+        self,
+        bridge,
+        metric_key: str,
+        name_suffix: str,
+        native_unit: str | None,
+        icon: str,
+        integer_value: bool,
+        state_class: SensorStateClass | None,
+    ) -> None:
+        self.bridge = bridge
+        self._metric_key = metric_key
+        self._state_uuid = bridge.system_stat_state_uuid(metric_key)
+        self._native_unit = native_unit
+        self._integer_value = integer_value
+        self._state_class = state_class
+        self._remove_listener = None
+        self._attr_name = name_suffix
+        self._attr_unique_id = f"{bridge.serial}-system-{metric_key}"
+        self._attr_icon = icon
+
+    @property
+    def available(self) -> bool:
+        return self.bridge.available
+
+    @property
+    def device_info(self):
+        return miniserver_device_info(self.bridge)
+
+    async def async_added_to_hass(self) -> None:
+        self._remove_listener = self.bridge.add_listener(
+            self._handle_bridge_update,
+            [self._state_uuid],
+        )
+
+    async def async_will_remove_from_hass(self) -> None:
+        if self._remove_listener:
+            self._remove_listener()
+            self._remove_listener = None
+
+    def _handle_bridge_update(self) -> None:
+        self.async_write_ha_state()
+
+    @property
+    def native_value(self) -> int | float | None:
+        value = self.bridge.system_stat_value(self._metric_key)
+        numeric = coerce_float(value)
+        if numeric is None:
+            return None
+        if self._integer_value:
+            return int(numeric)
+        return numeric
+
+    @property
+    def native_unit_of_measurement(self) -> str | None:
+        return self._native_unit
+
+    @property
+    def state_class(self) -> SensorStateClass | None:
+        return self._state_class
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        attrs: dict[str, Any] = {
+            "metric_key": self._metric_key,
+        }
+        command = self.bridge.system_stat_command(self._metric_key)
+        if command:
+            attrs["webservice_command"] = command
+        return attrs
+
+
+class LoxoneMeterSensor(LoxoneSingleStateSensor):
     """Specialized meter sensor."""
 
     def __init__(
@@ -672,14 +1234,9 @@ class LoxoneMeterSensor(LoxoneEntity, SensorEntity):
         state_name: str,
         meter_kind: str | None = None,
     ) -> None:
-        self._state_name = state_name
         self._meter_kind = meter_kind or _meter_state_kind_from_name(state_name)
         entity_suffix = self._meter_kind if meter_kind is not None else state_name
-        super().__init__(bridge, control, entity_suffix)
-
-    def relevant_state_uuids(self):
-        state_uuid = self.control.state_uuid(self._state_name)
-        return [state_uuid] if state_uuid else []
+        super().__init__(bridge, control, state_name, entity_suffix)
 
     @property
     def native_value(self) -> float | None:
@@ -714,7 +1271,7 @@ class LoxoneMeterSensor(LoxoneEntity, SensorEntity):
         )
 
 
-class LoxonePowerSupplySensor(LoxoneEntity, SensorEntity):
+class LoxonePowerSupplySensor(LoxoneSingleStateSensor):
     """PowerSupply-related sensor."""
 
     def __init__(
@@ -725,13 +1282,8 @@ class LoxonePowerSupplySensor(LoxoneEntity, SensorEntity):
         suffix: str,
         kind: str,
     ) -> None:
-        super().__init__(bridge, control, suffix)
-        self._state_name = state_name
+        super().__init__(bridge, control, state_name, suffix)
         self._kind = kind
-
-    def relevant_state_uuids(self):
-        state_uuid = self.control.state_uuid(self._state_name)
-        return [state_uuid] if state_uuid else []
 
     @property
     def native_value(self) -> Any:
@@ -762,14 +1314,76 @@ class LoxonePowerSupplySensor(LoxoneEntity, SensorEntity):
 
     @property
     def state_class(self) -> SensorStateClass | None:
-        return (
-            SensorStateClass.MEASUREMENT
-            if coerce_float(self.state_value(self._state_name)) is not None
-            else None
-        )
+        return _measurement_state_class(self.state_value(self._state_name))
 
 
-class LoxoneClimateOverrideEntriesSensor(LoxoneEntity, SensorEntity):
+class LoxonePresenceAnalogSensor(LoxoneSingleStateSensor):
+    """Illuminance and sound-level sensors for PresenceDetector controls."""
+
+    def __init__(
+        self,
+        bridge,
+        control: LoxoneControl,
+        state_name: str,
+        suffix: str,
+        kind: str,
+    ) -> None:
+        super().__init__(bridge, control, state_name, suffix)
+        self._kind = kind
+        if self._kind == PRESENCE_KIND_ILLUMINANCE:
+            self._attr_icon = "mdi:brightness-6"
+        elif self._kind == PRESENCE_KIND_SOUND_LEVEL:
+            self._attr_icon = "mdi:volume-high"
+
+    @property
+    def native_value(self) -> Any:
+        return _sensor_native_value(self.state_value(self._state_name))
+
+    @property
+    def native_unit_of_measurement(self) -> str | None:
+        unit = infer_unit(self.control, self._state_name)
+        normalized_unit = _normalized_unit(unit)
+
+        if self._kind == PRESENCE_KIND_ILLUMINANCE:
+            if normalized_unit in {"db", "db(a)", "dba"}:
+                return "lx"
+            if normalized_unit == "lux":
+                return "lx"
+            return unit or "lx"
+
+        if self._kind == PRESENCE_KIND_SOUND_LEVEL:
+            if normalized_unit in {"lx", "lux"}:
+                return "dB"
+            return unit or "dB"
+
+        return unit
+
+    @property
+    def device_class(self) -> SensorDeviceClass | None:
+        if self._kind == PRESENCE_KIND_ILLUMINANCE:
+            return getattr(SensorDeviceClass, "ILLUMINANCE", None)
+
+        if self._kind == PRESENCE_KIND_SOUND_LEVEL:
+            return getattr(
+                SensorDeviceClass,
+                "SOUND_PRESSURE",
+                getattr(SensorDeviceClass, "SOUND_LEVEL", None),
+            )
+        return None
+
+    @property
+    def state_class(self) -> SensorStateClass | None:
+        return _measurement_state_class(self.state_value(self._state_name))
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        attrs = super().extra_state_attributes
+        attrs["presence_sensor_state"] = self._state_name
+        attrs["presence_sensor_kind"] = self._kind
+        return attrs
+
+
+class LoxoneClimateOverrideEntriesSensor(LoxoneSingleStateSensor):
     """Count and expose active climate override entries."""
 
     _attr_icon = "mdi:playlist-edit"
@@ -780,12 +1394,7 @@ class LoxoneClimateOverrideEntriesSensor(LoxoneEntity, SensorEntity):
         control: LoxoneControl,
         state_name: str,
     ) -> None:
-        super().__init__(bridge, control, "Override Entries")
-        self._state_name = state_name
-
-    def relevant_state_uuids(self):
-        state_uuid = self.control.state_uuid(self._state_name)
-        return [state_uuid] if state_uuid else []
+        super().__init__(bridge, control, state_name, "Override Entries")
 
     @property
     def native_value(self) -> int:
@@ -820,7 +1429,7 @@ class LoxoneClimateOverrideEntriesSensor(LoxoneEntity, SensorEntity):
         return attrs
 
 
-class LoxoneClimateStateSensor(LoxoneEntity, SensorEntity):
+class LoxoneClimateStateSensor(LoxoneSingleStateSensor):
     """Additional sensor for climate-related states beyond temperature."""
 
     def __init__(
@@ -830,12 +1439,7 @@ class LoxoneClimateStateSensor(LoxoneEntity, SensorEntity):
         state_name: str,
         suffix: str,
     ) -> None:
-        super().__init__(bridge, control, suffix)
-        self._state_name = state_name
-
-    def relevant_state_uuids(self):
-        state_uuid = self.control.state_uuid(self._state_name)
-        return [state_uuid] if state_uuid else []
+        super().__init__(bridge, control, state_name, suffix)
 
     @property
     def native_value(self) -> Any:
@@ -848,7 +1452,15 @@ class LoxoneClimateStateSensor(LoxoneEntity, SensorEntity):
     def native_unit_of_measurement(self) -> str | None:
         if _is_override_entries_state_name(self._state_name):
             return None
-        return infer_unit(self.control, self._state_name)
+        if _is_climate_metadata_state_name(self._state_name):
+            return None
+
+        unit = infer_unit(self.control, self._state_name)
+        if unit is None:
+            return None
+        if "°" in unit and not _is_likely_climate_temperature_state_name(self._state_name):
+            return None
+        return unit
 
     @property
     def device_class(self) -> SensorDeviceClass | None:
@@ -865,11 +1477,23 @@ class LoxoneClimateStateSensor(LoxoneEntity, SensorEntity):
 
     @property
     def state_class(self) -> SensorStateClass | None:
-        return (
-            SensorStateClass.MEASUREMENT
-            if coerce_float(self.state_value(self._state_name)) is not None
-            else None
-        )
+        if coerce_float(self.state_value(self._state_name)) is None:
+            return None
+
+        normalized = normalize_state_name(self._state_name)
+        if normalized in HUMIDITY_STATE_KEYS:
+            return SensorStateClass.MEASUREMENT
+        if normalized in CO2_STATE_KEYS:
+            return SensorStateClass.MEASUREMENT
+        if normalized in AIR_QUALITY_STATE_KEYS:
+            return SensorStateClass.MEASUREMENT
+        if normalized == normalize_state_name("voc"):
+            return SensorStateClass.MEASUREMENT
+        if _is_climate_metadata_state_name(self._state_name):
+            return None
+        if self.native_unit_of_measurement is None:
+            return None
+        return SensorStateClass.MEASUREMENT
 
 
 class LoxoneIntercomHistorySensor(LoxoneEntity, SensorEntity):
@@ -886,6 +1510,7 @@ class LoxoneIntercomHistorySensor(LoxoneEntity, SensorEntity):
     ) -> None:
         super().__init__(bridge, control, "History")
         self._history_state_name = history_state_name
+        self._address_state_name = intercom_address_state_name(control)
         self._events_url: str | None = None
         self._latest_event_time: datetime | None = None
         self._latest_event_image_url: str | None = None
@@ -908,10 +1533,28 @@ class LoxoneIntercomHistorySensor(LoxoneEntity, SensorEntity):
         self.async_schedule_update_ha_state(True)
 
     async def async_update(self) -> None:
+        state_payload = _intercom_history_payload_from_state(
+            self.bridge,
+            self.control,
+            self._history_state_name,
+        )
+        if state_payload is not None:
+            normalized_events = _extract_intercom_events(
+                state_payload,
+                self.bridge,
+                self.control,
+                self._address_state_value(),
+            )
+            if normalized_events:
+                self._events_url = None
+                self._apply_normalized_events(normalized_events)
+                return
+
         events_url = _resolve_intercom_history_url(
             self.bridge,
             self.control,
             self._history_state_name,
+            self._address_state_value(),
         )
         self._events_url = events_url
         if events_url is None:
@@ -928,7 +1571,20 @@ class LoxoneIntercomHistorySensor(LoxoneEntity, SensorEntity):
         if payload is None:
             return
 
-        normalized_events = _extract_intercom_events(payload, self.bridge)
+        normalized_events = _extract_intercom_events(
+            payload,
+            self.bridge,
+            self.control,
+            self._address_state_value(),
+        )
+        self._apply_normalized_events(normalized_events)
+
+    def _address_state_value(self) -> Any:
+        if self._address_state_name is None:
+            return None
+        return self.bridge.control_state(self.control, self._address_state_name)
+
+    def _apply_normalized_events(self, normalized_events: list[dict[str, Any]]) -> None:
         self._event_count = len(normalized_events)
         self._recent_image_urls = [
             event["image_url"]
@@ -969,31 +1625,71 @@ class LoxoneIntercomHistorySensor(LoxoneEntity, SensorEntity):
         return attrs
 
 
-class LoxoneDiagnosticSensor(LoxoneEntity, SensorEntity):
-    """Disabled-by-default raw state sensor for unsupported control types."""
-
-    _attr_entity_registry_enabled_default = False
+class LoxoneNamedStateSensor(LoxoneSingleStateSensor):
+    """Read-only sensor exposing one selected control state."""
 
     def __init__(self, bridge, control: LoxoneControl, state_name: str) -> None:
         super().__init__(bridge, control, state_name)
-        self._state_name = state_name
-
-    def relevant_state_uuids(self):
-        state_uuid = self.control.state_uuid(self._state_name)
-        return [state_uuid] if state_uuid else []
 
     @property
     def native_value(self) -> Any:
         value = self.state_value(self._state_name)
+        timestamp_value = _timestamp_state_value(self._state_name, value)
+        if timestamp_value is not None:
+            return timestamp_value
         if _is_override_entries_state_name(self._state_name):
             return len(_coerce_override_entries(value))
         return _sensor_native_value(value)
 
     @property
     def native_unit_of_measurement(self) -> str | None:
+        value = self.state_value(self._state_name)
+        if _timestamp_state_value(self._state_name, value) is not None:
+            return None
         if _is_override_entries_state_name(self._state_name):
             return None
         return infer_unit(self.control, self._state_name)
+
+    @property
+    def device_class(self) -> SensorDeviceClass | None:
+        value = self.state_value(self._state_name)
+        if _timestamp_state_value(self._state_name, value) is not None:
+            return getattr(SensorDeviceClass, "TIMESTAMP", None)
+        return None
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        attrs = super().extra_state_attributes
+        attrs["state_name"] = self._state_name
+        return attrs
+
+
+class LoxoneEventStateSensor(LoxoneNamedStateSensor):
+    """Always-on event/history sensor created for universal event states."""
+
+    _attr_icon = "mdi:history"
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        attrs = super().extra_state_attributes
+        attrs["event_state"] = self._state_name
+        return attrs
+
+
+class LoxoneAccessStateSensor(LoxoneNamedStateSensor):
+    """Always-on access sensor exposing last-code/user/tag style states."""
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        attrs = super().extra_state_attributes
+        attrs["access_state"] = self._state_name
+        return attrs
+
+
+class LoxoneDiagnosticSensor(LoxoneNamedStateSensor):
+    """Disabled-by-default raw state sensor for unsupported control types."""
+
+    _attr_entity_registry_enabled_default = False
 
 
 class LoxoneWebpageSensor(LoxoneEntity, SensorEntity):
@@ -1025,16 +1721,51 @@ def _resolve_intercom_history_url(
     bridge,
     control: LoxoneControl,
     history_state_name: str | None,
+    address_value: Any = None,
 ) -> str | None:
     from_state = (
         bridge.control_state(control, history_state_name)
         if history_state_name is not None
         else None
     )
-    resolved_state = bridge.resolve_http_url(_coerce_text(from_state))
+    resolved_state = resolve_intercom_http_url(
+        bridge,
+        control,
+        from_state,
+        address_value=address_value,
+    )
     if resolved_state is not None:
         return resolved_state
-    return _resolve_control_detail_url(bridge, control, INTERCOM_HISTORY_DETAIL_PATHS)
+    return _resolve_control_detail_url(
+        bridge,
+        control,
+        INTERCOM_HISTORY_DETAIL_PATHS,
+        address_value=address_value,
+    )
+
+
+def _intercom_history_payload_from_state(
+    bridge,
+    control: LoxoneControl,
+    history_state_name: str | None,
+) -> Any | None:
+    if history_state_name is None:
+        return None
+    raw_value = bridge.control_state(control, history_state_name)
+    if isinstance(raw_value, (Mapping, list)):
+        return raw_value
+    if not isinstance(raw_value, str):
+        return None
+
+    stripped = raw_value.strip()
+    if not stripped:
+        return None
+    if not (stripped.startswith("{") or stripped.startswith("[")):
+        return None
+    try:
+        return json.loads(stripped)
+    except json.JSONDecodeError:
+        return None
 
 
 async def _async_fetch_json(bridge, url: str) -> Any | None:
@@ -1060,12 +1791,22 @@ async def _async_fetch_json(bridge, url: str) -> Any | None:
     return None
 
 
-def _extract_intercom_events(payload: Any, bridge) -> list[dict[str, Any]]:
+def _extract_intercom_events(
+    payload: Any,
+    bridge,
+    control: LoxoneControl,
+    address_value: Any = None,
+) -> list[dict[str, Any]]:
     events = _find_event_mappings(payload)
     normalized: list[dict[str, Any]] = []
     for event in events:
         timestamp = _event_timestamp(event)
-        image_url = _event_image_url(event, bridge)
+        image_url = _event_image_url(
+            event,
+            bridge,
+            control,
+            address_value=address_value,
+        )
         if timestamp is None and image_url is None:
             continue
         normalized.append(
@@ -1125,9 +1866,20 @@ def _looks_like_intercom_event_mapping(value: Mapping[str, Any]) -> bool:
     return False
 
 
-def _event_image_url(event: Mapping[str, Any], bridge) -> str | None:
+def _event_image_url(
+    event: Mapping[str, Any],
+    bridge,
+    control: LoxoneControl,
+    *,
+    address_value: Any = None,
+) -> str | None:
     image_value = _first_mapping_value(event, INTERCOM_EVENT_IMAGE_KEY_CANDIDATES)
-    return bridge.resolve_http_url(_coerce_text(image_value))
+    return resolve_intercom_http_url(
+        bridge,
+        control,
+        image_value,
+        address_value=address_value,
+    )
 
 
 def _event_timestamp(event: Mapping[str, Any]) -> datetime | None:
@@ -1164,22 +1916,28 @@ def _coerce_datetime(value: Any) -> datetime | None:
     return None
 
 
+def _timestamp_state_value(state_name: str, value: Any) -> datetime | None:
+    normalized = normalize_state_name(state_name)
+    if normalized not in TIMESTAMP_STATE_KEYS and not normalized.endswith("timestamp"):
+        return None
+    return _coerce_datetime(value)
+
+
 def _resolve_control_detail_url(
     bridge,
     control: LoxoneControl,
     detail_paths: tuple[str, ...],
-) -> str | None:
-    return _resolve_detail_url(bridge, control.details, detail_paths)
-
-
-def _resolve_detail_url(
-    bridge,
-    details: Mapping[str, Any],
-    detail_paths: tuple[str, ...],
+    *,
+    address_value: Any = None,
 ) -> str | None:
     for path in detail_paths:
-        raw_value = _nested_detail_value(details, path)
-        resolved = bridge.resolve_http_url(_coerce_text(raw_value))
+        raw_value = _nested_detail_value(control.details, path)
+        resolved = resolve_intercom_http_url(
+            bridge,
+            control,
+            raw_value,
+            address_value=address_value,
+        )
         if resolved is not None:
             return resolved
     return None

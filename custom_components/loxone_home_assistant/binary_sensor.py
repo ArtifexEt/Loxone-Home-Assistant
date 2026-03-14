@@ -103,120 +103,205 @@ def _should_expose_access_entities(
     return False
 
 
+def _build_access_binary_entities(
+    bridge,
+    control: LoxoneControl,
+    access_granted_state_name: str | None,
+    access_denied_state_name: str | None,
+) -> list[BinarySensorEntity]:
+    if not _should_expose_access_entities(
+        control,
+        access_granted_state_name,
+        access_denied_state_name,
+    ):
+        return []
+
+    entities: list[BinarySensorEntity] = []
+    if access_granted_state_name is not None:
+        entities.append(
+            LoxoneAccessBinaryEntity(
+                bridge,
+                control,
+                access_granted_state_name,
+                "Access Granted",
+                "granted",
+                "mdi:shield-check",
+            )
+        )
+    if (
+        access_denied_state_name is not None
+        and access_denied_state_name != access_granted_state_name
+    ):
+        entities.append(
+            LoxoneAccessBinaryEntity(
+                bridge,
+                control,
+                access_denied_state_name,
+                "Access Denied",
+                "denied",
+                "mdi:shield-alert",
+            )
+        )
+    return entities
+
+
+def _build_intercom_state_binary_entities(
+    bridge,
+    control: LoxoneControl,
+    intercom_state_roles: Mapping[str, str],
+    excluded_state_names: set[str],
+) -> list[BinarySensorEntity]:
+    entities: list[BinarySensorEntity] = []
+    for state_name, role in intercom_state_roles.items():
+        if state_name in excluded_state_names:
+            continue
+        entities.append(
+            LoxoneIntercomStateBinaryEntity(
+                bridge,
+                control,
+                state_name,
+                role,
+            )
+        )
+    return entities
+
+
+def _build_special_binary_entities(
+    bridge,
+    control: LoxoneControl,
+) -> tuple[list[BinarySensorEntity], set[str]]:
+    is_intercom = is_intercom_control(control)
+    doorbell_state_name = (
+        intercom_doorbell_state_name(control)
+        if is_intercom
+        else first_matching_state_name(control, DOORBELL_STATE_CANDIDATES)
+    )
+    intercom_state_roles = intercom_boolean_state_roles(control) if is_intercom else {}
+    access_granted_state_name = first_matching_state_name(
+        control, ACCESS_GRANTED_STATE_CANDIDATES
+    )
+    access_denied_state_name = first_matching_state_name(
+        control, ACCESS_DENIED_STATE_CANDIDATES
+    )
+    lock_state_name = _find_lock_state(control)
+
+    entities: list[BinarySensorEntity] = []
+    if doorbell_state_name is not None:
+        entities.append(LoxoneDoorbellBinaryEntity(bridge, control, doorbell_state_name))
+    if lock_state_name is not None:
+        entities.append(LoxoneControlLockBinaryEntity(bridge, control, lock_state_name))
+    entities.extend(
+        _build_access_binary_entities(
+            bridge,
+            control,
+            access_granted_state_name,
+            access_denied_state_name,
+        )
+    )
+
+    excluded_intercom_states = {
+        state_name
+        for state_name in (
+            doorbell_state_name,
+            access_granted_state_name,
+            access_denied_state_name,
+        )
+        if state_name is not None
+    }
+    entities.extend(
+        _build_intercom_state_binary_entities(
+            bridge,
+            control,
+            intercom_state_roles,
+            excluded_intercom_states,
+        )
+    )
+
+    ignored_state_names = {
+        state_name
+        for state_name in (
+            doorbell_state_name,
+            access_granted_state_name,
+            access_denied_state_name,
+            lock_state_name,
+            *intercom_state_roles.keys(),
+        )
+        if state_name is not None
+    }
+    return entities, ignored_state_names
+
+
+def _build_diagnostic_binary_entities(
+    bridge,
+    control: LoxoneControl,
+    ignored_state_names: set[str],
+) -> list[BinarySensorEntity]:
+    return [
+        LoxoneDiagnosticBinaryEntity(bridge, control, state_name)
+        for state_name in control.states
+        if state_name not in ignored_state_names and state_is_boolean(control, state_name)
+    ]
+
+
+def _build_control_binary_entities(bridge, control: LoxoneControl) -> list[BinarySensorEntity]:
+    entities, ignored_state_names = _build_special_binary_entities(bridge, control)
+
+    if control.type in BINARY_SENSOR_CONTROL_TYPES:
+        entities.append(LoxoneBinaryEntity(bridge, control))
+        return entities
+
+    if control.type in POWER_SUPPLY_CONTROL_TYPES:
+        charging_state_name = _find_power_supply_charging_state(control)
+        if charging_state_name is not None:
+            entities.append(
+                LoxonePowerSupplyChargingBinaryEntity(bridge, control, charging_state_name)
+            )
+        return entities
+
+    if control.type in HANDLED_CONTROL_TYPES:
+        return entities
+
+    entities.extend(
+        _build_diagnostic_binary_entities(
+            bridge,
+            control,
+            ignored_state_names,
+        )
+    )
+    return entities
+
+
 async def async_setup_entry(
     hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
 ) -> None:
     bridge = entry_bridge(hass, entry)
     entities: list[BinarySensorEntity] = []
-
     for control in bridge.controls:
-        is_intercom = is_intercom_control(control)
-        doorbell_state_name = (
-            intercom_doorbell_state_name(control)
-            if is_intercom
-            else first_matching_state_name(control, DOORBELL_STATE_CANDIDATES)
-        )
-        intercom_state_roles = (
-            intercom_boolean_state_roles(control) if is_intercom else {}
-        )
-        access_granted_state_name = first_matching_state_name(
-            control, ACCESS_GRANTED_STATE_CANDIDATES
-        )
-        access_denied_state_name = first_matching_state_name(
-            control, ACCESS_DENIED_STATE_CANDIDATES
-        )
-        lock_state_name = _find_lock_state(control)
-        if doorbell_state_name is not None:
-            entities.append(
-                LoxoneDoorbellBinaryEntity(bridge, control, doorbell_state_name)
-            )
-        if lock_state_name is not None:
-            entities.append(
-                LoxoneControlLockBinaryEntity(bridge, control, lock_state_name)
-            )
-        if _should_expose_access_entities(
-            control,
-            access_granted_state_name,
-            access_denied_state_name,
-        ):
-            if access_granted_state_name is not None:
-                entities.append(
-                    LoxoneAccessBinaryEntity(
-                        bridge,
-                        control,
-                        access_granted_state_name,
-                        "Access Granted",
-                        "granted",
-                        "mdi:shield-check",
-                    )
-                )
-            if (
-                access_denied_state_name is not None
-                and access_denied_state_name != access_granted_state_name
-            ):
-                entities.append(
-                    LoxoneAccessBinaryEntity(
-                        bridge,
-                        control,
-                        access_denied_state_name,
-                        "Access Denied",
-                        "denied",
-                        "mdi:shield-alert",
-                    )
-                )
-
-        for state_name, role in intercom_state_roles.items():
-            if state_name in {
-                doorbell_state_name,
-                access_granted_state_name,
-                access_denied_state_name,
-            }:
-                continue
-            entities.append(
-                LoxoneIntercomStateBinaryEntity(
-                    bridge,
-                    control,
-                    state_name,
-                    role,
-                )
-            )
-
-        ignored_state_names = {
-            state_name
-            for state_name in (
-                doorbell_state_name,
-                access_granted_state_name,
-                access_denied_state_name,
-                lock_state_name,
-                *intercom_state_roles.keys(),
-            )
-            if state_name is not None
-        }
-
-        if control.type in BINARY_SENSOR_CONTROL_TYPES:
-            entities.append(LoxoneBinaryEntity(bridge, control))
-            continue
-
-        if control.type in POWER_SUPPLY_CONTROL_TYPES:
-            charging_state_name = _find_power_supply_charging_state(control)
-            if charging_state_name is not None:
-                entities.append(
-                    LoxonePowerSupplyChargingBinaryEntity(
-                        bridge, control, charging_state_name
-                    )
-                )
-            continue
-
-        if control.type in HANDLED_CONTROL_TYPES:
-            continue
-
-        for state_name in control.states:
-            if state_name in ignored_state_names:
-                continue
-            if state_is_boolean(control, state_name):
-                entities.append(LoxoneDiagnosticBinaryEntity(bridge, control, state_name))
+        entities.extend(_build_control_binary_entities(bridge, control))
 
     async_add_entities(entities)
+
+
+class LoxoneSingleStateBinaryEntity(LoxoneEntity, BinarySensorEntity):
+    """Binary entity bound to one named Loxone state."""
+
+    def __init__(
+        self,
+        bridge,
+        control: LoxoneControl,
+        state_name: str,
+        suffix: str | None = None,
+    ) -> None:
+        super().__init__(bridge, control, state_name if suffix is None else suffix)
+        self._state_name = state_name
+
+    def relevant_state_uuids(self):
+        state_uuid = self.control.state_uuid(self._state_name)
+        return [state_uuid] if state_uuid else []
+
+    @property
+    def is_on(self) -> bool | None:
+        return coerce_bool(self.state_value(self._state_name))
 
 
 class LoxoneBinaryEntity(LoxoneEntity, BinarySensorEntity):
@@ -235,22 +320,13 @@ class LoxoneBinaryEntity(LoxoneEntity, BinarySensorEntity):
         return None
 
 
-class LoxoneDoorbellBinaryEntity(LoxoneEntity, BinarySensorEntity):
+class LoxoneDoorbellBinaryEntity(LoxoneSingleStateBinaryEntity):
     """Doorbell binary sensor derived from bell/ring style states."""
 
     _attr_icon = "mdi:doorbell-video"
 
     def __init__(self, bridge, control: LoxoneControl, state_name: str) -> None:
-        super().__init__(bridge, control, "Doorbell")
-        self._state_name = state_name
-
-    def relevant_state_uuids(self):
-        state_uuid = self.control.state_uuid(self._state_name)
-        return [state_uuid] if state_uuid else []
-
-    @property
-    def is_on(self) -> bool | None:
-        return coerce_bool(self.state_value(self._state_name))
+        super().__init__(bridge, control, state_name, "Doorbell")
 
     @property
     def extra_state_attributes(self) -> dict:
@@ -267,7 +343,7 @@ INTERCOM_ROLE_ICONS = {
 }
 
 
-class LoxoneIntercomStateBinaryEntity(LoxoneEntity, BinarySensorEntity):
+class LoxoneIntercomStateBinaryEntity(LoxoneSingleStateBinaryEntity):
     """Binary sensor for role-specific Intercom states."""
 
     def __init__(
@@ -277,22 +353,13 @@ class LoxoneIntercomStateBinaryEntity(LoxoneEntity, BinarySensorEntity):
         state_name: str,
         role: str,
     ) -> None:
-        super().__init__(bridge, control, role)
-        self._state_name = state_name
+        super().__init__(bridge, control, state_name, role)
         self._role = role
         self._attr_icon = INTERCOM_ROLE_ICONS.get(role, "mdi:video-wireless")
         if BinarySensorDeviceClass is not None:
             normalized_role = role.casefold()
             if normalized_role == "proximity":
                 self._attr_device_class = BinarySensorDeviceClass.OCCUPANCY
-
-    def relevant_state_uuids(self):
-        state_uuid = self.control.state_uuid(self._state_name)
-        return [state_uuid] if state_uuid else []
-
-    @property
-    def is_on(self) -> bool | None:
-        return coerce_bool(self.state_value(self._state_name))
 
     @property
     def extra_state_attributes(self) -> dict:
@@ -302,7 +369,7 @@ class LoxoneIntercomStateBinaryEntity(LoxoneEntity, BinarySensorEntity):
         return attrs
 
 
-class LoxoneAccessBinaryEntity(LoxoneEntity, BinarySensorEntity):
+class LoxoneAccessBinaryEntity(LoxoneSingleStateBinaryEntity):
     """Binary sensor for access granted/denied pulses."""
 
     def __init__(
@@ -314,18 +381,9 @@ class LoxoneAccessBinaryEntity(LoxoneEntity, BinarySensorEntity):
         access_result: str,
         icon: str,
     ) -> None:
-        super().__init__(bridge, control, suffix)
-        self._state_name = state_name
+        super().__init__(bridge, control, state_name, suffix)
         self._access_result = access_result
         self._attr_icon = icon
-
-    def relevant_state_uuids(self):
-        state_uuid = self.control.state_uuid(self._state_name)
-        return [state_uuid] if state_uuid else []
-
-    @property
-    def is_on(self) -> bool | None:
-        return coerce_bool(self.state_value(self._state_name))
 
     @property
     def extra_state_attributes(self) -> dict:
@@ -335,7 +393,7 @@ class LoxoneAccessBinaryEntity(LoxoneEntity, BinarySensorEntity):
         return attrs
 
 
-class LoxonePowerSupplyChargingBinaryEntity(LoxoneEntity, BinarySensorEntity):
+class LoxonePowerSupplyChargingBinaryEntity(LoxoneSingleStateBinaryEntity):
     """Charging-state binary sensor for PowerSupply controls."""
 
     _attr_device_class = (
@@ -345,16 +403,7 @@ class LoxonePowerSupplyChargingBinaryEntity(LoxoneEntity, BinarySensorEntity):
     )
 
     def __init__(self, bridge, control: LoxoneControl, state_name: str) -> None:
-        super().__init__(bridge, control, "Charging")
-        self._state_name = state_name
-
-    def relevant_state_uuids(self):
-        state_uuid = self.control.state_uuid(self._state_name)
-        return [state_uuid] if state_uuid else []
-
-    @property
-    def is_on(self) -> bool | None:
-        return coerce_bool(self.state_value(self._state_name))
+        super().__init__(bridge, control, state_name, "Charging")
 
     @property
     def extra_state_attributes(self) -> dict:
@@ -363,18 +412,13 @@ class LoxonePowerSupplyChargingBinaryEntity(LoxoneEntity, BinarySensorEntity):
         return attrs
 
 
-class LoxoneControlLockBinaryEntity(LoxoneEntity, BinarySensorEntity):
+class LoxoneControlLockBinaryEntity(LoxoneSingleStateBinaryEntity):
     """Lock-state binary sensor for controls exposing lock states."""
 
     _attr_icon = "mdi:lock"
 
     def __init__(self, bridge, control: LoxoneControl, state_name: str) -> None:
-        super().__init__(bridge, control, _lock_entity_suffix(state_name))
-        self._state_name = state_name
-
-    def relevant_state_uuids(self):
-        state_uuid = self.control.state_uuid(self._state_name)
-        return [state_uuid] if state_uuid else []
+        super().__init__(bridge, control, state_name, _lock_entity_suffix(state_name))
 
     @property
     def is_on(self) -> bool | None:
@@ -411,19 +455,10 @@ class LoxoneControlLockBinaryEntity(LoxoneEntity, BinarySensorEntity):
         return attrs
 
 
-class LoxoneDiagnosticBinaryEntity(LoxoneEntity, BinarySensorEntity):
+class LoxoneDiagnosticBinaryEntity(LoxoneSingleStateBinaryEntity):
     """Disabled-by-default raw binary sensor for unsupported control types."""
 
     _attr_entity_registry_enabled_default = False
 
     def __init__(self, bridge, control: LoxoneControl, state_name: str) -> None:
         super().__init__(bridge, control, state_name)
-        self._state_name = state_name
-
-    def relevant_state_uuids(self):
-        state_uuid = self.control.state_uuid(self._state_name)
-        return [state_uuid] if state_uuid else []
-
-    @property
-    def is_on(self) -> bool | None:
-        return coerce_bool(self.state_value(self._state_name))

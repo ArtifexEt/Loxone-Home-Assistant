@@ -19,6 +19,29 @@ from .const import (
 from .entity import LoxoneEntity, coerce_float, first_matching_state_name, infer_unit
 from .runtime import entry_bridge
 
+TEMPERATURE_COMMAND_BY_CONTROL_TYPE = {
+    "PoolController": "targetTemp",
+    "Sauna": "temp",
+    "ACControl": "setTarget",
+    "AcControl": "setTarget",
+}
+DEFAULT_TEMPERATURE_COMMAND = "setComfortTemperature"
+
+
+def _coerce_first_float(values: tuple[object, ...], default: float) -> float:
+    for value in values:
+        numeric = coerce_float(value)
+        if numeric is not None:
+            return numeric
+    return default
+
+
+def _temperature_command(control_type: str, temperature: float | int) -> str:
+    command_name = TEMPERATURE_COMMAND_BY_CONTROL_TYPE.get(
+        control_type, DEFAULT_TEMPERATURE_COMMAND
+    )
+    return f"{command_name}/{temperature}"
+
 
 async def async_setup_entry(
     hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
@@ -57,55 +80,73 @@ class LoxoneClimateEntity(LoxoneEntity, ClimateEntity):
             control, CLIMATE_AIR_QUALITY_STATE_CANDIDATES
         )
 
+    def _state_float(self, state_name: str | None) -> float | None:
+        if state_name is None:
+            return None
+        return coerce_float(self.state_value(state_name))
+
+    def _first_state_float(self, *state_names: str) -> float | None:
+        return coerce_float(self.first_state_value(*state_names))
+
     @property
     def current_temperature(self) -> float | None:
-        if self._current_temp_state_name:
-            return coerce_float(self.state_value(self._current_temp_state_name))
-        return coerce_float(self.first_state_value("tempActual", "temperature"))
+        value = self._state_float(self._current_temp_state_name)
+        if value is not None:
+            return value
+        return self._first_state_float("tempActual", "temperature")
 
     @property
     def target_temperature(self) -> float | None:
-        if self._target_temp_state_name:
-            return coerce_float(self.state_value(self._target_temp_state_name))
-        return coerce_float(
-            self.first_state_value("tempTarget", "comfortTemperature", "setpoint")
-        )
+        value = self._state_float(self._target_temp_state_name)
+        if value is not None:
+            return value
+        return self._first_state_float("tempTarget", "comfortTemperature", "setpoint")
 
     @property
     def current_humidity(self) -> float | None:
-        if self._humidity_state_name is None:
-            return None
-        return coerce_float(self.state_value(self._humidity_state_name))
+        return self._state_float(self._humidity_state_name)
 
     @property
     def min_temp(self) -> float:
-        return (
-            coerce_float(self.control.details.get("min"))
-            or coerce_float(self.control.details.get("minTemp"))
-            or 5.0
+        return _coerce_first_float(
+            (
+                self.control.details.get("min"),
+                self.control.details.get("minTemp"),
+            ),
+            default=5.0,
         )
 
     @property
     def max_temp(self) -> float:
-        return (
-            coerce_float(self.control.details.get("max"))
-            or coerce_float(self.control.details.get("maxTemp"))
-            or 35.0
+        return _coerce_first_float(
+            (
+                self.control.details.get("max"),
+                self.control.details.get("maxTemp"),
+            ),
+            default=35.0,
         )
 
     @property
     def target_temperature_step(self) -> float:
-        return (
-            coerce_float(self.control.details.get("step"))
-            or coerce_float(self.control.details.get("stepTemp"))
-            or 0.5
+        return _coerce_first_float(
+            (
+                self.control.details.get("step"),
+                self.control.details.get("stepTemp"),
+            ),
+            default=0.5,
         )
 
     @property
     def temperature_unit(self) -> str:
-        unit_state_name = self._target_temp_state_name or self._current_temp_state_name or "tempTarget"
+        unit_state_name = (
+            self._target_temp_state_name or self._current_temp_state_name or "tempTarget"
+        )
         unit = infer_unit(self.control, unit_state_name)
-        return UnitOfTemperature.FAHRENHEIT if unit == "°F" else UnitOfTemperature.CELSIUS
+        return (
+            UnitOfTemperature.FAHRENHEIT
+            if unit == "°F"
+            else UnitOfTemperature.CELSIUS
+        )
 
     @property
     def extra_state_attributes(self) -> dict:
@@ -124,12 +165,7 @@ class LoxoneClimateEntity(LoxoneEntity, ClimateEntity):
         temperature = kwargs.get("temperature")
         if temperature is None:
             return
-        if self.control.type == "PoolController":
-            command = f"targetTemp/{temperature}"
-        elif self.control.type == "Sauna":
-            command = f"temp/{temperature}"
-        else:
-            command = f"setComfortTemperature/{temperature}"
+        command = _temperature_command(self.control.type, temperature)
         await self.bridge.async_send_action(
             self.control.uuid_action, command
         )
