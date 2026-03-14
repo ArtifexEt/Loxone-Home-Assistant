@@ -39,7 +39,12 @@ def _install_homeassistant_stubs() -> None:
     camera = sys.modules["homeassistant.components.camera"]
 
     class Camera:
-        pass
+        def __init__(self) -> None:
+            self._webrtc_provider = None
+
+        async def async_refresh_providers(self, write_state: bool = False) -> None:
+            del write_state
+            _ = self._webrtc_provider
 
     camera.Camera = Camera
 
@@ -214,6 +219,22 @@ LoxoneIntercomCameraEntity = camera_module.LoxoneIntercomCameraEntity
 
 class CameraPlatformTests(unittest.IsolatedAsyncioTestCase):
     """Verify Intercom camera preview mapping."""
+
+    async def test_camera_entity_initializes_camera_base(self) -> None:
+        control = LoxoneControl(
+            uuid="intercom-uuid",
+            uuid_action="intercom-action",
+            name="Furtka",
+            type="Intercom",
+            states={},
+            details={"videoInfo": {"streamUrl": "/dev/stream.mjpg"}},
+        )
+        session = _FakeSession()
+        bridge = _FakeBridge([control], {}, session)
+        entity = LoxoneIntercomCameraEntity(bridge, control)
+
+        await entity.async_refresh_providers(write_state=False)
+        self.assertTrue(hasattr(entity, "_webrtc_provider"))
 
     async def test_setup_adds_camera_entities_for_intercom_controls(self) -> None:
         intercom = LoxoneControl(

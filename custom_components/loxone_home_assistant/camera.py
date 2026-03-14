@@ -106,6 +106,7 @@ class LoxoneIntercomCameraEntity(LoxoneEntity, Camera):
     _attr_supported_features = CameraEntityFeature.STREAM
 
     def __init__(self, bridge, control: LoxoneControl) -> None:
+        Camera.__init__(self)
         super().__init__(bridge, control, "Video")
         self._stream_state_name = first_matching_state_name(control, STREAM_STATE_CANDIDATES)
         self._snapshot_state_name = first_matching_state_name(control, SNAPSHOT_STATE_CANDIDATES)
