@@ -179,6 +179,7 @@ class TrackerSensorPlatformTests(unittest.IsolatedAsyncioTestCase):
         for entity in entities:
             self.assertIsInstance(entity, sensor_module.LoxoneEventStateSensor)
             self.assertIsNotNone(entity.native_value)
+            self.assertTrue(getattr(entity, "_attr_force_update", False))
 
     async def test_tracker_falls_back_to_named_sensor_when_only_boolean_state_exists(self) -> None:
         control = LoxoneControl(

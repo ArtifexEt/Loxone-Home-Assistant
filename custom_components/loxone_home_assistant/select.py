@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Mapping
+from datetime import datetime, timezone
 from typing import Any
 
 from homeassistant.components.select import SelectEntity
@@ -20,13 +21,30 @@ from .const import (
     RADIO_SELECT_CONTROL_TYPES,
 )
 from .entity import LoxoneEntity, control_entity_unique_id
+from .intercom import (
+    intercom_address_state_name,
+    intercom_history_state_name,
+    is_intercom_control,
+)
 from .light import CONTROLLER_TYPES
 from .models import LoxoneControl
 from .options import option_enabled
 from .runtime import entry_bridge
+from .sensor import (
+    _async_fetch_json,
+    _dynamic_intercom_history_state_names,
+    _extract_intercom_events,
+    _has_intercom_history_detail,
+    _intercom_history_payload_from_state,
+    _is_intercom_video_settings_payload,
+    _resolve_intercom_history_url,
+)
 
 OFF_MOOD_IDS = {0, 778}
 NON_DIGIT_RE = re.compile(r"[^0-9,.-]+")
+INTERCOM_HISTORY_SELECT_SUFFIX = "history_photo"
+INTERCOM_HISTORY_SELECT_LIVE_OPTION = "Live"
+INTERCOM_HISTORY_SELECT_MAX_OPTIONS = 15
 
 
 async def async_setup_entry(
@@ -55,9 +73,15 @@ async def async_setup_entry(
         for control in bridge.controls
         if control.type in RADIO_SELECT_CONTROL_TYPES and _extract_radio_outputs(control)
     ]
+    intercom_controls = [
+        control
+        for control in bridge.controls
+        if is_intercom_control(control) and _supports_intercom_history_select(control)
+    ]
 
     entities = [LoxoneMoodSelectEntity(bridge, control) for control in controls]
     entities.extend(LoxoneRadioOutputSelectEntity(bridge, control) for control in radio_controls)
+    entities.extend(LoxoneIntercomHistorySelectEntity(bridge, control) for control in intercom_controls)
     _cleanup_stale_select_entities(
         hass,
         entry,
@@ -68,6 +92,14 @@ async def async_setup_entry(
         | {
             control_entity_unique_id(bridge.serial, control.uuid_action, "radio")
             for control in radio_controls
+        }
+        | {
+            control_entity_unique_id(
+                bridge.serial,
+                control.uuid_action,
+                INTERCOM_HISTORY_SELECT_SUFFIX,
+            )
+            for control in intercom_controls
         },
     )
     async_add_entities(entities)
@@ -148,16 +180,182 @@ class LoxoneRadioOutputSelectEntity(LoxoneEntity, SelectEntity):
         return attrs
 
 
+class LoxoneIntercomHistorySelectEntity(LoxoneEntity, SelectEntity):
+    """Select old Intercom snapshots and expose them for camera preview."""
+
+    _attr_icon = "mdi:image-multiple"
+
+    def __init__(self, bridge, control: LoxoneControl) -> None:
+        super().__init__(bridge, control, "History Photo")
+        self._attr_unique_id = control_entity_unique_id(
+            bridge.serial,
+            control.uuid_action,
+            INTERCOM_HISTORY_SELECT_SUFFIX,
+        )
+        self._history_state_name = intercom_history_state_name(control)
+        self._dynamic_history_state_names = _dynamic_intercom_history_state_names(control)
+        self._address_state_name = intercom_address_state_name(control)
+        self._events_url: str | None = None
+        self._option_to_image_url: dict[str, str] = {}
+        self._selected_option = INTERCOM_HISTORY_SELECT_LIVE_OPTION
+        self._attr_options = [INTERCOM_HISTORY_SELECT_LIVE_OPTION]
+
+    @property
+    def should_poll(self) -> bool:
+        return True
+
+    @property
+    def current_option(self) -> str | None:
+        return self._selected_option
+
+    def relevant_state_uuids(self):
+        uuids: list[str] = []
+        for state_name in (
+            self._history_state_name,
+            self._address_state_name,
+            *self._dynamic_history_state_names,
+        ):
+            if state_name is None:
+                continue
+            state_uuid = self.control.state_uuid(state_name)
+            if state_uuid and state_uuid not in uuids:
+                uuids.append(state_uuid)
+        return uuids
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        await self.async_update()
+
+    def _handle_bridge_update(self) -> None:
+        schedule_update = getattr(self, "async_schedule_update_ha_state", None)
+        if callable(schedule_update):
+            schedule_update(True)
+
+    async def async_update(self) -> None:
+        address_value = self._address_state_value()
+        normalized_events: list[dict[str, Any]] = []
+
+        for state_name in (
+            self._history_state_name,
+            *self._dynamic_history_state_names,
+        ):
+            state_payload = _intercom_history_payload_from_state(
+                self.bridge,
+                self.control,
+                state_name,
+            )
+            if state_payload is None:
+                continue
+            if _is_intercom_video_settings_payload(state_payload):
+                continue
+            normalized_events = _extract_intercom_events(
+                state_payload,
+                self.bridge,
+                self.control,
+                address_value,
+            )
+            if normalized_events:
+                self._events_url = None
+                break
+
+        if not normalized_events:
+            events_url = _resolve_intercom_history_url(
+                self.bridge,
+                self.control,
+                self._history_state_name,
+                address_value,
+                dynamic_state_names=self._dynamic_history_state_names,
+            )
+            self._events_url = events_url
+            if events_url is not None:
+                payload = await _async_fetch_json(self.bridge, events_url)
+                if payload is not None:
+                    normalized_events = _extract_intercom_events(
+                        payload,
+                        self.bridge,
+                        self.control,
+                        address_value,
+                    )
+
+        options, option_to_image_url = _build_intercom_history_options(normalized_events)
+        self._attr_options = options
+        self._option_to_image_url = option_to_image_url
+
+        if self._selected_option not in self._attr_options:
+            self._selected_option = INTERCOM_HISTORY_SELECT_LIVE_OPTION
+
+        self._apply_selected_history_image()
+
+    async def async_select_option(self, option: str) -> None:
+        if option not in self._attr_options:
+            return
+        self._selected_option = option
+        self._apply_selected_history_image()
+        write_state = getattr(self, "async_write_ha_state", None)
+        if callable(write_state):
+            write_state()
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        attrs = super().extra_state_attributes
+        attrs["option_count"] = len(self._attr_options)
+        if self._events_url is not None:
+            attrs["history_events_url"] = self._events_url
+        selected_image_url = self._option_to_image_url.get(self._selected_option)
+        if selected_image_url is not None:
+            attrs["selected_image_url"] = selected_image_url
+        return attrs
+
+    def _address_state_value(self) -> Any:
+        if self._address_state_name is None:
+            return None
+        return self.bridge.control_state(self.control, self._address_state_name)
+
+    def _apply_selected_history_image(self) -> None:
+        selected_images = getattr(self.bridge, "_intercom_selected_history_images", None)
+        if not isinstance(selected_images, dict):
+            selected_images = {}
+            setattr(self.bridge, "_intercom_selected_history_images", selected_images)
+
+        selected_image_url = self._option_to_image_url.get(self._selected_option)
+        if selected_image_url is None:
+            selected_images.pop(self.control.uuid_action, None)
+            return
+
+        selected_images[self.control.uuid_action] = selected_image_url
+
+
 def _extract_moods(control: LoxoneControl) -> list[tuple[int, str]]:
-    raw_moods = control.details.get("moodList")
-    if not isinstance(raw_moods, list):
+    raw_moods: Any = control.details.get("moodList")
+    if isinstance(raw_moods, str):
+        raw = raw_moods.strip()
+        if not raw:
+            return []
+        try:
+            raw_moods = json.loads(raw.replace("'", '"'))
+        except json.JSONDecodeError:
+            return []
+
+    normalized_items: list[Any]
+    if isinstance(raw_moods, list):
+        normalized_items = raw_moods
+    elif isinstance(raw_moods, Mapping):
+        normalized_items = []
+        for raw_key, raw_value in raw_moods.items():
+            if isinstance(raw_value, Mapping):
+                normalized_items.append(raw_value)
+                continue
+            normalized_items.append({"id": raw_key, "name": raw_value})
+    else:
         return []
 
     moods: list[tuple[int, str]] = []
-    for item in raw_moods:
+    for item in normalized_items:
         if not isinstance(item, Mapping):
             continue
-        mood_id = _coerce_mood_id(item.get("id", item.get("moodId")))
+        mood_id = _coerce_mood_id(
+            item.get("id", item.get("moodId", item.get("value")))
+        )
         if mood_id is None:
             continue
         name = str(item.get("name") or item.get("title") or "").strip()
@@ -184,6 +382,50 @@ def _extract_radio_outputs(control: LoxoneControl) -> list[tuple[int, str]]:
 
     outputs.sort(key=lambda item: item[0])
     return outputs
+
+
+def _supports_intercom_history_select(control: LoxoneControl) -> bool:
+    history_state_name = intercom_history_state_name(control)
+    if history_state_name is not None:
+        return True
+    if _dynamic_intercom_history_state_names(control):
+        return True
+    return _has_intercom_history_detail(control)
+
+
+def _build_intercom_history_options(
+    normalized_events: list[dict[str, Any]],
+) -> tuple[list[str], dict[str, str]]:
+    options = [INTERCOM_HISTORY_SELECT_LIVE_OPTION]
+    option_to_image_url: dict[str, str] = {}
+    seen_labels: set[str] = set(options)
+
+    for index, event in enumerate(normalized_events, start=1):
+        if len(options) > INTERCOM_HISTORY_SELECT_MAX_OPTIONS:
+            break
+        image_url = event.get("image_url")
+        if not isinstance(image_url, str):
+            continue
+        label = _intercom_event_option_label(event, index)
+        while label in seen_labels:
+            label = f"{label} ({index})"
+        seen_labels.add(label)
+        options.append(label)
+        option_to_image_url[label] = image_url
+
+    return options, option_to_image_url
+
+
+def _intercom_event_option_label(event: Mapping[str, Any], index: int) -> str:
+    timestamp = event.get("timestamp")
+    if isinstance(timestamp, datetime):
+        localized = (
+            timestamp.astimezone()
+            if timestamp.tzinfo is not None
+            else timestamp.replace(tzinfo=timezone.utc).astimezone()
+        )
+        return localized.strftime("%Y-%m-%d %H:%M:%S")
+    return f"Photo {index}"
 
 
 def _build_option_maps(
@@ -319,4 +561,3 @@ def _cleanup_stale_select_entities(
         if unique_id in valid_unique_ids:
             continue
         registry.async_remove(registry_entry.entity_id)
-

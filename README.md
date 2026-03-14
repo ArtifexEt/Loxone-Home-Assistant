@@ -126,7 +126,6 @@ Based on the current integration parser, the following `LoxAPP3.json` sections a
 The following documented sections are currently not mapped to dedicated Home Assistant entities:
 
 - `globalStates`
-- `operatingModes`
 - `weatherServer`
 - `times`
 - `caller`
@@ -157,21 +156,20 @@ This version targets modern Loxone servers (Miniserver, Miniserver Go, Miniserve
 
 ## Configuration flow
 
-The integration first asks for setup mode and startup options:
-
-- automatic discovery or manual host setup
-- mood selection entities for `LightControllerV2`
-- individual child light entities inside one `LightController`
-- optional automatic creation of suggested automations
-
-If automatic discovery is selected, the next step asks for:
+The integration first asks for:
 
 - Loxone username
 - Loxone password
 
-It then scans the local network for one or more Loxone servers. If more than one is found, you choose the correct device. If discovery fails, a manual host fallback is offered.
+It then scans the local network for one or more Loxone servers. If more than one is found, you choose the correct device.
 
-If manual setup is selected, you provide host, port, credentials, and TLS verification directly.
+If automatic discovery does not complete, a manual host fallback is offered where you provide host, port, credentials, and TLS verification directly.
+
+After successful connection and validation, the final step asks for startup options:
+
+- mood selection entities for `LightControllerV2`
+- individual child light entities inside one `LightController`
+- optional automatic creation of suggested automations
 
 ## Services
 

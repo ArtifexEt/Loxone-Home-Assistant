@@ -2,13 +2,15 @@
   "config": {
     "step": {
       "user": {
-        "title": "Choose installation mode",
-        "description": "Choose automatic network discovery or manual host setup. You can also configure light and automation checkboxes during first installation.",
+        "title": "Additional setup options",
+        "description": "Discovery and authentication are complete. Configure optional light and automation behavior for this installation.",
         "data": {
-          "use_manual_setup": "Manual host setup (disable automatic discovery)",
           "enable_light_mood_select": "Expose LightController mood selector",
           "expose_controller_child_lights": "Expose individual lights inside LightController",
           "auto_create_automations": "Automatically add suggested automations"
+        },
+        "data_description": {
+          "expose_controller_child_lights": "Warning: disabling this option removes those entities from Home Assistant (they may disappear from dashboards and automations)."
         }
       },
       "auto": {
@@ -53,7 +55,7 @@
     "step": {
       "init": {
         "title": "Loxone options",
-        "description": "Hub: {entry_title}\nSerial: {serial}\nLoxAPP structure version: {loxapp_version}\nDetected Loxone API software version: {current_api_version}\nMinimum supported API software version: {min_api_version}\n\nWarning: Disabling individual child lights removes those entities from Home Assistant (they may disappear from dashboards and automations).",
+        "description": "Hub: {entry_title}\nSerial: {serial}\nLoxAPP structure version: {loxapp_version}\nDetected Loxone API software version: {current_api_version}\nMinimum supported API software version: {min_api_version}",
         "data": {
           "host": "Host",
           "port": "Port",
@@ -64,6 +66,9 @@
           "enable_light_mood_select": "Expose LightController mood selector",
           "expose_controller_child_lights": "Expose individual lights inside LightController",
           "auto_create_automations": "Automatically add suggested automations"
+        },
+        "data_description": {
+          "expose_controller_child_lights": "Warning: disabling this option removes those entities from Home Assistant (they may disappear from dashboards and automations)."
         }
       }
     }

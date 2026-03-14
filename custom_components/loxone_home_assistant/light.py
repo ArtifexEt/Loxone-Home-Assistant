@@ -453,6 +453,11 @@ def _is_child_light_control(bridge, control: LoxoneControl) -> bool:
 
 def should_expose_as_light(bridge, control: LoxoneControl, expose_controller_children: bool) -> bool:
     """Return True when a control should be exposed on the HA light platform."""
+    if control.type in CONTROLLER_TYPES:
+        # Controller-level lights are primary user-facing entities.
+        # Keep them visible even when child-light export is disabled.
+        return True
+
     if control.type in LIGHT_CONTROL_TYPES:
         if expose_controller_children:
             return True
@@ -574,15 +579,36 @@ def _coerce_mood_id(value: Any) -> int | None:
 
 
 def _extract_moods(control: LoxoneControl) -> list[tuple[int, str]]:
-    raw_moods = control.details.get("moodList")
-    if not isinstance(raw_moods, list):
+    raw_moods: Any = control.details.get("moodList")
+    if isinstance(raw_moods, str):
+        raw = raw_moods.strip()
+        if not raw:
+            return []
+        try:
+            raw_moods = json.loads(raw.replace("'", '"'))
+        except json.JSONDecodeError:
+            return []
+
+    normalized_items: list[Any]
+    if isinstance(raw_moods, list):
+        normalized_items = raw_moods
+    elif isinstance(raw_moods, Mapping):
+        normalized_items = []
+        for raw_key, raw_value in raw_moods.items():
+            if isinstance(raw_value, Mapping):
+                normalized_items.append(raw_value)
+                continue
+            normalized_items.append({"id": raw_key, "name": raw_value})
+    else:
         return []
 
     moods: list[tuple[int, str]] = []
-    for item in raw_moods:
+    for item in normalized_items:
         if not isinstance(item, Mapping):
             continue
-        mood_id = _coerce_mood_id(item.get("id", item.get("moodId")))
+        mood_id = _coerce_mood_id(
+            item.get("id", item.get("moodId", item.get("value")))
+        )
         if mood_id is None:
             continue
         name = str(item.get("name") or item.get("title") or "").strip()

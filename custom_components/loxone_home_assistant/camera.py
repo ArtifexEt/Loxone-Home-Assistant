@@ -49,29 +49,61 @@ STREAM_STATE_CANDIDATES = (
     "streamUrl",
     "videoStream",
     "videoUrl",
+    "video",
 )
 SNAPSHOT_STATE_CANDIDATES = (
     "alertImage",
     "liveImage",
+    "liveImageUrl",
     "image",
     "snapshot",
 )
 STREAM_DETAIL_PATHS = (
     "securedDetails.videoInfo.streamUrl",
+    "securedDetails.videoInfo.streamUrlExtern",
+    "securedDetails.videoInfo.streamUrlIntern",
+    "securedDetails.videoInfo.videoUrl",
+    "securedDetails.streamUrl",
     "videoInfo.streamUrl",
+    "videoInfo.streamUrlExtern",
+    "videoInfo.streamUrlIntern",
+    "videoInfo.videoUrl",
+    "videoSettings.streamUrl",
+    "videoSettings.streamUrlExtern",
+    "videoSettings.streamUrlIntern",
+    "videoSettings.videoUrl",
     "streamUrl",
 )
 SNAPSHOT_DETAIL_PATHS = (
     "securedDetails.videoInfo.alertImage",
     "securedDetails.videoInfo.liveImageUrl",
+    "securedDetails.videoInfo.liveImage",
     "securedDetails.videoInfo.imageUrl",
+    "securedDetails.videoInfo.alertImageUrl",
     "videoInfo.liveImageUrl",
+    "videoInfo.liveImage",
     "videoInfo.alertImage",
+    "videoInfo.alertImageUrl",
     "videoInfo.imageUrl",
+    "videoSettings.alertImage",
+    "videoSettings.liveImageUrl",
+    "videoSettings.liveImage",
+    "videoSettings.imageUrl",
     "alertImage",
+    "liveImage",
     "liveImageUrl",
 )
-LAST_BELL_EVENTS_DETAIL_PATHS = ("lastBellEvents",)
+LAST_BELL_EVENTS_DETAIL_PATHS = (
+    "lastBellEvents",
+    "eventHistoryUrl",
+    "videoInfo.lastBellEvents",
+    "videoInfo.eventHistoryUrl",
+    "securedDetails.lastBellEvents",
+    "securedDetails.videoInfo.lastBellEvents",
+    "securedDetails.videoInfo.eventHistoryUrl",
+    "videoSettings.lastBellEvents",
+    "videoSettings.eventHistoryUrl",
+)
 INTERCOM_CAMERA_CONTROL_TYPES_NORMALIZED = {
     normalize_state_name(value) for value in INTERCOM_CAMERA_CONTROL_TYPES
 }
@@ -159,6 +191,9 @@ class LoxoneIntercomCameraEntity(LoxoneEntity, Camera):
         snapshot_url = self._snapshot_url()
         if snapshot_url is not None:
             attrs["snapshot_url"] = snapshot_url
+        selected_history_image_url = self._selected_history_image_url()
+        if selected_history_image_url is not None:
+            attrs["selected_history_image_url"] = selected_history_image_url
         bell_events = self._last_bell_events_url()
         if bell_events is not None:
             attrs["last_bell_events_url"] = bell_events
@@ -220,6 +255,15 @@ class LoxoneIntercomCameraEntity(LoxoneEntity, Camera):
         )
         if from_details is not None:
             return from_details
+        from_detail_payload = _resolve_url_from_payload_with_key_hints(
+            self.bridge,
+            self.control,
+            self.control.details,
+            key_hints=STREAM_KEY_HINTS,
+            address_value=address_value,
+        )
+        if from_detail_payload is not None:
+            return from_detail_payload
         from_dynamic_states = _resolve_url_from_intercom_state_payloads(
             self.bridge,
             self.control,
@@ -231,11 +275,20 @@ class LoxoneIntercomCameraEntity(LoxoneEntity, Camera):
         if from_dynamic_states is not None:
             return from_dynamic_states
         if self._secured_details is not None:
-            return _resolve_detail_url(
+            from_secured_details = _resolve_detail_url(
                 self.bridge,
                 self._secured_details,
                 SECURED_STREAM_DETAIL_PATHS,
                 control=self.control,
+                address_value=address_value,
+            )
+            if from_secured_details is not None:
+                return from_secured_details
+            return _resolve_url_from_payload_with_key_hints(
+                self.bridge,
+                self.control,
+                self._secured_details,
+                key_hints=STREAM_KEY_HINTS,
                 address_value=address_value,
             )
         return None
@@ -246,6 +299,11 @@ class LoxoneIntercomCameraEntity(LoxoneEntity, Camera):
             if self._address_state_name is not None
             else None
         )
+        selected_history_image_url = self._selected_history_image_url(
+            address_value=address_value
+        )
+        if selected_history_image_url is not None:
+            return selected_history_image_url
         from_state = self.state_value(self._snapshot_state_name) if self._snapshot_state_name else None
         resolved_state = resolve_intercom_http_url(
             self.bridge,
@@ -263,6 +321,15 @@ class LoxoneIntercomCameraEntity(LoxoneEntity, Camera):
         )
         if from_details is not None:
             return from_details
+        from_detail_payload = _resolve_url_from_payload_with_key_hints(
+            self.bridge,
+            self.control,
+            self.control.details,
+            key_hints=SNAPSHOT_KEY_HINTS,
+            address_value=address_value,
+        )
+        if from_detail_payload is not None:
+            return from_detail_payload
         from_dynamic_states = _resolve_url_from_intercom_state_payloads(
             self.bridge,
             self.control,
@@ -274,11 +341,20 @@ class LoxoneIntercomCameraEntity(LoxoneEntity, Camera):
         if from_dynamic_states is not None:
             return from_dynamic_states
         if self._secured_details is not None:
-            return _resolve_detail_url(
+            from_secured_details = _resolve_detail_url(
                 self.bridge,
                 self._secured_details,
                 SECURED_SNAPSHOT_DETAIL_PATHS,
                 control=self.control,
+                address_value=address_value,
+            )
+            if from_secured_details is not None:
+                return from_secured_details
+            return _resolve_url_from_payload_with_key_hints(
+                self.bridge,
+                self.control,
+                self._secured_details,
+                key_hints=SNAPSHOT_KEY_HINTS,
                 address_value=address_value,
             )
         return None
@@ -310,12 +386,35 @@ class LoxoneIntercomCameraEntity(LoxoneEntity, Camera):
         )
         if from_details is not None:
             return from_details
+        from_detail_payload = _resolve_url_from_payload_with_key_hints(
+            self.bridge,
+            self.control,
+            self.control.details,
+            key_hints=HISTORY_KEY_HINTS,
+            address_value=address_value,
+        )
+        if from_detail_payload is not None:
+            return from_detail_payload
         return _resolve_url_from_intercom_state_payloads(
             self.bridge,
             self.control,
             self._dynamic_detail_state_names,
             state_value_getter=self.state_value,
             key_hints=HISTORY_KEY_HINTS,
+            address_value=address_value,
+        )
+
+    def _selected_history_image_url(self, *, address_value: Any = None) -> str | None:
+        selected_images = getattr(self.bridge, "_intercom_selected_history_images", None)
+        if not isinstance(selected_images, Mapping):
+            return None
+        selected_value = selected_images.get(self.control.uuid_action)
+        if selected_value is None:
+            return None
+        return resolve_intercom_http_url(
+            self.bridge,
+            self.control,
+            selected_value,
             address_value=address_value,
         )
 
@@ -490,9 +589,49 @@ def _resolve_url_from_payload_with_key_hints(
         if not isinstance(current, Mapping):
             continue
 
+        indicator_value = _first_mapping_value(
+            current,
+            ("name", "key", "id", "field", "type", "label"),
+        )
+        candidate_value = _first_mapping_value(
+            current,
+            ("url", "path", "href", "src", "value", "data"),
+        )
+        indicator_text = normalize_state_name(str(indicator_value)) if indicator_value else ""
+        if indicator_text and any(hint in indicator_text for hint in key_hints):
+            resolved = resolve_intercom_http_url(
+                bridge,
+                control,
+                candidate_value,
+                address_value=address_value,
+            )
+            if resolved is not None:
+                return resolved
+
         for key, value in current.items():
             normalized_key = normalize_state_name(str(key))
             key_matches_hints = any(hint in normalized_key for hint in key_hints)
+
+            if isinstance(value, Mapping):
+                if key_matches_hints:
+                    nested_candidate = _first_mapping_value(
+                        value,
+                        ("url", "path", "href", "src", "value", "data"),
+                    )
+                    resolved = resolve_intercom_http_url(
+                        bridge,
+                        control,
+                        nested_candidate,
+                        address_value=address_value,
+                    )
+                    if resolved is not None:
+                        return resolved
+                stack.append(value)
+                continue
+            if isinstance(value, list):
+                stack.append(value)
+                continue
+
             if key_matches_hints:
                 resolved = resolve_intercom_http_url(
                     bridge,
@@ -502,9 +641,6 @@ def _resolve_url_from_payload_with_key_hints(
                 )
                 if resolved is not None:
                     return resolved
-            if isinstance(value, (Mapping, list)):
-                stack.append(value)
-                continue
 
             if key_matches_hints and isinstance(value, str):
                 stack.append(value)
@@ -563,6 +699,14 @@ def _coerce_text(value: Any) -> str | None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def _first_mapping_value(mapping: Mapping[str, Any], keys: tuple[str, ...]) -> Any:
+    for key in keys:
+        value = _mapping_get_case_insensitive(mapping, key)
+        if value is not None:
+            return value
+    return None
 
 
 def _mapping_get_case_insensitive(mapping: Mapping[str, Any], key: str) -> Any:

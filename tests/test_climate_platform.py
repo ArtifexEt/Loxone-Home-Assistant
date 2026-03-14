@@ -41,6 +41,7 @@ def _install_homeassistant_stubs() -> None:
 
     class ClimateEntityFeature:
         TARGET_TEMPERATURE = 1
+        PRESET_MODE = 2
 
     class HVACMode:
         AUTO = "auto"
@@ -116,9 +117,10 @@ class _FakeBridge:
     serial = "1234567890"
     available = True
 
-    def __init__(self, values, controls=None):
+    def __init__(self, values, controls=None, operating_modes=None):
         self._values = values
         self.controls = controls or []
+        self.operating_modes = operating_modes or {}
         self.commands: list[tuple[str, str]] = []
 
     def add_listener(self, _callback_fn, _watched_uuids):
@@ -283,6 +285,94 @@ class ClimateCommandMappingTests(unittest.IsolatedAsyncioTestCase):
         await entity.async_set_temperature(temperature=22.5)
 
         self.assertEqual(bridge.commands, [("ac-action", "setTarget/22.5")])
+
+    async def test_climate_exposes_operating_modes_as_preset_options(self) -> None:
+        control = LoxoneControl(
+            uuid="climate-uuid",
+            uuid_action="climate-action",
+            name="Salon",
+            type="IRoomControllerV2",
+            states={
+                "tempTarget": "state-target",
+                "operatingMode": "state-operating-mode",
+            },
+        )
+        bridge = _FakeBridge(
+            {
+                "state-target": 22,
+                "state-operating-mode": 1,
+            },
+            operating_modes={
+                "0": "Auto",
+                "1": "Comfort",
+                "2": "Eco",
+            },
+        )
+        entity = LoxoneClimateEntity(bridge, control)
+
+        self.assertEqual(entity.preset_modes, ["Auto", "Comfort", "Eco"])
+        self.assertEqual(entity.preset_mode, "Comfort")
+
+        await entity.async_set_preset_mode("Eco")
+
+        self.assertEqual(bridge.commands, [("climate-action", "setOperatingMode/2")])
+
+    async def test_climate_uses_operating_modes_from_control_details(self) -> None:
+        control = LoxoneControl(
+            uuid="climate-uuid",
+            uuid_action="climate-action",
+            name="Biuro",
+            type="IRoomControllerV2",
+            states={
+                "tempTarget": "state-target",
+                "operatingMode": "state-operating-mode",
+            },
+            details={
+                "operatingModes": [
+                    {"id": 1, "name": "Comfort"},
+                    {"id": 3, "name": "Sleep"},
+                ]
+            },
+        )
+        bridge = _FakeBridge(
+            {
+                "state-target": 22,
+                "state-operating-mode": "3",
+            }
+        )
+        entity = LoxoneClimateEntity(bridge, control)
+
+        self.assertEqual(entity.preset_modes, ["Comfort", "Sleep"])
+        self.assertEqual(entity.preset_mode, "Sleep")
+
+    async def test_ac_control_uses_set_mode_for_operating_mode_changes(self) -> None:
+        control = LoxoneControl(
+            uuid="ac-uuid",
+            uuid_action="ac-action",
+            name="Salon AC",
+            type="ACControl",
+            states={
+                "targetTemperature": "state-target",
+                "mode": "state-mode",
+            },
+            details={
+                "operatingModes": [
+                    {"id": 0, "name": "Cool"},
+                    {"id": 1, "name": "Heat"},
+                ]
+            },
+        )
+        bridge = _FakeBridge(
+            {
+                "state-target": 24,
+                "state-mode": 0,
+            }
+        )
+        entity = LoxoneClimateEntity(bridge, control)
+
+        await entity.async_set_preset_mode("Heat")
+
+        self.assertEqual(bridge.commands, [("ac-action", "setMode/1")])
 
 
 class ClimateSetupAliasTests(unittest.IsolatedAsyncioTestCase):

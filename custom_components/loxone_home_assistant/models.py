@@ -79,3 +79,4 @@ class LoxoneStructure:
     controls_by_action: dict[str, LoxoneControl]
     states: dict[str, LoxoneStateRef]
     media_servers_by_uuid_action: dict[str, LoxoneMediaServer] = field(default_factory=dict)
+    operating_modes: dict[str, str] = field(default_factory=dict)

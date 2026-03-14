@@ -100,6 +100,7 @@ def parse_structure(payload: Mapping[str, Any]) -> LoxoneStructure:
     _rebuild_paths_from_parent_links(controls_by_action)
     states = _build_state_refs(controls)
     media_servers_by_uuid_action = _parse_media_servers(payload.get("mediaServer"))
+    operating_modes = _parse_operating_modes(payload.get("operatingModes"))
 
     return LoxoneStructure(
         miniserver_name=_safe_name(ms_info.get("msName")) or default_hub_name,
@@ -110,6 +111,7 @@ def parse_structure(payload: Mapping[str, Any]) -> LoxoneStructure:
         controls_by_action=controls_by_action,
         states=states,
         media_servers_by_uuid_action=media_servers_by_uuid_action,
+        operating_modes=operating_modes,
     )
 
 
@@ -321,6 +323,90 @@ def _parse_media_servers(raw_media_servers: Any) -> dict[str, LoxoneMediaServer]
         )
 
     return parsed
+
+
+def _parse_operating_modes(raw_operating_modes: Any) -> dict[str, str]:
+    parsed: dict[str, str] = {}
+
+    if isinstance(raw_operating_modes, Mapping):
+        entries: list[tuple[str | None, Any]] = list(raw_operating_modes.items())
+    elif isinstance(raw_operating_modes, list):
+        entries = [(None, item) for item in raw_operating_modes]
+    else:
+        return parsed
+
+    next_fallback_id = 0
+    for raw_mode_id, raw_mode in entries:
+        mode_id: str | None = _coerce_mode_id(raw_mode_id)
+        mode_name: str | None = None
+
+        if isinstance(raw_mode, Mapping):
+            mode_id = _coerce_mode_id(
+                raw_mode.get("id", raw_mode.get("modeId", raw_mode.get("mode")))
+            ) or mode_id
+            mode_name = _first_non_empty_name(
+                raw_mode.get("name"),
+                raw_mode.get("title"),
+                raw_mode.get("text"),
+                raw_mode.get("description"),
+            )
+        elif isinstance(raw_mode, str):
+            mode_name = raw_mode.strip() or None
+
+        if mode_id is None:
+            mode_id = str(next_fallback_id)
+            next_fallback_id += 1
+
+        if not mode_name:
+            mode_name = f"Mode {mode_id}"
+
+        parsed.setdefault(mode_id, mode_name)
+
+    return dict(sorted(parsed.items(), key=lambda item: _mode_sort_key(item[0])))
+
+
+def _coerce_mode_id(value: Any) -> str | None:
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        return str(int(value)) if value.is_integer() else str(value)
+    if isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return None
+        try:
+            numeric = float(raw.replace(",", "."))
+        except ValueError:
+            return raw
+        if numeric.is_integer():
+            return str(int(numeric))
+        return raw
+    return None
+
+
+def _first_non_empty_name(*candidates: Any) -> str | None:
+    for candidate in candidates:
+        if isinstance(candidate, str):
+            normalized = candidate.strip()
+            if normalized:
+                return normalized
+        elif isinstance(candidate, Mapping):
+            nested = _first_non_empty_name(*candidate.values())
+            if nested:
+                return nested
+    return None
+
+
+def _mode_sort_key(value: str) -> tuple[int, int | float | str]:
+    try:
+        number = float(value)
+    except ValueError:
+        return (1, value.casefold())
+    if number.is_integer():
+        return (0, int(number))
+    return (0, number)
 
 
 def _normalize_mac(value: str) -> str | None:

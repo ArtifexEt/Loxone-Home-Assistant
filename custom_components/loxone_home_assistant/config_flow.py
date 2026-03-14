@@ -54,7 +54,6 @@ from .runtime import runtime_bridge
 from .versioning import MIN_SUPPORTED_VERSION_TEXT
 
 _LOGGER = logging.getLogger(__name__)
-CONF_USE_MANUAL_SETUP = "use_manual_setup"
 
 
 class LoxoneCommunityConfigFlow(ConfigFlow, domain=DOMAIN):
@@ -66,6 +65,8 @@ class LoxoneCommunityConfigFlow(ConfigFlow, domain=DOMAIN):
         self._auth_data: dict[str, Any] = {}
         self._devices: list[DiscoveryResult] = []
         self._legacy_found = False
+        self._pending_entry_data: dict[str, Any] | None = None
+        self._pending_entry_title: str | None = None
         self._setup_options: dict[str, bool] = {
             CONF_ENABLE_LIGHT_MOOD_SELECT: DEFAULT_ENABLE_LIGHT_MOOD_SELECT,
             CONF_EXPOSE_CONTROLLER_CHILD_LIGHTS: DEFAULT_EXPOSE_CONTROLLER_CHILD_LIGHTS,
@@ -75,6 +76,9 @@ class LoxoneCommunityConfigFlow(ConfigFlow, domain=DOMAIN):
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
+        if self._pending_entry_data is None:
+            return await self.async_step_auto()
+
         if user_input is not None:
             self._setup_options = {
                 CONF_ENABLE_LIGHT_MOOD_SELECT: _coerce_bool(
@@ -90,9 +94,7 @@ class LoxoneCommunityConfigFlow(ConfigFlow, domain=DOMAIN):
                     DEFAULT_AUTO_CREATE_AUTOMATIONS,
                 ),
             }
-            if _coerce_bool(user_input.get(CONF_USE_MANUAL_SETUP), False):
-                return await self.async_step_manual()
-            return await self.async_step_auto()
+            return self._async_create_entry_from_pending()
 
         return self._async_show_setup_form()
 
@@ -101,6 +103,8 @@ class LoxoneCommunityConfigFlow(ConfigFlow, domain=DOMAIN):
     ) -> ConfigFlowResult:
         errors: dict[str, str] = {}
         if user_input is not None:
+            self._pending_entry_data = None
+            self._pending_entry_title = None
             self._auth_data = {
                 CONF_USERNAME: user_input[CONF_USERNAME],
                 CONF_PASSWORD: user_input[CONF_PASSWORD],
@@ -157,6 +161,8 @@ class LoxoneCommunityConfigFlow(ConfigFlow, domain=DOMAIN):
         errors = errors or {}
 
         if user_input is not None:
+            self._pending_entry_data = None
+            self._pending_entry_title = None
             self._auth_data = {
                 CONF_USERNAME: user_input[CONF_USERNAME],
                 CONF_PASSWORD: user_input[CONF_PASSWORD],
@@ -177,7 +183,6 @@ class LoxoneCommunityConfigFlow(ConfigFlow, domain=DOMAIN):
             step_id="user",
             data_schema=vol.Schema(
                 {
-                    vol.Required(CONF_USE_MANUAL_SETUP, default=False): bool,
                     vol.Required(
                         CONF_ENABLE_LIGHT_MOOD_SELECT,
                         default=self._setup_option_value(
@@ -244,6 +249,34 @@ class LoxoneCommunityConfigFlow(ConfigFlow, domain=DOMAIN):
             errors=errors,
         )
 
+    def _async_create_entry_from_pending(self) -> ConfigFlowResult:
+        if self._pending_entry_data is None or self._pending_entry_title is None:
+            return self._async_show_auto_form(errors={})
+
+        pending_entry_title = self._pending_entry_title
+        pending_entry_data = dict(self._pending_entry_data)
+        self._pending_entry_title = None
+        self._pending_entry_data = None
+
+        return self.async_create_entry(
+            title=pending_entry_title,
+            data={
+                **pending_entry_data,
+                CONF_ENABLE_LIGHT_MOOD_SELECT: self._setup_option_value(
+                    CONF_ENABLE_LIGHT_MOOD_SELECT,
+                    DEFAULT_ENABLE_LIGHT_MOOD_SELECT,
+                ),
+                CONF_EXPOSE_CONTROLLER_CHILD_LIGHTS: self._setup_option_value(
+                    CONF_EXPOSE_CONTROLLER_CHILD_LIGHTS,
+                    DEFAULT_EXPOSE_CONTROLLER_CHILD_LIGHTS,
+                ),
+                CONF_AUTO_CREATE_AUTOMATIONS: self._setup_option_value(
+                    CONF_AUTO_CREATE_AUTOMATIONS,
+                    DEFAULT_AUTO_CREATE_AUTOMATIONS,
+                ),
+            },
+        )
+
     def _setup_option_value(self, key: str, default: bool) -> bool:
         return _coerce_bool(self._setup_options.get(key), default)
 
@@ -291,31 +324,18 @@ class LoxoneCommunityConfigFlow(ConfigFlow, domain=DOMAIN):
         await self.async_set_unique_id(info[CONF_SERIAL])
         self._abort_if_unique_id_configured(updates={CONF_HOST: device.host, CONF_PORT: device.port})
 
-        return self.async_create_entry(
-            title=_normalize_entry_title(info["title"]),
-            data={
-                **entry_data,
-                CONF_CLIENT_UUID: info[CONF_CLIENT_UUID],
-                CONF_SERIAL: info[CONF_SERIAL],
-                CONF_LOXAPP_VERSION: info[CONF_LOXAPP_VERSION],
-                CONF_SOFTWARE_VERSION: info[CONF_SOFTWARE_VERSION],
-                CONF_SERVER_MODEL: info[CONF_SERVER_MODEL],
-                CONF_TOKEN: info.get(CONF_TOKEN),
-                CONF_TOKEN_VALID_UNTIL: info.get(CONF_TOKEN_VALID_UNTIL),
-                CONF_ENABLE_LIGHT_MOOD_SELECT: self._setup_option_value(
-                    CONF_ENABLE_LIGHT_MOOD_SELECT,
-                    DEFAULT_ENABLE_LIGHT_MOOD_SELECT,
-                ),
-                CONF_EXPOSE_CONTROLLER_CHILD_LIGHTS: self._setup_option_value(
-                    CONF_EXPOSE_CONTROLLER_CHILD_LIGHTS,
-                    DEFAULT_EXPOSE_CONTROLLER_CHILD_LIGHTS,
-                ),
-                CONF_AUTO_CREATE_AUTOMATIONS: self._setup_option_value(
-                    CONF_AUTO_CREATE_AUTOMATIONS,
-                    DEFAULT_AUTO_CREATE_AUTOMATIONS,
-                ),
-            },
-        )
+        self._pending_entry_title = _normalize_entry_title(info["title"])
+        self._pending_entry_data = {
+            **entry_data,
+            CONF_CLIENT_UUID: info[CONF_CLIENT_UUID],
+            CONF_SERIAL: info[CONF_SERIAL],
+            CONF_LOXAPP_VERSION: info[CONF_LOXAPP_VERSION],
+            CONF_SOFTWARE_VERSION: info[CONF_SOFTWARE_VERSION],
+            CONF_SERVER_MODEL: info[CONF_SERVER_MODEL],
+            CONF_TOKEN: info.get(CONF_TOKEN),
+            CONF_TOKEN_VALID_UNTIL: info.get(CONF_TOKEN_VALID_UNTIL),
+        }
+        return self._async_show_setup_form()
 
     @staticmethod
     @callback

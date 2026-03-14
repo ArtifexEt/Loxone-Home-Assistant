@@ -311,6 +311,31 @@ class ParseStructureTests(unittest.TestCase):
         self.assertEqual(media_server.states["connState"], "state-conn")
         self.assertEqual(media_server.states["host"], "state-host")
 
+    def test_parse_structure_parses_global_operating_modes(self) -> None:
+        payload = {
+            "msInfo": {
+                "msName": "Dom",
+                "serialNr": "1234567890",
+            },
+            "controls": {},
+            "operatingModes": {
+                "0": {"name": "Auto"},
+                "2": {"title": "Eco"},
+                "3": "Comfort",
+            },
+        }
+
+        structure = parse_structure(payload)
+
+        self.assertEqual(
+            structure.operating_modes,
+            {
+                "0": "Auto",
+                "2": "Eco",
+                "3": "Comfort",
+            },
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -379,6 +379,135 @@ class CameraPlatformTests(unittest.IsolatedAsyncioTestCase):
         image = await entity.async_camera_image()
         self.assertEqual(image, b"external-live")
 
+    async def test_intercom_v2_video_settings_list_payload_resolves_urls(self) -> None:
+        control = LoxoneControl(
+            uuid="intercom-v2-uuid",
+            uuid_action="intercom-v2-action",
+            name="Brama",
+            type="IntercomV2",
+            states={
+                "videoSettingsExtern": "state-video-settings",
+                "address": "state-address",
+            },
+            details={},
+        )
+        expected_stream_url = "https://198.51.100.70/rest/stream.mjpg"
+        expected_snapshot_url = "https://198.51.100.70/rest/live.jpg"
+        expected_history_url = "https://198.51.100.70/rest/events.json"
+        session = _FakeSession(
+            {
+                (expected_snapshot_url, True): (200, b"external-live"),
+            }
+        )
+        bridge = _FakeBridge(
+            [control],
+            {
+                "state-address": "198.51.100.70",
+                "state-video-settings": [
+                    {"name": "streamUrl", "value": "/rest/stream.mjpg"},
+                    {"name": "alertImage", "value": "/rest/live.jpg"},
+                    {"name": "lastBellEvents", "value": "/rest/events.json"},
+                ],
+            },
+            session,
+        )
+        entity = LoxoneIntercomCameraEntity(bridge, control)
+
+        self.assertEqual(await entity.stream_source(), expected_stream_url)
+        self.assertEqual(entity.extra_state_attributes["snapshot_url"], expected_snapshot_url)
+        self.assertEqual(
+            entity.extra_state_attributes["history_events_url"],
+            expected_history_url,
+        )
+        image = await entity.async_camera_image()
+        self.assertEqual(image, b"external-live")
+
+    async def test_camera_uses_selected_history_image_from_intercom_history_select(self) -> None:
+        control = LoxoneControl(
+            uuid="intercom-v2-uuid",
+            uuid_action="intercom-v2-action",
+            name="Brama",
+            type="IntercomV2",
+            states={
+                "videoSettingsExtern": "state-video-settings",
+                "address": "state-address",
+            },
+            details={},
+        )
+        expected_stream_url = "https://198.51.100.70/rest/stream.mjpg"
+        expected_selected_image_url = "https://198.51.100.70/rest/history-older.jpg"
+        session = _FakeSession(
+            {
+                (expected_selected_image_url, True): (200, b"old-image"),
+            }
+        )
+        bridge = _FakeBridge(
+            [control],
+            {
+                "state-address": "198.51.100.70",
+                "state-video-settings": {
+                    "streamUrl": "/rest/stream.mjpg",
+                    "alertImage": "/rest/live.jpg",
+                    "lastBellEvents": "/rest/events.json",
+                },
+            },
+            session,
+        )
+        bridge._intercom_selected_history_images = {  # noqa: SLF001
+            "intercom-v2-action": "/rest/history-older.jpg",
+        }
+        entity = LoxoneIntercomCameraEntity(bridge, control)
+
+        self.assertEqual(await entity.stream_source(), expected_stream_url)
+        self.assertEqual(
+            entity.extra_state_attributes["selected_history_image_url"],
+            expected_selected_image_url,
+        )
+
+        image = await entity.async_camera_image()
+        self.assertEqual(image, b"old-image")
+
+    async def test_intercom_v2_uses_flexible_detail_keys_for_stream_snapshot_and_history(self) -> None:
+        control = LoxoneControl(
+            uuid="intercom-v2-uuid",
+            uuid_action="intercom-v2-action",
+            name="Brama",
+            type="IntercomV2",
+            states={
+                "address": "state-address",
+            },
+            details={
+                "videoSettings": {
+                    "streamUrlExtern": "/rest/stream.mjpg",
+                    "liveImage": "/rest/live.jpg",
+                    "eventHistoryUrl": "/rest/events.json",
+                }
+            },
+        )
+        expected_stream_url = "https://198.51.100.70/rest/stream.mjpg"
+        expected_snapshot_url = "https://198.51.100.70/rest/live.jpg"
+        expected_history_url = "https://198.51.100.70/rest/events.json"
+        session = _FakeSession(
+            {
+                (expected_snapshot_url, True): (200, b"external-live"),
+            }
+        )
+        bridge = _FakeBridge(
+            [control],
+            {
+                "state-address": "198.51.100.70",
+            },
+            session,
+        )
+        entity = LoxoneIntercomCameraEntity(bridge, control)
+
+        self.assertEqual(await entity.stream_source(), expected_stream_url)
+        self.assertEqual(entity.extra_state_attributes["snapshot_url"], expected_snapshot_url)
+        self.assertEqual(
+            entity.extra_state_attributes["history_events_url"],
+            expected_history_url,
+        )
+
     async def test_camera_setup_accepts_variant_type_and_case_insensitive_details(self) -> None:
         control = LoxoneControl(
             uuid="door-station-uuid",

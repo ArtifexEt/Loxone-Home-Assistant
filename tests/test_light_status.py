@@ -266,6 +266,32 @@ class LightStatusTests(unittest.TestCase):
         self.assertTrue(light_module.should_expose_as_light(bridge, child_dimmer, True))
         self.assertFalse(light_module.should_expose_as_light(bridge, child_dimmer, False))
 
+    def test_child_controller_is_always_exposed_as_light(self) -> None:
+        parent_controller = LoxoneControl(
+            uuid="parent-uuid",
+            uuid_action="parent-action",
+            name="Centralny",
+            type="LightControllerV2",
+            states={"activeMoods": "state-parent-moods"},
+        )
+        child_controller = LoxoneControl(
+            uuid="child-uuid",
+            uuid_action="child-action",
+            name="Salon",
+            type="LightControllerV2",
+            states={"activeMoods": "state-child-moods"},
+            parent_uuid_action="parent-action",
+        )
+        bridge = _FakeBridge([parent_controller, child_controller], {})
+
+        self.assertTrue(
+            light_module.should_expose_as_light(
+                bridge,
+                child_controller,
+                expose_controller_children=False,
+            )
+        )
+
     def test_controller_detects_child_referenced_in_details(self) -> None:
         controller = LoxoneControl(
             uuid="ctrl-uuid",
@@ -323,6 +349,26 @@ class LightMoodEffectsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(entity.effect_list, ["Reading", "Evening"])
         self.assertEqual(entity.effect, "Evening")
         self.assertTrue(entity.supported_features & 4)
+
+    def test_controller_accepts_mapping_mood_list_for_effects(self) -> None:
+        controller = LoxoneControl(
+            uuid="ctrl-uuid",
+            uuid_action="ctrl-action",
+            name="Salon",
+            type="LightControllerV2",
+            states={"activeMoods": "state-moods"},
+            details={
+                "moodList": {
+                    "12": "Reading",
+                    "55": "Evening",
+                }
+            },
+        )
+        bridge = _FakeBridge([controller], {"state-moods": "55"})
+        entity = LoxoneLightEntity(bridge, controller)
+
+        self.assertEqual(entity.effect_list, ["Reading", "Evening"])
+        self.assertEqual(entity.effect, "Evening")
 
     async def test_turn_on_with_effect_sends_change_to_command(self) -> None:
         controller = self._controller()

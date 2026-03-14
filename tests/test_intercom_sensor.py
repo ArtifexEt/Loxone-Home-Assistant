@@ -312,6 +312,118 @@ class IntercomSensorTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("history_events_url", attrs)
         self.assertEqual(session.calls, [])
 
+    async def test_history_sensor_resolves_event_url_from_video_settings_state(self) -> None:
+        control = LoxoneControl(
+            uuid="intercom-uuid",
+            uuid_action="intercom-action",
+            name="Furtka",
+            type="IntercomV2",
+            states={
+                "videoSettingsExtern": "state-video-settings",
+                "address": "state-address",
+            },
+        )
+        events_url = "https://198.51.100.70/rest/events.json"
+        session = _FakeSession(
+            {
+                events_url: [
+                    {
+                        "timestamp": "2026-03-14T12:30:00Z",
+                        "imageUrl": "/rest/latest.jpg",
+                    }
+                ]
+            }
+        )
+        bridge = _FakeBridge(
+            [control],
+            {
+                "state-address": "198.51.100.70",
+                "state-video-settings": {
+                    "streamUrl": "/rest/stream.mjpg",
+                    "alertImage": "/rest/live.jpg",
+                    "lastBellEvents": "/rest/events.json",
+                },
+            },
+            session=session,
+        )
+        entry = _FakeConfigEntry("entry-1")
+        hass = _FakeHass(entry.entry_id, bridge, const.DOMAIN)
+        entities: list = []
+
+        await sensor_module.async_setup_entry(
+            hass,
+            entry,
+            lambda new_entities: entities.extend(new_entities),
+        )
+
+        self.assertEqual(len(entities), 1)
+        history_entity = entities[0]
+        await history_entity.async_update()
+
+        attrs = history_entity.extra_state_attributes
+        self.assertEqual(attrs["history_events_url"], events_url)
+        self.assertEqual(
+            attrs["latest_event_image_url"],
+            "https://198.51.100.70/rest/latest.jpg",
+        )
+        self.assertEqual(session.calls, [events_url])
+
+    async def test_history_sensor_resolves_event_url_from_video_settings_list_payload(self) -> None:
+        control = LoxoneControl(
+            uuid="intercom-uuid",
+            uuid_action="intercom-action",
+            name="Furtka",
+            type="IntercomV2",
+            states={
+                "videoSettingsExtern": "state-video-settings",
+                "address": "state-address",
+            },
+        )
+        events_url = "https://198.51.100.70/rest/events.json"
+        session = _FakeSession(
+            {
+                events_url: [
+                    {
+                        "timestamp": "2026-03-14T12:30:00Z",
+                        "imageUrl": "/rest/latest.jpg",
+                    }
+                ]
+            }
+        )
+        bridge = _FakeBridge(
+            [control],
+            {
+                "state-address": "198.51.100.70",
+                "state-video-settings": [
+                    {"name": "streamUrl", "value": "/rest/stream.mjpg"},
+                    {"name": "alertImage", "value": "/rest/live.jpg"},
+                    {"name": "lastBellEvents", "value": "/rest/events.json"},
+                ],
+            },
+            session=session,
+        )
+        entry = _FakeConfigEntry("entry-1")
+        hass = _FakeHass(entry.entry_id, bridge, const.DOMAIN)
+        entities: list = []
+
+        await sensor_module.async_setup_entry(
+            hass,
+            entry,
+            lambda new_entities: entities.extend(new_entities),
+        )
+
+        self.assertEqual(len(entities), 1)
+        history_entity = entities[0]
+        await history_entity.async_update()
+
+        attrs = history_entity.extra_state_attributes
+        self.assertEqual(attrs["history_events_url"], events_url)
+        self.assertEqual(
+            attrs["latest_event_image_url"],
+            "https://198.51.100.70/rest/latest.jpg",
+        )
+        self.assertEqual(session.calls, [events_url])
+
     async def test_intercom_system_schema_webpage_is_disabled_by_default(self) -> None:
         intercom = LoxoneControl(
             uuid="intercom-uuid",

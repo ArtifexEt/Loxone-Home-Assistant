@@ -2,13 +2,15 @@
   "config": {
     "step": {
       "user": {
-        "title": "Wybierz tryb instalacji",
-        "description": "Wybierz automatyczne wyszukiwanie w sieci lokalnej lub konfigurację manualną hosta. Na tym etapie możesz też ustawić checkboxy encji oświetlenia i automatyzacji.",
+        "title": "Dodatkowe opcje instalacji",
+        "description": "Wyszukiwanie i logowanie zostały zakończone. Ustaw opcjonalne zachowanie encji oświetlenia i automatyzacji.",
         "data": {
-          "use_manual_setup": "Manualna konfiguracja hosta (bez automatycznego wyszukiwania)",
           "enable_light_mood_select": "Wystaw selektor nastroju LightController",
           "expose_controller_child_lights": "Wystaw indywidualne światła w LightController",
           "auto_create_automations": "Automatycznie dodawaj sugerowane automatyzacje"
+        },
+        "data_description": {
+          "expose_controller_child_lights": "Ostrzeżenie: wyłączenie tej opcji usuwa te encje z Home Assistant (mogą zniknąć z dashboardów i automatyzacji)."
         }
       },
       "auto": {
@@ -53,7 +55,7 @@
     "step": {
       "init": {
         "title": "Opcje Loxone",
-        "description": "Hub: {entry_title}\nNumer seryjny: {serial}\nWersja struktury LoxAPP: {loxapp_version}\nWykryta wersja oprogramowania API Loxone: {current_api_version}\nMinimalna wspierana wersja API: {min_api_version}\n\nOstrzeżenie: Wyłączenie opcji indywidualnych świateł usuwa te encje z Home Assistant (mogą zniknąć z dashboardów i automatyzacji).",
+        "description": "Hub: {entry_title}\nNumer seryjny: {serial}\nWersja struktury LoxAPP: {loxapp_version}\nWykryta wersja oprogramowania API Loxone: {current_api_version}\nMinimalna wspierana wersja API: {min_api_version}",
         "data": {
           "host": "Host",
           "port": "Port",
@@ -64,6 +66,9 @@
           "enable_light_mood_select": "Wystaw selektor nastroju LightController",
           "expose_controller_child_lights": "Wystaw indywidualne światła w LightController",
           "auto_create_automations": "Automatycznie dodawaj sugerowane automatyzacje"
+        },
+        "data_description": {
+          "expose_controller_child_lights": "Ostrzeżenie: wyłączenie tej opcji usuwa te encje z Home Assistant (mogą zniknąć z dashboardów i automatyzacji)."
         }
       }
     }

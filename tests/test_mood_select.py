@@ -58,6 +58,28 @@ def _install_homeassistant_stubs() -> None:
 
     select.SelectEntity = SelectEntity
 
+    sensor = sys.modules["homeassistant.components.sensor"]
+
+    class SensorEntity:
+        pass
+
+    class SensorStateClass:
+        MEASUREMENT = "measurement"
+        TOTAL_INCREASING = "total_increasing"
+
+    class SensorDeviceClass:
+        TIMESTAMP = "timestamp"
+        ENERGY = "energy"
+        POWER = "power"
+        HUMIDITY = "humidity"
+        CO2 = "co2"
+        VOLATILE_ORGANIC_COMPOUNDS = "voc"
+        AQI = "aqi"
+
+    sensor.SensorEntity = SensorEntity
+    sensor.SensorStateClass = SensorStateClass
+    sensor.SensorDeviceClass = SensorDeviceClass
+
     const = types.ModuleType("homeassistant.const")
 
     class Platform:
@@ -134,17 +156,25 @@ select_module = load_integration_module("custom_components.loxone_home_assistant
 LoxoneControl = models.LoxoneControl
 LoxoneMoodSelectEntity = select_module.LoxoneMoodSelectEntity
 LoxoneRadioOutputSelectEntity = select_module.LoxoneRadioOutputSelectEntity
+LoxoneIntercomHistorySelectEntity = select_module.LoxoneIntercomHistorySelectEntity
 
 
 class _FakeBridge:
     serial = "1234567890"
     available = True
+    username = "user"
+    password = "pass"
+    host = "mini.local"
+    port = 443
+    use_tls = True
+    _ws_path_prefix = ""
 
     def __init__(self, controls, values):
         self.controls = controls
         self._controls_by_action = {control.uuid_action: control for control in controls}
         self._values = values
         self.commands: list[tuple[str, str]] = []
+        self._session = None
 
     def add_listener(self, _callback_fn, _watched_uuids):
         return lambda: None
@@ -160,6 +190,17 @@ class _FakeBridge:
 
     async def async_send_action(self, uuid_action, command):
         self.commands.append((uuid_action, command))
+
+    def resolve_http_url(self, value: str | None) -> str | None:
+        if not isinstance(value, str):
+            return None
+        raw = value.strip()
+        if not raw:
+            return None
+        if raw.startswith("http://") or raw.startswith("https://"):
+            return raw
+        path = raw if raw.startswith("/") else f"/{raw}"
+        return f"https://{self.host}{path}"
 
 
 class MoodSelectTests(unittest.IsolatedAsyncioTestCase):
@@ -197,6 +238,26 @@ class MoodSelectTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(bridge.commands, [("ctrl-action", "changeTo/12")])
 
+    def test_mood_select_accepts_mapping_mood_list(self) -> None:
+        controller = LoxoneControl(
+            uuid="ctrl-uuid",
+            uuid_action="ctrl-action",
+            name="Salon",
+            type="LightControllerV2",
+            states={"activeMoods": "state-moods"},
+            details={
+                "moodList": {
+                    "12": "Reading",
+                    "55": "Evening",
+                }
+            },
+        )
+        bridge = _FakeBridge([controller], {"state-moods": "55"})
+        entity = LoxoneMoodSelectEntity(bridge, controller)
+
+        self.assertEqual(entity._attr_options, ["Off", "Reading", "Evening"])
+        self.assertEqual(entity.current_option, "Evening")
+
     async def test_radio_select_maps_outputs_and_reset_command(self) -> None:
         radio = LoxoneControl(
             uuid="radio-uuid",
@@ -218,6 +279,53 @@ class MoodSelectTests(unittest.IsolatedAsyncioTestCase):
             bridge.commands,
             [("radio-action", "1"), ("radio-action", "reset")],
         )
+
+    async def test_intercom_history_select_exposes_old_photos_as_options(self) -> None:
+        intercom = LoxoneControl(
+            uuid="intercom-uuid",
+            uuid_action="intercom-action",
+            name="Dzwonek",
+            type="IntercomV2",
+            states={
+                "answers": "state-answers",
+                "address": "state-address",
+            },
+            details={},
+        )
+        bridge = _FakeBridge(
+            [intercom],
+            {
+                "state-address": "198.51.100.70",
+                "state-answers": [
+                    {
+                        "timestamp": "2026-03-14T12:30:00Z",
+                        "imageUrl": "/rest/latest.jpg",
+                    },
+                    {
+                        "timestamp": "2026-03-14T10:00:00Z",
+                        "imageUrl": "/rest/older.jpg",
+                    },
+                ],
+            },
+        )
+        entity = LoxoneIntercomHistorySelectEntity(bridge, intercom)
+
+        await entity.async_update()
+
+        self.assertEqual(entity._attr_options[0], "Live")
+        self.assertEqual(len(entity._attr_options), 3)
+
+        photo_option = entity._attr_options[1]
+        await entity.async_select_option(photo_option)
+        self.assertEqual(entity.current_option, photo_option)
+        self.assertEqual(
+            bridge._intercom_selected_history_images["intercom-action"],  # noqa: SLF001
+            "https://198.51.100.70/rest/latest.jpg",
+        )
+
+        await entity.async_select_option("Live")
+        self.assertEqual(entity.current_option, "Live")
+        self.assertNotIn("intercom-action", bridge._intercom_selected_history_images)  # noqa: SLF001
 
 
 if __name__ == "__main__":

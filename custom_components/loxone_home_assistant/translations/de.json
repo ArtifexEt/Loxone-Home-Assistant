@@ -2,13 +2,15 @@
   "config": {
     "step": {
       "user": {
-        "title": "Installationsmodus wählen",
-        "description": "Wählen Sie automatische Netzwerkerkennung oder manuelle Host-Einrichtung. Während der Erstinstallation können Sie auch Kontrollkästchen für Beleuchtung und Automatisierungen konfigurieren.",
+        "title": "Zusätzliche Einrichtungsoptionen",
+        "description": "Erkennung und Anmeldung sind abgeschlossen. Konfigurieren Sie optionales Verhalten für Beleuchtung und Automatisierungen.",
         "data": {
-          "use_manual_setup": "Manuelle Host-Einrichtung (automatische Erkennung deaktivieren)",
           "enable_light_mood_select": "Stimmungsauswahl des LightController bereitstellen",
           "expose_controller_child_lights": "Einzelne Lichter im LightController bereitstellen",
           "auto_create_automations": "Vorgeschlagene Automatisierungen automatisch hinzufügen"
+        },
+        "data_description": {
+          "expose_controller_child_lights": "Warnung: Das Deaktivieren dieser Option entfernt diese Entitäten aus Home Assistant (sie können aus Dashboards und Automatisierungen verschwinden)."
         }
       },
       "auto": {
@@ -53,7 +55,7 @@
     "step": {
       "init": {
         "title": "Loxone-Optionen",
-        "description": "Hub: {entry_title}\nSeriennummer: {serial}\nLoxAPP-Strukturversion: {loxapp_version}\nErkannte Loxone-API-Softwareversion: {current_api_version}\nMinimal unterstützte API-Softwareversion: {min_api_version}\n\nWarnung: Das Deaktivieren einzelner untergeordneter Lichter entfernt diese Entitäten aus Home Assistant (sie können aus Dashboards und Automatisierungen verschwinden).",
+        "description": "Hub: {entry_title}\nSeriennummer: {serial}\nLoxAPP-Strukturversion: {loxapp_version}\nErkannte Loxone-API-Softwareversion: {current_api_version}\nMinimal unterstützte API-Softwareversion: {min_api_version}",
         "data": {
           "host": "Host",
           "port": "Port",
@@ -64,6 +66,9 @@
           "enable_light_mood_select": "Stimmungsauswahl des LightController bereitstellen",
           "expose_controller_child_lights": "Einzelne Lichter im LightController bereitstellen",
           "auto_create_automations": "Vorgeschlagene Automatisierungen automatisch hinzufügen"
+        },
+        "data_description": {
+          "expose_controller_child_lights": "Warnung: Das Deaktivieren dieser Option entfernt diese Entitäten aus Home Assistant (sie können aus Dashboards und Automatisierungen verschwinden)."
         }
       }
     }

@@ -242,6 +242,11 @@ class LoxoneBridge:
         )
 
     @property
+    def operating_modes(self) -> dict[str, str]:
+        """Return parsed global operating mode labels keyed by mode id."""
+        return self.structure.operating_modes if self.structure else {}
+
+    @property
     def loxone_state_map(self) -> dict[str, Any]:
         """Return the live state dictionary."""
         return self.state_values
