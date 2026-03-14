@@ -1,4 +1,4 @@
-"""Tests for Loxone doorbell binary sensor behavior."""
+"""Tests for extended Loxone cover mappings (Gate + UpDownLeftRight)."""
 
 from __future__ import annotations
 
@@ -34,12 +34,19 @@ def _install_homeassistant_stubs() -> None:
         module.DOMAIN = domain
         sys.modules[f"homeassistant.components.{module_name}"] = module
 
-    binary_sensor = sys.modules["homeassistant.components.binary_sensor"]
+    cover = sys.modules["homeassistant.components.cover"]
 
-    class BinarySensorEntity:
+    class CoverEntity:
         pass
 
-    binary_sensor.BinarySensorEntity = BinarySensorEntity
+    class CoverEntityFeature:
+        OPEN = 1
+        CLOSE = 2
+        STOP = 4
+        SET_POSITION = 8
+
+    cover.CoverEntity = CoverEntity
+    cover.CoverEntityFeature = CoverEntityFeature
 
     const = types.ModuleType("homeassistant.const")
 
@@ -106,6 +113,7 @@ class _FakeBridge:
     def __init__(self, controls, values):
         self.controls = controls
         self._values = values
+        self.commands: list[tuple[str, str]] = []
 
     def add_listener(self, _callback_fn, _watched_uuids):
         return lambda: None
@@ -116,11 +124,13 @@ class _FakeBridge:
     def control_state(self, control, state_name):
         return self._values.get(control.state_uuid(state_name))
 
+    async def async_send_action(self, uuid_action, command):
+        self.commands.append((uuid_action, command))
+
 
 class _FakeConfigEntry:
     def __init__(self, entry_id: str) -> None:
         self.entry_id = entry_id
-        self.options = {}
 
 
 class _FakeHass:
@@ -131,84 +141,86 @@ class _FakeHass:
 _install_homeassistant_stubs()
 models = load_integration_module("custom_components.loxone_home_assistant.models")
 const = load_integration_module("custom_components.loxone_home_assistant.const")
-binary_sensor_module = load_integration_module(
-    "custom_components.loxone_home_assistant.binary_sensor"
-)
+cover_module = load_integration_module("custom_components.loxone_home_assistant.cover")
 LoxoneControl = models.LoxoneControl
 
 
-class DoorbellBinarySensorTests(unittest.IsolatedAsyncioTestCase):
-    """Verify doorbell states are exposed as first-class binary sensors."""
+class CoverPlatformTests(unittest.IsolatedAsyncioTestCase):
+    """Verify Gate and UpDownLeftRight mappings."""
 
-    async def test_setup_adds_doorbell_for_handled_switch_control(self) -> None:
-        switch_control = LoxoneControl(
-            uuid="switch-uuid",
-            uuid_action="switch-action",
-            name="Wejscie",
-            type="Switch",
-            states={
-                "active": "state-active",
-                "bell": "state-bell",
-            },
+    async def test_gate_commands_use_open_close_stop(self) -> None:
+        control = LoxoneControl(
+            uuid="gate-uuid",
+            uuid_action="gate-action",
+            name="Brama",
+            type="Gate",
+            states={"position": "state-position"},
         )
-        bridge = _FakeBridge(
-            [switch_control],
-            {
-                "state-active": 0,
-                "state-bell": 1,
-            },
+        bridge = _FakeBridge([control], {"state-position": 0})
+        entity = cover_module.LoxoneCoverEntity(bridge, control)
+
+        await entity.async_open_cover()
+        await entity.async_close_cover()
+        await entity.async_stop_cover()
+
+        self.assertEqual(
+            bridge.commands,
+            [("gate-action", "open"), ("gate-action", "close"), ("gate-action", "stop")],
         )
+
+    async def test_updownleftright_digital_maps_to_cover_commands(self) -> None:
+        control = LoxoneControl(
+            uuid="udlr-uuid",
+            uuid_action="udlr-action",
+            name="Roleta",
+            type="UpDownLeftRight",
+            states={"active": "state-active"},
+        )
+        bridge = _FakeBridge([control], {"state-active": False})
+        entity = cover_module.LoxoneCoverEntity(bridge, control)
+
+        await entity.async_open_cover()
+        await entity.async_close_cover()
+        await entity.async_stop_cover()
+
+        self.assertEqual(
+            bridge.commands,
+            [
+                ("udlr-action", "UpOn"),
+                ("udlr-action", "DownOn"),
+                ("udlr-action", "UpOff"),
+                ("udlr-action", "DownOff"),
+            ],
+        )
+
+    async def test_updownleftright_analog_is_excluded_from_cover_setup(self) -> None:
+        analog = LoxoneControl(
+            uuid="udlr-analog-uuid",
+            uuid_action="udlr-analog-action",
+            name="Pozycja",
+            type="UpDownLeftRight",
+            states={"value": "state-value"},
+        )
+        gate = LoxoneControl(
+            uuid="gate-uuid",
+            uuid_action="gate-action",
+            name="Brama",
+            type="Gate",
+            states={"position": "state-position"},
+        )
+        bridge = _FakeBridge([analog, gate], {})
         entry = _FakeConfigEntry("entry-1")
         hass = _FakeHass(entry.entry_id, bridge, const.DOMAIN)
-        entities = []
+        entities: list = []
 
-        await binary_sensor_module.async_setup_entry(
+        await cover_module.async_setup_entry(
             hass,
             entry,
             lambda new_entities: entities.extend(new_entities),
         )
 
         self.assertEqual(len(entities), 1)
-        self.assertIsInstance(
-            entities[0], binary_sensor_module.LoxoneDoorbellBinaryEntity
-        )
-        self.assertTrue(entities[0].is_on)
-
-    async def test_setup_avoids_diagnostic_binary_for_supported_intercom(self) -> None:
-        unsupported_control = LoxoneControl(
-            uuid="unknown-uuid",
-            uuid_action="unknown-action",
-            name="Wideodomofon",
-            type="Intercom",
-            states={
-                "bell": "state-bell",
-                "alarm": "state-alarm",
-            },
-        )
-        bridge = _FakeBridge(
-            [unsupported_control],
-            {
-                "state-bell": 0,
-                "state-alarm": 1,
-            },
-        )
-        entry = _FakeConfigEntry("entry-1")
-        hass = _FakeHass(entry.entry_id, bridge, const.DOMAIN)
-        entities = []
-
-        await binary_sensor_module.async_setup_entry(
-            hass,
-            entry,
-            lambda new_entities: entities.extend(new_entities),
-        )
-
-        self.assertEqual(len(entities), 1)
-        self.assertTrue(
-            any(
-                isinstance(entity, binary_sensor_module.LoxoneDoorbellBinaryEntity)
-                for entity in entities
-            )
-        )
+        self.assertEqual(entities[0].control.uuid_action, "gate-action")
 
 
 if __name__ == "__main__":

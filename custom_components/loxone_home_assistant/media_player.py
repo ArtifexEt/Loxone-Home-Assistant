@@ -505,7 +505,11 @@ def _repeat_mode_to_ha_value(value: int | None) -> str | None:
         return None
     if value <= 0:
         return REPEAT_OFF
-    if value == 1:
+    # Current Loxone docs define: 1=list/all, 3=track/one.
+    # Keep `2` as an all/list compatibility alias for older payload variants.
+    if value in {1, 2}:
+        return REPEAT_ALL
+    if value == 3:
         return REPEAT_ONE
     return REPEAT_ALL
 
@@ -514,8 +518,8 @@ def _ha_repeat_to_repeat_mode(value: str) -> int | None:
     normalized = value.strip().casefold()
     if normalized in {"off", "none"}:
         return 0
-    if normalized in {"one", "single"}:
-        return 1
     if normalized in {"all", "playlist"}:
-        return 2
+        return 1
+    if normalized in {"one", "single"}:
+        return 3
     return None

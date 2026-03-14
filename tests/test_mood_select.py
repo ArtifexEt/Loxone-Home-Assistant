@@ -133,6 +133,7 @@ models = load_integration_module("custom_components.loxone_home_assistant.models
 select_module = load_integration_module("custom_components.loxone_home_assistant.select")
 LoxoneControl = models.LoxoneControl
 LoxoneMoodSelectEntity = select_module.LoxoneMoodSelectEntity
+LoxoneRadioOutputSelectEntity = select_module.LoxoneRadioOutputSelectEntity
 
 
 class _FakeBridge:
@@ -195,6 +196,28 @@ class MoodSelectTests(unittest.IsolatedAsyncioTestCase):
         await entity.async_select_option("Reading")
 
         self.assertEqual(bridge.commands, [("ctrl-action", "changeTo/12")])
+
+    async def test_radio_select_maps_outputs_and_reset_command(self) -> None:
+        radio = LoxoneControl(
+            uuid="radio-uuid",
+            uuid_action="radio-action",
+            name="Radio",
+            type="Radio",
+            states={"activeOutput": "state-output"},
+            details={"outputs": {"0": "allOff", "1": "living room", "2": "kitchen"}},
+        )
+        bridge = _FakeBridge([radio], {"state-output": 2})
+        entity = LoxoneRadioOutputSelectEntity(bridge, radio)
+
+        self.assertEqual(entity.current_option, "kitchen")
+
+        await entity.async_select_option("living room")
+        await entity.async_select_option("allOff")
+
+        self.assertEqual(
+            bridge.commands,
+            [("radio-action", "1"), ("radio-action", "reset")],
+        )
 
 
 if __name__ == "__main__":

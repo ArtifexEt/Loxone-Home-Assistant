@@ -124,6 +124,12 @@ class LoxoneClimateEntity(LoxoneEntity, ClimateEntity):
         temperature = kwargs.get("temperature")
         if temperature is None:
             return
+        if self.control.type == "PoolController":
+            command = f"targetTemp/{temperature}"
+        elif self.control.type == "Sauna":
+            command = f"temp/{temperature}"
+        else:
+            command = f"setComfortTemperature/{temperature}"
         await self.bridge.async_send_action(
-            self.control.uuid_action, f"setComfortTemperature/{temperature}"
+            self.control.uuid_action, command
         )

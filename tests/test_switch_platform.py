@@ -142,6 +142,7 @@ class _FakeBridge:
 
     def __init__(self, controls):
         self.controls = controls
+        self.commands: list[tuple[str, str]] = []
 
     def add_listener(self, _callback_fn, _watched_uuids):
         return lambda: None
@@ -149,8 +150,8 @@ class _FakeBridge:
     def control_state(self, _control, _state_name):
         return None
 
-    def async_send_action(self, _uuid_action, _command):
-        raise NotImplementedError
+    async def async_send_action(self, uuid_action, command):
+        self.commands.append((uuid_action, command))
 
 
 class _FakeConfigEntry:
@@ -246,6 +247,25 @@ class SwitchPlatformSplitTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(entities), 1)
         self.assertEqual(entities[0].control.uuid_action, "child-switch-action")
+
+    async def test_car_charger_switch_uses_charge_commands(self) -> None:
+        control = LoxoneControl(
+            uuid="charger-uuid",
+            uuid_action="charger-action",
+            name="Wallbox",
+            type="CarCharger",
+            states={"charging": "state-charging"},
+        )
+        bridge = _FakeBridge([control])
+        entity = switch_module.LoxoneSwitchEntity(bridge, control)
+
+        await entity.async_turn_on()
+        await entity.async_turn_off()
+
+        self.assertEqual(
+            bridge.commands,
+            [("charger-action", "charge/on"), ("charger-action", "charge/off")],
+        )
 
 
 if __name__ == "__main__":

@@ -157,6 +157,10 @@ async def async_setup_entry(
     entities: list[SensorEntity] = []
 
     for control in bridge.controls:
+        if control.type == "Webpage":
+            entities.append(LoxoneWebpageSensor(bridge, control))
+            continue
+
         if control.type == "Meter":
             entities.append(LoxoneMeterSensor(bridge, control, "actual"))
             if control.state_uuid("total"):
@@ -452,3 +456,12 @@ class LoxoneDiagnosticSensor(LoxoneEntity, SensorEntity):
     @property
     def native_unit_of_measurement(self) -> str | None:
         return infer_unit(self.control, self._state_name)
+
+
+class LoxoneWebpageSensor(LoxoneEntity, SensorEntity):
+    """Read-only sensor exposing Webpage control target URL."""
+
+    @property
+    def native_value(self) -> Any:
+        url = self.control.details.get("url")
+        return str(url).strip() if url is not None else None

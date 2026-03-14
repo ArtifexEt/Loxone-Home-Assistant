@@ -71,16 +71,30 @@ LIGHT_CONTROL_TYPES = {
     "LightControllerV2",
     "LightsceneRGB",
 }
-SWITCH_CONTROL_TYPES = {"Switch", "TimedSwitch"}
+SWITCH_CONTROL_TYPES = {"Switch", "TimedSwitch", "Alarm", "CarCharger", "Remote"}
 BUTTON_CONTROL_TYPES = {"Pushbutton"}
-COVER_CONTROL_TYPES = {"Jalousie"}
-CLIMATE_CONTROL_TYPES = {"IRoomController", "IRoomControllerV2"}
-SENSOR_CONTROL_TYPES = {"InfoOnlyAnalog", "Meter", "TextState"}
-BINARY_SENSOR_CONTROL_TYPES = {"InfoOnlyDigital", "PresenceDetector", "SmokeAlarm"}
+COVER_CONTROL_TYPES = {"Jalousie", "Gate", "UpDownLeftRight"}
+CLIMATE_CONTROL_TYPES = {"IRoomController", "IRoomControllerV2", "PoolController", "Sauna"}
+SENSOR_CONTROL_TYPES = {
+    "AlarmClock",
+    "Daytimer",
+    "Fronius",
+    "Heatmixer",
+    "Hourcounter",
+    "InfoOnlyAnalog",
+    "Intercom",
+    "IntercomV2",
+    "Meter",
+    "TextState",
+    "Tracker",
+    "Webpage",
+}
+BINARY_SENSOR_CONTROL_TYPES = {"Alarm", "InfoOnlyDigital", "PresenceDetector", "SmokeAlarm"}
 POWER_SUPPLY_CONTROL_TYPES = {"PowerSupply", "PowerSupplyV2"}
-NUMBER_CONTROL_TYPES = {"Slider"}
+NUMBER_CONTROL_TYPES = {"Slider", "UpDownLeftRight", "ValueSelector"}
 TEXT_CONTROL_TYPES = {"TextInput"}
 MEDIA_PLAYER_CONTROL_TYPES = {"AudioZone", "AudioZoneV2"}
+RADIO_SELECT_CONTROL_TYPES = {"Radio"}
 
 DOORBELL_STATE_CANDIDATES = (
     "bell",
@@ -166,6 +180,7 @@ HANDLED_CONTROL_TYPES = (
     | NUMBER_CONTROL_TYPES
     | TEXT_CONTROL_TYPES
     | MEDIA_PLAYER_CONTROL_TYPES
+    | RADIO_SELECT_CONTROL_TYPES
 )
 
 BOOLEAN_STATE_NAMES = {

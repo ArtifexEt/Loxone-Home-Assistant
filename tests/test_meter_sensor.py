@@ -114,6 +114,7 @@ models = load_integration_module("custom_components.loxone_home_assistant.models
 sensor_module = load_integration_module("custom_components.loxone_home_assistant.sensor")
 LoxoneControl = models.LoxoneControl
 LoxoneMeterSensor = sensor_module.LoxoneMeterSensor
+LoxoneWebpageSensor = sensor_module.LoxoneWebpageSensor
 
 
 class _FakeBridge:
@@ -173,6 +174,20 @@ class MeterSensorTests(unittest.TestCase):
 
         self.assertEqual(entity.native_unit_of_measurement, "kWh")
         self.assertEqual(entity.device_class, sensor_module.SensorDeviceClass.ENERGY)
+
+    def test_webpage_sensor_exposes_url_from_details(self) -> None:
+        control = LoxoneControl(
+            uuid="webpage-uuid",
+            uuid_action="webpage-action",
+            name="Kamera",
+            type="Webpage",
+            states={},
+            details={"url": "https://example.local/cam"},
+        )
+        bridge = _FakeBridge({})
+        entity = LoxoneWebpageSensor(bridge, control)
+
+        self.assertEqual(entity.native_value, "https://example.local/cam")
 
 
 if __name__ == "__main__":

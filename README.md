@@ -62,22 +62,6 @@ If the button does not open the flow directly, use `Settings -> Devices & Servic
 - `InfoOnlyDigital`
 - `PowerSupply`
 - `PowerSupplyV2`
-- `TextState`
-- `Meter`
-- `Slider`
-- `TextInput`
-- `AudioZone`
-- `AudioZoneV2`
-- access/keypad-style controls with `access`/`granted` and `wrongCode`/`denied` states (exposed as binary sensors)
-
-Unsupported block types are still exposed, when possible, as disabled-by-default diagnostic sensors or binary sensors based on their raw states.
-
-## Cross-check against the official Config 8 structure reference
-
-Compared with the official Loxone Config 8 structure document
-([EN_KB_Diagram_Config8_API_Structure.pdf](https://www.loxone.com/enen/wp-content/uploads/sites/3/2016/10/EN_KB_Diagram_Config8_API_Structure.pdf)),
-Loxone exposes additional control types that are not yet mapped to dedicated Home Assistant entity models in this integration, for example:
-
 - `Alarm`
 - `AlarmClock`
 - `CarCharger`
@@ -95,8 +79,36 @@ Loxone exposes additional control types that are not yet mapped to dedicated Hom
 - `UpDownLeftRight` (digital and analog)
 - `ValueSelector`
 - `Webpage`
+- `TextState`
+- `Meter`
+- `Slider`
+- `TextInput`
+- `AudioZone`
+- `AudioZoneV2`
+- access/keypad-style controls with `access`/`granted` and `wrongCode`/`denied` states (exposed as binary sensors)
 
-Note: that document targets Loxone Config 8.0 (2016). Modern configurations can include newer control variants that are outside the Config 8 scope.
+Unsupported block types are still exposed, when possible, as disabled-by-default diagnostic sensors or binary sensors based on their raw states.
+
+## LoxAPP3 section coverage
+
+Based on the current integration parser, the following `LoxAPP3.json` sections are consumed directly:
+
+- `msInfo`
+- `lastModified`
+- `controls` (including nested `subControls`)
+- `rooms`
+- `cats`
+
+The following documented sections are currently not mapped to dedicated Home Assistant entities:
+
+- `globalStates`
+- `operatingModes`
+- `weatherServer`
+- `times`
+- `caller`
+- `autopilot`
+- `mediaServer`
+- `messageCenter`
 
 ## Important scope
 

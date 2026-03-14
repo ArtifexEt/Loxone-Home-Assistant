@@ -39,12 +39,34 @@ class LoxoneSwitchEntity(LoxoneEntity, SwitchEntity):
 
     @property
     def is_on(self) -> bool | None:
-        return coerce_bool(self.first_state_value("active", "value", "position"))
+        for state_name in (
+            "active",
+            "value",
+            "position",
+            "armed",
+            "charging",
+            "power",
+            "isEnabled",
+        ):
+            value = coerce_bool(self.state_value(state_name))
+            if value is not None:
+                return value
+        for state_uuid in self.control.states.values():
+            value = coerce_bool(self.bridge.state_value(state_uuid))
+            if value is not None:
+                return value
+        return None
 
     async def async_turn_on(self, **kwargs) -> None:
+        if self.control.type == "CarCharger":
+            await self.bridge.async_send_action(self.control.uuid_action, "charge/on")
+            return
         await self.bridge.async_send_action(self.control.uuid_action, "on")
 
     async def async_turn_off(self, **kwargs) -> None:
+        if self.control.type == "CarCharger":
+            await self.bridge.async_send_action(self.control.uuid_action, "charge/off")
+            return
         await self.bridge.async_send_action(self.control.uuid_action, "off")
 
 

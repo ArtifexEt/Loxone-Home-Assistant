@@ -17,6 +17,7 @@ from .const import (
     CONF_ENABLE_LIGHT_MOOD_SELECT,
     DEFAULT_ENABLE_LIGHT_MOOD_SELECT,
     DOMAIN,
+    RADIO_SELECT_CONTROL_TYPES,
 )
 from .entity import LoxoneEntity, control_entity_unique_id
 from .light import CONTROLLER_TYPES
@@ -43,13 +44,24 @@ async def async_setup_entry(
             if control.type in CONTROLLER_TYPES and _extract_moods(control)
         ]
 
+    radio_controls = [
+        control
+        for control in bridge.controls
+        if control.type in RADIO_SELECT_CONTROL_TYPES and _extract_radio_outputs(control)
+    ]
+
     entities = [LoxoneMoodSelectEntity(bridge, control) for control in controls]
+    entities.extend(LoxoneRadioOutputSelectEntity(bridge, control) for control in radio_controls)
     _cleanup_stale_select_entities(
         hass,
         entry,
         {
             control_entity_unique_id(bridge.serial, control.uuid_action, "mood")
             for control in controls
+        }
+        | {
+            control_entity_unique_id(bridge.serial, control.uuid_action, "radio")
+            for control in radio_controls
         },
     )
     async_add_entities(entities)
@@ -93,6 +105,43 @@ class LoxoneMoodSelectEntity(LoxoneEntity, SelectEntity):
         await self.bridge.async_send_action(self.control.uuid_action, f"changeTo/{mood_id}")
 
 
+class LoxoneRadioOutputSelectEntity(LoxoneEntity, SelectEntity):
+    """Output selector for Loxone Radio controls."""
+
+    _attr_icon = "mdi:radio"
+
+    def __init__(self, bridge, control: LoxoneControl) -> None:
+        super().__init__(bridge, control, "Output")
+        outputs = _extract_radio_outputs(control)
+        self._option_to_output_id = {label: output_id for output_id, label in outputs}
+        self._output_id_to_option = {output_id: label for output_id, label in outputs}
+        self._attr_options = [label for _, label in outputs]
+
+    @property
+    def current_option(self) -> str | None:
+        output_id = _coerce_int(self.first_state_value("activeOutput", "output", "value"))
+        if output_id is None:
+            return None
+        return self._output_id_to_option.get(output_id, f"Output {output_id}")
+
+    async def async_select_option(self, option: str) -> None:
+        output_id = self._option_to_output_id.get(option)
+        if output_id is None:
+            return
+        if output_id == 0:
+            await self.bridge.async_send_action(self.control.uuid_action, "reset")
+            return
+        await self.bridge.async_send_action(self.control.uuid_action, str(output_id))
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        attrs = super().extra_state_attributes
+        output_id = _coerce_int(self.first_state_value("activeOutput", "output", "value"))
+        if output_id is not None:
+            attrs["active_output_id"] = output_id
+        return attrs
+
+
 def _extract_moods(control: LoxoneControl) -> list[tuple[int, str]]:
     raw_moods = control.details.get("moodList")
     if not isinstance(raw_moods, list):
@@ -110,6 +159,25 @@ def _extract_moods(control: LoxoneControl) -> list[tuple[int, str]]:
             name = f"Mood {mood_id}"
         moods.append((mood_id, name))
     return moods
+
+
+def _extract_radio_outputs(control: LoxoneControl) -> list[tuple[int, str]]:
+    raw_outputs = control.details.get("outputs")
+    if not isinstance(raw_outputs, Mapping):
+        return []
+
+    outputs: list[tuple[int, str]] = []
+    for output_id_raw, output_name_raw in raw_outputs.items():
+        output_id = _coerce_int(output_id_raw)
+        if output_id is None:
+            continue
+        output_name = str(output_name_raw).strip()
+        if not output_name:
+            output_name = f"Output {output_id}"
+        outputs.append((output_id, output_name))
+
+    outputs.sort(key=lambda item: item[0])
+    return outputs
 
 
 def _build_option_maps(
@@ -214,6 +282,22 @@ def _coerce_mood_id(value: Any) -> int | None:
             return int(raw)
     if isinstance(value, Mapping):
         return _coerce_mood_id(value.get("id", value.get("moodId")))
+    return None
+
+
+def _coerce_int(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return int(value)
+    if isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return None
+        try:
+            return int(float(raw))
+        except ValueError:
+            return None
     return None
 
 

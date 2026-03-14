@@ -232,7 +232,7 @@ class MediaPlayerPlatformTests(unittest.IsolatedAsyncioTestCase):
                 "state-artist": "Artist Y",
                 "state-album": "Album Z",
                 "state-shuffle": 1,
-                "state-repeat": 2,
+                "state-repeat": 1,
                 "state-duration": 245,
                 "state-progress": 22,
             },
@@ -261,6 +261,18 @@ class MediaPlayerPlatformTests(unittest.IsolatedAsyncioTestCase):
         entity = LoxoneAudioZoneEntity(bridge, control)
 
         self.assertEqual(entity.state, media_player_module.MediaPlayerState.OFF)
+
+    def test_repeat_mode_value_2_is_treated_as_all_for_compatibility(self) -> None:
+        control = self._audio_zone_v2()
+        bridge = _FakeBridge(
+            [control],
+            {
+                "state-repeat": 2,
+            },
+        )
+        entity = LoxoneAudioZoneEntity(bridge, control)
+
+        self.assertEqual(entity.repeat, "all")
 
     async def test_audio_zone_v2_commands_match_expected_actions(self) -> None:
         control = self._audio_zone_v2()
@@ -293,7 +305,7 @@ class MediaPlayerPlatformTests(unittest.IsolatedAsyncioTestCase):
                 ("audio-action", "on"),
                 ("audio-action", "off"),
                 ("audio-action", "shuffle/1"),
-                ("audio-action", "repeat/1"),
+                ("audio-action", "repeat/3"),
                 ("audio-action", "progress/37"),
             ],
         )
@@ -354,7 +366,7 @@ class MediaPlayerPlatformTests(unittest.IsolatedAsyncioTestCase):
                 ("audio-legacy-action", "source/1"),
                 ("audio-legacy-action", "source/2"),
                 ("audio-legacy-action", "shuffle/1"),
-                ("audio-legacy-action", "repeat/2"),
+                ("audio-legacy-action", "repeat/1"),
                 ("audio-legacy-action", "progress/99"),
             ],
         )

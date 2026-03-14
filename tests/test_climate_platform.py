@@ -118,6 +118,7 @@ class _FakeBridge:
 
     def __init__(self, values):
         self._values = values
+        self.commands: list[tuple[str, str]] = []
 
     def add_listener(self, _callback_fn, _watched_uuids):
         return lambda: None
@@ -126,7 +127,7 @@ class _FakeBridge:
         return self._values.get(control.state_uuid(state_name))
 
     async def async_send_action(self, _uuid_action, _command):
-        return None
+        self.commands.append((_uuid_action, _command))
 
 
 _install_homeassistant_stubs()
@@ -207,6 +208,40 @@ class ClimatePlatformTests(unittest.TestCase):
         self.assertEqual(entity.current_temperature, 20.2)
         self.assertEqual(entity.target_temperature, 23.1)
         self.assertEqual(entity.current_humidity, 40.0)
+
+
+class ClimateCommandMappingTests(unittest.IsolatedAsyncioTestCase):
+    """Verify control-specific temperature commands."""
+
+    async def test_pool_controller_uses_target_temp_command(self) -> None:
+        control = LoxoneControl(
+            uuid="pool-uuid",
+            uuid_action="pool-action",
+            name="Basen",
+            type="PoolController",
+            states={"tempTarget": "state-target"},
+        )
+        bridge = _FakeBridge({"state-target": 27})
+        entity = LoxoneClimateEntity(bridge, control)
+
+        await entity.async_set_temperature(temperature=28)
+
+        self.assertEqual(bridge.commands, [("pool-action", "targetTemp/28")])
+
+    async def test_sauna_uses_temp_command(self) -> None:
+        control = LoxoneControl(
+            uuid="sauna-uuid",
+            uuid_action="sauna-action",
+            name="Sauna",
+            type="Sauna",
+            states={"tempTarget": "state-target"},
+        )
+        bridge = _FakeBridge({"state-target": 70})
+        entity = LoxoneClimateEntity(bridge, control)
+
+        await entity.async_set_temperature(temperature=75)
+
+        self.assertEqual(bridge.commands, [("sauna-action", "temp/75")])
 
 
 if __name__ == "__main__":

@@ -19,6 +19,7 @@ async def async_setup_entry(
         LoxoneNumberEntity(bridge, control)
         for control in bridge.controls
         if control.type in NUMBER_CONTROL_TYPES
+        and _supports_number_control(control)
     ]
     async_add_entities(entities)
 
@@ -45,3 +46,10 @@ class LoxoneNumberEntity(LoxoneEntity, NumberEntity):
 
     async def async_set_native_value(self, value: float) -> None:
         await self.bridge.async_send_action(self.control.uuid_action, str(value))
+
+
+def _supports_number_control(control) -> bool:
+    if control.type == "UpDownLeftRight":
+        normalized_states = {state_name.strip().casefold() for state_name in control.states}
+        return any(state_name in normalized_states for state_name in ("value", "position", "actual"))
+    return first_numeric_state_name(control) is not None
