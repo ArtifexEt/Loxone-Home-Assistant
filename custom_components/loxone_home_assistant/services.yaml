@@ -70,3 +70,55 @@ send_tts:
           min: 0
           max: 100
           mode: slider
+
+call_intercom_function:
+  name: Call intercom function
+  description: Trigger a child function assigned to an Intercom control (for example Open or Close).
+  fields:
+    entry_id:
+      name: Entry ID
+      description: Optional when only one Loxone config entry exists.
+      required: false
+      selector:
+        text:
+    uuid_action:
+      name: Intercom UUID Action
+      description: The parent Intercom `uuidAction`.
+      required: true
+      selector:
+        text:
+    function:
+      name: Function
+      description: Child function selector by name, child uuidAction or numeric suffix (for example 1, Open, Close).
+      required: true
+      selector:
+        text:
+
+call_intercom_command:
+  name: Call intercom command
+  description: Send an Intercom Gen2 command to the parent intercom uuidAction (for example answer, mute, playTts, setvideosettings).
+  fields:
+    entry_id:
+      name: Entry ID
+      description: Optional when only one Loxone config entry exists.
+      required: false
+      selector:
+        text:
+    uuid_action:
+      name: Intercom UUID Action
+      description: The parent Intercom `uuidAction`.
+      required: true
+      selector:
+        text:
+    command:
+      name: Command
+      description: Intercom command name (for example answer, playTts, mute, setAnswers, setvideosettings, setframerate).
+      required: true
+      selector:
+        text:
+    arguments:
+      name: Arguments
+      description: Optional command arguments. Use slash-separated string (for example 0/20/1, Answer 1/Answer 2) or a YAML list.
+      required: false
+      selector:
+        text:

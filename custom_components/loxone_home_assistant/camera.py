@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from collections.abc import Mapping
 from typing import Any
@@ -33,7 +34,12 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import INTERCOM_CAMERA_CONTROL_TYPES
 from .entity import LoxoneEntity, first_matching_state_name, normalize_state_name
-from .intercom import intercom_history_state_name, is_intercom_control
+from .intercom import (
+    intercom_address_state_name,
+    intercom_history_state_name,
+    is_intercom_control,
+    resolve_intercom_http_url,
+)
 from .models import LoxoneControl
 from .runtime import entry_bridge
 
@@ -85,6 +91,29 @@ SECURED_SNAPSHOT_DETAIL_PATHS = (
     "liveImageUrl",
     "imageUrl",
 )
+INTERCOM_DYNAMIC_DETAIL_STATE_CANDIDATES = (
+    "videoSettingsIntern",
+    "videoSettingsExtern",
+    "videoSettings",
+    "videoInfo",
+    "answers",
+    "deviceState",
+    "address",
+)
+INTERCOM_DYNAMIC_DETAIL_STATE_HINTS = (
+    "video",
+    "stream",
+    "image",
+    "snapshot",
+    "history",
+    "event",
+    "bell",
+    "answer",
+    "address",
+)
+STREAM_KEY_HINTS = ("stream", "video", "mjpeg", "hls", "rtsp")
+SNAPSHOT_KEY_HINTS = ("image", "snapshot", "alert", "live", "photo", "thumb")
+HISTORY_KEY_HINTS = ("history", "event", "bell", "answer", "record")
 
 
 async def async_setup_entry(
@@ -111,6 +140,8 @@ class LoxoneIntercomCameraEntity(LoxoneEntity, Camera):
         self._stream_state_name = first_matching_state_name(control, STREAM_STATE_CANDIDATES)
         self._snapshot_state_name = first_matching_state_name(control, SNAPSHOT_STATE_CANDIDATES)
         self._last_bell_events_state_name = intercom_history_state_name(control)
+        self._address_state_name = intercom_address_state_name(control)
+        self._dynamic_detail_state_names = _dynamic_intercom_state_names(control)
         self._secured_details: dict[str, Any] | None = None
         self._secured_details_loaded = False
         self._secured_details_lock = asyncio.Lock()
@@ -167,41 +198,126 @@ class LoxoneIntercomCameraEntity(LoxoneEntity, Camera):
         return None
 
     def _stream_url(self) -> str | None:
+        address_value = (
+            self.state_value(self._address_state_name)
+            if self._address_state_name is not None
+            else None
+        )
         from_state = self.state_value(self._stream_state_name) if self._stream_state_name else None
-        resolved_state = self.bridge.resolve_http_url(_coerce_text(from_state))
+        resolved_state = resolve_intercom_http_url(
+            self.bridge,
+            self.control,
+            from_state,
+            address_value=address_value,
+        )
         if resolved_state is not None:
             return resolved_state
-        from_details = _resolve_control_detail_url(self.bridge, self.control, STREAM_DETAIL_PATHS)
+        from_details = _resolve_control_detail_url(
+            self.bridge,
+            self.control,
+            STREAM_DETAIL_PATHS,
+            address_value=address_value,
+        )
         if from_details is not None:
             return from_details
+        from_dynamic_states = _resolve_url_from_intercom_state_payloads(
+            self.bridge,
+            self.control,
+            self._dynamic_detail_state_names,
+            state_value_getter=self.state_value,
+            key_hints=STREAM_KEY_HINTS,
+            address_value=address_value,
+        )
+        if from_dynamic_states is not None:
+            return from_dynamic_states
         if self._secured_details is not None:
-            return _resolve_detail_url(self.bridge, self._secured_details, SECURED_STREAM_DETAIL_PATHS)
+            return _resolve_detail_url(
+                self.bridge,
+                self._secured_details,
+                SECURED_STREAM_DETAIL_PATHS,
+                control=self.control,
+                address_value=address_value,
+            )
         return None
 
     def _snapshot_url(self) -> str | None:
+        address_value = (
+            self.state_value(self._address_state_name)
+            if self._address_state_name is not None
+            else None
+        )
         from_state = self.state_value(self._snapshot_state_name) if self._snapshot_state_name else None
-        resolved_state = self.bridge.resolve_http_url(_coerce_text(from_state))
+        resolved_state = resolve_intercom_http_url(
+            self.bridge,
+            self.control,
+            from_state,
+            address_value=address_value,
+        )
         if resolved_state is not None:
             return resolved_state
-        from_details = _resolve_control_detail_url(self.bridge, self.control, SNAPSHOT_DETAIL_PATHS)
+        from_details = _resolve_control_detail_url(
+            self.bridge,
+            self.control,
+            SNAPSHOT_DETAIL_PATHS,
+            address_value=address_value,
+        )
         if from_details is not None:
             return from_details
+        from_dynamic_states = _resolve_url_from_intercom_state_payloads(
+            self.bridge,
+            self.control,
+            self._dynamic_detail_state_names,
+            state_value_getter=self.state_value,
+            key_hints=SNAPSHOT_KEY_HINTS,
+            address_value=address_value,
+        )
+        if from_dynamic_states is not None:
+            return from_dynamic_states
         if self._secured_details is not None:
             return _resolve_detail_url(
-                self.bridge, self._secured_details, SECURED_SNAPSHOT_DETAIL_PATHS
+                self.bridge,
+                self._secured_details,
+                SECURED_SNAPSHOT_DETAIL_PATHS,
+                control=self.control,
+                address_value=address_value,
             )
         return None
 
     def _last_bell_events_url(self) -> str | None:
+        address_value = (
+            self.state_value(self._address_state_name)
+            if self._address_state_name is not None
+            else None
+        )
         from_state = (
             self.state_value(self._last_bell_events_state_name)
             if self._last_bell_events_state_name
             else None
         )
-        resolved_state = self.bridge.resolve_http_url(_coerce_text(from_state))
+        resolved_state = resolve_intercom_http_url(
+            self.bridge,
+            self.control,
+            from_state,
+            address_value=address_value,
+        )
         if resolved_state is not None:
             return resolved_state
-        return _resolve_control_detail_url(self.bridge, self.control, LAST_BELL_EVENTS_DETAIL_PATHS)
+        from_details = _resolve_control_detail_url(
+            self.bridge,
+            self.control,
+            LAST_BELL_EVENTS_DETAIL_PATHS,
+            address_value=address_value,
+        )
+        if from_details is not None:
+            return from_details
+        return _resolve_url_from_intercom_state_payloads(
+            self.bridge,
+            self.control,
+            self._dynamic_detail_state_names,
+            state_value_getter=self.state_value,
+            key_hints=HISTORY_KEY_HINTS,
+            address_value=address_value,
+        )
 
     async def _ensure_secured_details_loaded(self) -> None:
         if self._secured_details_loaded:
@@ -233,16 +349,172 @@ class LoxoneIntercomCameraEntity(LoxoneEntity, Camera):
             self._secured_details_loaded = True
 
 
-def _resolve_control_detail_url(bridge, control: LoxoneControl, detail_paths: tuple[str, ...]) -> str | None:
-    return _resolve_detail_url(bridge, control.details, detail_paths)
+def _resolve_control_detail_url(
+    bridge,
+    control: LoxoneControl,
+    detail_paths: tuple[str, ...],
+    *,
+    address_value: Any = None,
+) -> str | None:
+    return _resolve_detail_url(
+        bridge,
+        control.details,
+        detail_paths,
+        control=control,
+        address_value=address_value,
+    )
 
 
-def _resolve_detail_url(bridge, details: Mapping[str, Any], detail_paths: tuple[str, ...]) -> str | None:
+def _resolve_detail_url(
+    bridge,
+    details: Mapping[str, Any],
+    detail_paths: tuple[str, ...],
+    *,
+    control: LoxoneControl | None = None,
+    address_value: Any = None,
+) -> str | None:
     for path in detail_paths:
         raw_value = _nested_detail_value(details, path)
-        resolved = bridge.resolve_http_url(_coerce_text(raw_value))
+        if control is not None:
+            resolved = resolve_intercom_http_url(
+                bridge,
+                control,
+                raw_value,
+                address_value=address_value,
+            )
+        else:
+            resolved = bridge.resolve_http_url(_coerce_text(raw_value))
         if resolved is not None:
             return resolved
+    return None
+
+
+def _dynamic_intercom_state_names(control: LoxoneControl) -> tuple[str, ...]:
+    names: list[str] = []
+    seen: set[str] = set()
+
+    for candidate in INTERCOM_DYNAMIC_DETAIL_STATE_CANDIDATES:
+        state_name = first_matching_state_name(control, (candidate,))
+        if state_name is None or state_name in seen:
+            continue
+        names.append(state_name)
+        seen.add(state_name)
+
+    for state_name in control.states:
+        normalized = normalize_state_name(state_name)
+        if not any(hint in normalized for hint in INTERCOM_DYNAMIC_DETAIL_STATE_HINTS):
+            continue
+        if state_name in seen:
+            continue
+        names.append(state_name)
+        seen.add(state_name)
+
+    return tuple(names)
+
+
+def _resolve_url_from_intercom_state_payloads(
+    bridge,
+    control: LoxoneControl,
+    state_names: tuple[str, ...],
+    *,
+    state_value_getter,
+    key_hints: tuple[str, ...],
+    address_value: Any = None,
+) -> str | None:
+    for state_name in state_names:
+        state_value = state_value_getter(state_name)
+        resolved = _resolve_url_from_payload_with_key_hints(
+            bridge,
+            control,
+            state_value,
+            key_hints=key_hints,
+            address_value=address_value,
+        )
+        if resolved is not None:
+            return resolved
+    return None
+
+
+def _resolve_url_from_payload_with_key_hints(
+    bridge,
+    control: LoxoneControl,
+    payload: Any,
+    *,
+    key_hints: tuple[str, ...],
+    address_value: Any = None,
+) -> str | None:
+    if payload is None:
+        return None
+
+    if isinstance(payload, str):
+        raw = payload.strip()
+        if not raw:
+            return None
+        if raw.startswith("{") or raw.startswith("["):
+            try:
+                parsed = json.loads(raw)
+            except ValueError:
+                return resolve_intercom_http_url(
+                    bridge,
+                    control,
+                    raw,
+                    address_value=address_value,
+                )
+            return _resolve_url_from_payload_with_key_hints(
+                bridge,
+                control,
+                parsed,
+                key_hints=key_hints,
+                address_value=address_value,
+            )
+        return resolve_intercom_http_url(
+            bridge,
+            control,
+            raw,
+            address_value=address_value,
+        )
+
+    stack: list[Any] = [payload]
+    seen: set[int] = set()
+    while stack:
+        current = stack.pop()
+        current_id = id(current)
+        if current_id in seen:
+            continue
+        seen.add(current_id)
+
+        if isinstance(current, list):
+            stack.extend(current)
+            continue
+
+        if not isinstance(current, Mapping):
+            continue
+
+        for key, value in current.items():
+            normalized_key = normalize_state_name(str(key))
+            key_matches_hints = any(hint in normalized_key for hint in key_hints)
+            if key_matches_hints:
+                resolved = resolve_intercom_http_url(
+                    bridge,
+                    control,
+                    value,
+                    address_value=address_value,
+                )
+                if resolved is not None:
+                    return resolved
+            if isinstance(value, (Mapping, list)):
+                stack.append(value)
+                continue
+
+            if key_matches_hints and isinstance(value, str):
+                stack.append(value)
+                continue
+
+            if isinstance(value, str):
+                stripped = value.strip()
+                if stripped.startswith("{") or stripped.startswith("["):
+                    stack.append(stripped)
+
     return None
 
 

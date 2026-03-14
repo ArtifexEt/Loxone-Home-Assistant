@@ -86,6 +86,9 @@ class LoxoneEntity(Entity):
         self._attr_unique_id = control_entity_unique_id(
             bridge.serial, control.uuid_action, suffix
         )
+        icon_url = control_icon_url(bridge, control)
+        if icon_url is not None:
+            self._attr_entity_picture = icon_url
         self._remove_listener = None
 
     @property
@@ -104,6 +107,11 @@ class LoxoneEntity(Entity):
             "uuid_action": self.control.uuid_action,
             "loxone_type": self.control.type,
         }
+        if self.control.icon:
+            attrs["loxone_icon"] = self.control.icon
+        icon_url = control_icon_url(self.bridge, self.control)
+        if icon_url:
+            attrs["loxone_icon_url"] = icon_url
         if self.control.room_name:
             attrs["room"] = self.control.room_name
         if self.control.category_name:
@@ -144,6 +152,18 @@ class LoxoneEntity(Entity):
 
 def slugify_state_name(value: str) -> str:
     return value.lower().replace(" ", "_")
+
+
+def control_icon_url(bridge: Any, control: LoxoneControl) -> str | None:
+    if not control.icon:
+        return None
+    resolver = getattr(bridge, "resolve_http_url", None)
+    if not callable(resolver):
+        return None
+    resolved = resolver(control.icon)
+    if isinstance(resolved, str) and resolved.strip():
+        return resolved
+    return None
 
 
 def normalize_state_name(value: str) -> str:
@@ -238,6 +258,18 @@ def coerce_float(value: Any) -> float | None:
 def infer_unit(control: LoxoneControl, state_name: str | None = None) -> str | None:
     details = control.details
     keys = ("format", "actualFormat", "text")
+    normalized_state_name = normalize_state_name(state_name) if state_name else None
+    mapped_unit = (
+        NORMALIZED_STATE_NAME_UNITS.get(normalized_state_name)
+        if normalized_state_name is not None
+        else None
+    )
+
+    # Humidity/CO2-like states use fixed canonical units. Prefer those over
+    # generic control-level formats (for example plain "°" from climate controls).
+    if mapped_unit in {"%", "ppm"}:
+        return mapped_unit
+
     if state_name == "actual":
         keys = ("actualFormat", "format", "text")
     elif state_name == "total":
@@ -276,11 +308,7 @@ def infer_unit(control: LoxoneControl, state_name: str | None = None) -> str | N
             if match:
                 return match.group(1)
 
-    if state_name:
-        normalized_state_name = normalize_state_name(state_name)
-        if normalized_state_name in NORMALIZED_STATE_NAME_UNITS:
-            return NORMALIZED_STATE_NAME_UNITS[normalized_state_name]
-    return None
+    return mapped_unit
 
 
 def brightness_from_percent(value: float | None) -> int | None:

@@ -295,6 +295,47 @@ class CoverPlatformTests(unittest.IsolatedAsyncioTestCase):
             [("jalousie-details-action", "manualLamelle/60")],
         )
 
+    async def test_window_is_supported_and_uses_target_position_state(self) -> None:
+        control = LoxoneControl(
+            uuid="window-uuid",
+            uuid_action="window-action",
+            name="Okno",
+            type="Window",
+            states={"targetPosition": "state-target-position"},
+        )
+        bridge = _FakeBridge([control], {"state-target-position": 73})
+        entity = cover_module.LoxoneCoverEntity(bridge, control)
+
+        self.assertEqual(entity.current_cover_position, 73)
+        self.assertTrue(entity.supported_features & cover_module.CoverEntityFeature.OPEN)
+        self.assertTrue(entity.supported_features & cover_module.CoverEntityFeature.CLOSE)
+        self.assertTrue(entity.supported_features & cover_module.CoverEntityFeature.STOP)
+        self.assertFalse(
+            entity.supported_features & cover_module.CoverEntityFeature.SET_TILT_POSITION
+        )
+
+    async def test_cover_setup_includes_window_controls(self) -> None:
+        window = LoxoneControl(
+            uuid="window-uuid",
+            uuid_action="window-action",
+            name="Okno",
+            type="Window",
+            states={"position": "state-position"},
+        )
+        bridge = _FakeBridge([window], {})
+        entry = _FakeConfigEntry("entry-1")
+        hass = _FakeHass(entry.entry_id, bridge, const.DOMAIN)
+        entities: list = []
+
+        await cover_module.async_setup_entry(
+            hass,
+            entry,
+            lambda new_entities: entities.extend(new_entities),
+        )
+
+        self.assertEqual(len(entities), 1)
+        self.assertEqual(entities[0].control.uuid_action, "window-action")
+
 
 if __name__ == "__main__":
     unittest.main()

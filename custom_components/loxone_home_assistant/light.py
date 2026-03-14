@@ -46,6 +46,8 @@ CONTROLLER_CHILD_TYPES = LIGHT_CONTROL_TYPES | ON_OFF_LIGHT_TYPES
 COLOR_LIGHT_TYPES = {"ColorPicker", "ColorPickerV2", "LightsceneRGB"}
 OFF_MOOD_IDS = {0, 778}
 NON_DIGIT_RE = re.compile(r"[^0-9,.-]+")
+ATTR_EFFECT = "effect"
+LIGHT_EFFECT_FEATURE = 4
 
 
 async def async_setup_entry(
@@ -122,6 +124,12 @@ class LoxoneLightEntity(LoxoneEntity, LightEntity):
             if _is_child_of_controller(candidate, control)
             and candidate.type in CONTROLLER_CHILD_TYPES
         )
+        self._moods = _extract_moods(control) if control.type in CONTROLLER_TYPES else []
+        (
+            self._effect_list,
+            self._effect_to_mood_id,
+            self._mood_id_to_effect,
+        ) = _build_effect_maps(self._moods)
 
     def relevant_state_uuids(self):
         uuids = set(self.control.states.values())
@@ -241,6 +249,29 @@ class LoxoneLightEntity(LoxoneEntity, LightEntity):
         return {ColorMode.ONOFF}
 
     @property
+    def supported_features(self) -> int:
+        if self.control.type in CONTROLLER_TYPES and self._effect_list:
+            return LIGHT_EFFECT_FEATURE
+        return 0
+
+    @property
+    def effect_list(self) -> list[str] | None:
+        if self.control.type not in CONTROLLER_TYPES or not self._effect_list:
+            return None
+        return list(self._effect_list)
+
+    @property
+    def effect(self) -> str | None:
+        if self.control.type not in CONTROLLER_TYPES:
+            return None
+        mood_id = _extract_active_mood_id(
+            self.first_state_value("activeMoods", "moodList", "active")
+        )
+        if mood_id is None:
+            return None
+        return self._mood_id_to_effect.get(mood_id)
+
+    @property
     def extra_state_attributes(self) -> dict[str, Any]:
         attrs = super().extra_state_attributes
         if self.control.type == "LightControllerV2":
@@ -288,6 +319,16 @@ class LoxoneLightEntity(LoxoneEntity, LightEntity):
 
     async def _async_turn_on_controller(self, **kwargs) -> None:
         master_control = self._master_control()
+
+        if ATTR_EFFECT in kwargs and self._effect_to_mood_id:
+            selected_effect = str(kwargs[ATTR_EFFECT])
+            mood_id = self._effect_to_mood_id.get(selected_effect)
+            if mood_id is not None:
+                await self.bridge.async_send_action(
+                    self.control.uuid_action,
+                    f"changeTo/{mood_id}",
+                )
+                return
 
         if master_control is not None and ATTR_BRIGHTNESS in kwargs:
             percent = percent_from_brightness(kwargs[ATTR_BRIGHTNESS])
@@ -532,6 +573,111 @@ def _coerce_mood_id(value: Any) -> int | None:
     return None
 
 
+def _extract_moods(control: LoxoneControl) -> list[tuple[int, str]]:
+    raw_moods = control.details.get("moodList")
+    if not isinstance(raw_moods, list):
+        return []
+
+    moods: list[tuple[int, str]] = []
+    for item in raw_moods:
+        if not isinstance(item, Mapping):
+            continue
+        mood_id = _coerce_mood_id(item.get("id", item.get("moodId")))
+        if mood_id is None:
+            continue
+        name = str(item.get("name") or item.get("title") or "").strip()
+        if not name:
+            name = f"Mood {mood_id}"
+        moods.append((mood_id, name))
+    return moods
+
+
+def _build_effect_maps(
+    moods: list[tuple[int, str]],
+) -> tuple[list[str], dict[str, int], dict[int, str]]:
+    effect_list: list[str] = []
+    effect_to_mood_id: dict[str, int] = {}
+    mood_id_to_effect: dict[int, str] = {}
+    seen_labels: set[str] = set()
+
+    for mood_id, mood_name in moods:
+        effect = mood_name
+        if effect in seen_labels:
+            effect = f"{mood_name} ({mood_id})"
+        seen_labels.add(effect)
+        effect_list.append(effect)
+        effect_to_mood_id[effect] = mood_id
+        mood_id_to_effect[mood_id] = effect
+
+    return effect_list, effect_to_mood_id, mood_id_to_effect
+
+
+def _extract_active_mood_id(value: Any) -> int | None:
+    if value is None:
+        return None
+
+    if isinstance(value, bool):
+        return 0 if value is False else None
+
+    if isinstance(value, (int, float)):
+        return int(value)
+
+    if isinstance(value, Mapping):
+        return _coerce_mood_id(value.get("id", value.get("moodId")))
+
+    if isinstance(value, list):
+        mood_ids: list[int] = []
+        for item in value:
+            mood_id = _coerce_mood_id(item)
+            if mood_id is not None:
+                mood_ids.append(mood_id)
+                continue
+            nested = _extract_active_mood_id(item)
+            if nested is not None:
+                mood_ids.append(nested)
+        if not mood_ids:
+            return None
+        for mood_id in mood_ids:
+            if mood_id not in OFF_MOOD_IDS:
+                return mood_id
+        return mood_ids[0]
+
+    if isinstance(value, str):
+        raw = value.strip()
+        if raw in {"", "[]"}:
+            return None
+        if raw == "0":
+            return 0
+
+        try:
+            parsed = json.loads(raw.replace("'", '"'))
+        except json.JSONDecodeError:
+            parsed = None
+
+        if parsed is not None:
+            return _extract_active_mood_id(parsed)
+
+        numbers_only = NON_DIGIT_RE.sub("", raw).strip(",")
+        if not numbers_only:
+            return None
+        parts = [item for item in numbers_only.split(",") if item]
+        if not parts:
+            return None
+        for item in parts:
+            try:
+                mood_id = int(float(item))
+            except ValueError:
+                continue
+            if mood_id not in OFF_MOOD_IDS:
+                return mood_id
+        try:
+            return int(float(parts[0]))
+        except ValueError:
+            return None
+
+    return None
+
+
 def _cleanup_stale_light_entities(
     hass: HomeAssistant, entry: ConfigEntry, valid_unique_ids: set[str]
 ) -> None:
@@ -585,4 +731,3 @@ def _cleanup_stale_light_devices(
         if device_entities:
             continue
         device_registry.async_remove_device(device_entry.id)
-

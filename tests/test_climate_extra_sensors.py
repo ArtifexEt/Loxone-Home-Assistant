@@ -214,6 +214,107 @@ class ClimateExtraSensorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(air_sensor.native_value, 32.0)
         self.assertEqual(mode_sensor.native_value, "comfort")
 
+    async def test_setup_creates_air_condition_state_sensors_except_temperatures(self) -> None:
+        climate_control = LoxoneControl(
+            uuid="ac-uuid",
+            uuid_action="ac-action",
+            name="Salon AC",
+            type="ACControl",
+            details={"format": "%.1f°"},
+            states={
+                "temperature": "state-temp-actual",
+                "targetTemperature": "state-temp-target",
+                "status": "state-status",
+                "mode": "state-mode",
+                "fan": "state-fan",
+            },
+        )
+        bridge = _FakeBridge(
+            [climate_control],
+            {
+                "state-temp-actual": 23.5,
+                "state-temp-target": 21.0,
+                "state-status": 1,
+                "state-mode": 2,
+                "state-fan": 3,
+            },
+        )
+        entry = _FakeConfigEntry("entry-1")
+        hass = _FakeHass(entry.entry_id, bridge, const.DOMAIN)
+        entities = []
+
+        await sensor_module.async_setup_entry(
+            hass,
+            entry,
+            lambda new_entities: entities.extend(new_entities),
+        )
+
+        by_state = {entity._state_name: entity for entity in entities}
+        self.assertEqual(set(by_state), {"status", "mode", "fan"})
+        self.assertEqual(by_state["status"].native_value, 1.0)
+        self.assertEqual(by_state["mode"].native_value, 2.0)
+        self.assertEqual(by_state["fan"].native_value, 3.0)
+        self.assertIsNone(by_state["status"].native_unit_of_measurement)
+        self.assertIsNone(by_state["mode"].native_unit_of_measurement)
+        self.assertIsNone(by_state["fan"].native_unit_of_measurement)
+        self.assertIsNone(by_state["status"].state_class)
+        self.assertIsNone(by_state["mode"].state_class)
+        self.assertIsNone(by_state["fan"].state_class)
+
+    async def test_climate_metadata_states_do_not_report_degree_units_or_statistics(self) -> None:
+        climate_control = LoxoneControl(
+            uuid="climate-uuid",
+            uuid_action="climate-action",
+            name="Inteligentny Regulator",
+            type="IRoomControllerV2",
+            details={"format": "%.1f°"},
+            states={
+                "tempActual": "state-temp-actual",
+                "tempTarget": "state-temp-target",
+                "temperatureBoundaryInfo": "state-boundary",
+                "capabilities": "state-capabilities",
+                "fan": "state-fan",
+                "ventMode": "state-vent-mode",
+                "openWindow": "state-open-window",
+            },
+        )
+        bridge = _FakeBridge(
+            [climate_control],
+            {
+                "state-temp-actual": 21.5,
+                "state-temp-target": 22.0,
+                "state-boundary": 1,
+                "state-capabilities": 2,
+                "state-fan": 3,
+                "state-vent-mode": 4,
+                "state-open-window": 0,
+            },
+        )
+        entry = _FakeConfigEntry("entry-1")
+        hass = _FakeHass(entry.entry_id, bridge, const.DOMAIN)
+        entities = []
+
+        await sensor_module.async_setup_entry(
+            hass,
+            entry,
+            lambda new_entities: entities.extend(new_entities),
+        )
+
+        by_state = {entity._state_name: entity for entity in entities}
+        self.assertEqual(
+            set(by_state),
+            {
+                "temperatureBoundaryInfo",
+                "capabilities",
+                "fan",
+                "ventMode",
+                "openWindow",
+            },
+        )
+        for state_name in by_state:
+            self.assertIsNone(by_state[state_name].native_unit_of_measurement)
+            self.assertIsNone(by_state[state_name].state_class)
+
     async def test_setup_creates_override_entries_sensor_and_skips_lock_state(self) -> None:
         climate_control = LoxoneControl(
             uuid="climate-uuid",

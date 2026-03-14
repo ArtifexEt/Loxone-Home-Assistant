@@ -114,6 +114,7 @@ models = load_integration_module("custom_components.loxone_home_assistant.models
 sensor_module = load_integration_module("custom_components.loxone_home_assistant.sensor")
 LoxoneControl = models.LoxoneControl
 LoxoneMeterSensor = sensor_module.LoxoneMeterSensor
+LoxonePrimarySensor = sensor_module.LoxonePrimarySensor
 LoxoneWebpageSensor = sensor_module.LoxoneWebpageSensor
 
 
@@ -189,6 +190,45 @@ class MeterSensorTests(unittest.TestCase):
         entity = LoxoneWebpageSensor(bridge, control)
 
         self.assertEqual(entity.native_value, "https://example.local/cam")
+
+    def test_primary_energy_sensor_is_total_increasing(self) -> None:
+        control = LoxoneControl(
+            uuid="energy-uuid",
+            uuid_action="energy-action",
+            name="Grid Import",
+            type="InfoOnlyAnalog",
+            details={"format": "%.3f kWh"},
+            states={"value": "state-energy"},
+        )
+        bridge = _FakeBridge({"state-energy": "1254.8"})
+        entity = LoxonePrimarySensor(bridge, control)
+
+        self.assertEqual(entity.native_value, 1254.8)
+        self.assertEqual(entity.native_unit_of_measurement, "kWh")
+        self.assertEqual(entity.device_class, sensor_module.SensorDeviceClass.ENERGY)
+        self.assertEqual(
+            entity.state_class,
+            sensor_module.SensorStateClass.TOTAL_INCREASING,
+        )
+
+    def test_primary_actual_energy_sensor_is_measurement(self) -> None:
+        control = LoxoneControl(
+            uuid="energy-actual-uuid",
+            uuid_action="energy-actual-action",
+            name="Grid Actual",
+            type="InfoOnlyAnalog",
+            details={"actualFormat": "%.2f kWh"},
+            states={"actual": "state-actual-energy"},
+        )
+        bridge = _FakeBridge({"state-actual-energy": 2.4})
+        entity = LoxonePrimarySensor(bridge, control)
+
+        self.assertEqual(entity.native_unit_of_measurement, "kWh")
+        self.assertEqual(entity.device_class, sensor_module.SensorDeviceClass.ENERGY)
+        self.assertEqual(
+            entity.state_class,
+            sensor_module.SensorStateClass.MEASUREMENT,
+        )
 
 
 class MeterSensorSetupTests(unittest.IsolatedAsyncioTestCase):

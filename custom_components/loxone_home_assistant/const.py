@@ -62,12 +62,16 @@ DATA_BRIDGES = "bridges"
 SERVICE_SEND_COMMAND = "send_command"
 SERVICE_SEND_RAW_COMMAND = "send_raw_command"
 SERVICE_SEND_TTS = "send_tts"
+SERVICE_CALL_INTERCOM_FUNCTION = "call_intercom_function"
+SERVICE_CALL_INTERCOM_COMMAND = "call_intercom_command"
 
 SERVICE_ATTR_ENTRY_ID = "entry_id"
 SERVICE_ATTR_UUID_ACTION = "uuid_action"
 SERVICE_ATTR_COMMAND = "command"
 SERVICE_ATTR_MESSAGE = "message"
 SERVICE_ATTR_VOLUME = "volume"
+SERVICE_ATTR_FUNCTION = "function"
+SERVICE_ATTR_ARGUMENTS = "arguments"
 
 LIGHT_CONTROL_TYPES = {
     "ColorPicker",
@@ -78,23 +82,41 @@ LIGHT_CONTROL_TYPES = {
     "LightsceneRGB",
 }
 SWITCH_CONTROL_TYPES = {"Switch", "TimedSwitch", "Alarm", "CarCharger", "Remote"}
-BUTTON_CONTROL_TYPES = {"Pushbutton"}
-COVER_CONTROL_TYPES = {"Jalousie", "Gate", "UpDownLeftRight"}
-CLIMATE_CONTROL_TYPES = {"IRoomController", "IRoomControllerV2", "PoolController", "Sauna"}
+BUTTON_CONTROL_TYPES = {
+    "Pushbutton",
+    "PushButton",
+    "Push Button",
+    "pushbutton",
+    "push button",
+}
+COVER_CONTROL_TYPES = {"Jalousie", "Window", "Gate", "UpDownLeftRight"}
+CLIMATE_CONTROL_TYPES = {
+    "IRoomController",
+    "IRoomControllerV2",
+    "RoomController",
+    "RoomControllerV2",
+    "PoolController",
+    "Sauna",
+    "ACControl",
+    # Compatibility with exports seen in older/community samples.
+    "AcControl",
+}
 SENSOR_CONTROL_TYPES = {
     "AlarmClock",
     "Daytimer",
     "Fronius",
     "Heatmixer",
     "Hourcounter",
+    "IRCV2Daytimer",
     "InfoOnlyAnalog",
     "Meter",
     "TextState",
-    "Tracker",
     "Webpage",
+    "WindowMonitor",
 }
+TRACKER_CONTROL_TYPES = {"Tracker"}
 BINARY_SENSOR_CONTROL_TYPES = {"Alarm", "InfoOnlyDigital", "PresenceDetector", "SmokeAlarm"}
-POWER_SUPPLY_CONTROL_TYPES = {"PowerSupply", "PowerSupplyV2"}
+POWER_SUPPLY_CONTROL_TYPES = {"PowerSupply", "PowerSupplyV2", "PowerUnit"}
 NUMBER_CONTROL_TYPES = {"Slider", "UpDownLeftRight", "ValueSelector"}
 TEXT_CONTROL_TYPES = {"TextInput"}
 MEDIA_PLAYER_CONTROL_TYPES = {"AudioZone", "AudioZoneV2", "CentralAudioZone"}
@@ -154,6 +176,25 @@ INTERCOM_HISTORY_STATE_CANDIDATES = (
     "lastBellEvents",
     "lastBellTimestamp",
     "lastEventTimestamp",
+)
+PRESENCE_ILLUMINANCE_STATE_CANDIDATES = (
+    "illuminance",
+    "illumination",
+    "brightness",
+    "lightLevel",
+    "lux",
+    "luminosity",
+    "ambientLight",
+)
+PRESENCE_SOUND_STATE_CANDIDATES = (
+    "noise",
+    "noiseLevel",
+    "sound",
+    "soundLevel",
+    "acoustic",
+    "acousticLevel",
+    "loudness",
+    "db",
 )
 INTERCOM_SYSTEM_SCHEMA_NAME_HINTS = (
     "system schema",
@@ -235,6 +276,7 @@ HANDLED_CONTROL_TYPES = (
     | COVER_CONTROL_TYPES
     | CLIMATE_CONTROL_TYPES
     | SENSOR_CONTROL_TYPES
+    | TRACKER_CONTROL_TYPES
     | BINARY_SENSOR_CONTROL_TYPES
     | POWER_SUPPLY_CONTROL_TYPES
     | NUMBER_CONTROL_TYPES

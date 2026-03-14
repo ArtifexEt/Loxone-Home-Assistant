@@ -90,6 +90,18 @@ class _FakeBridge:
     software_version = "14.6.8.22"
     available = True
 
+    @staticmethod
+    def resolve_http_url(value: str | None) -> str | None:
+        if not isinstance(value, str):
+            return None
+        normalized = value.strip()
+        if not normalized:
+            return None
+        if normalized.startswith("http://") or normalized.startswith("https://"):
+            return normalized
+        path = normalized if normalized.startswith("/") else f"/{normalized}"
+        return f"https://mini.local{path}"
+
 
 class _FakeMiniserverEntity(LoxoneEntity):
     def uses_miniserver_device(self) -> bool:
@@ -102,6 +114,10 @@ class _FakeBridgeB:
     server_model = "Miniserver"
     software_version = "14.6.8.22"
     available = True
+
+    @staticmethod
+    def resolve_http_url(value: str | None) -> str | None:
+        return _FakeBridge.resolve_http_url(value)
 
 
 class EntityDeviceInfoTests(unittest.TestCase):
@@ -185,6 +201,30 @@ class EntityDeviceInfoTests(unittest.TestCase):
 
         self.assertNotEqual(entity_a._attr_unique_id, entity_b._attr_unique_id)
 
+    def test_entity_exposes_loxone_icon_as_entity_picture(self) -> None:
+        control = LoxoneControl(
+            uuid="icon-uuid",
+            uuid_action="icon-action",
+            name="Noc",
+            type="Switch",
+            icon="IconsFilled/night-mode.svg",
+        )
+
+        icon_entity = LoxoneEntity(_FakeBridge(), control)
+
+        self.assertEqual(
+            icon_entity._attr_entity_picture,
+            "https://mini.local/IconsFilled/night-mode.svg",
+        )
+        self.assertEqual(
+            icon_entity.extra_state_attributes["loxone_icon"],
+            "IconsFilled/night-mode.svg",
+        )
+        self.assertEqual(
+            icon_entity.extra_state_attributes["loxone_icon_url"],
+            "https://mini.local/IconsFilled/night-mode.svg",
+        )
+
 
 class InferUnitTests(unittest.TestCase):
     """Verify unit inference from format strings and state names."""
@@ -221,6 +261,34 @@ class InferUnitTests(unittest.TestCase):
         )
 
         self.assertEqual(entity.infer_unit(control, "BatteryLevel"), "%")
+
+    def test_infer_unit_prefers_fixed_humidity_and_co2_units_over_generic_degree_format(self) -> None:
+        control = LoxoneControl(
+            uuid="climate-uuid",
+            uuid_action="climate-action",
+            name="Climate",
+            type="IRoomControllerV2",
+            states={
+                "humidity": "state-humidity",
+                "co2": "state-co2",
+            },
+            details={"format": "%.1f °"},
+        )
+
+        self.assertEqual(entity.infer_unit(control, "humidity"), "%")
+        self.assertEqual(entity.infer_unit(control, "co2"), "ppm")
+
+    def test_infer_unit_keeps_temperature_format_override(self) -> None:
+        control = LoxoneControl(
+            uuid="climate-uuid",
+            uuid_action="climate-action",
+            name="Climate",
+            type="IRoomControllerV2",
+            states={"tempActual": "state-temp"},
+            details={"format": "%.1f °F"},
+        )
+
+        self.assertEqual(entity.infer_unit(control, "tempActual"), "°F")
 
 
 if __name__ == "__main__":

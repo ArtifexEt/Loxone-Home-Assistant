@@ -32,6 +32,7 @@ class LoxoneControl:
     parent_uuid_action: str | None = None
     path: tuple[str, ...] = field(default_factory=tuple)
     is_secured: bool = False
+    icon: str | None = None
 
     @property
     def display_name(self) -> str:
@@ -56,6 +57,17 @@ class LoxoneStateRef:
 
 
 @slotted_dataclass
+class LoxoneMediaServer:
+    """Representation of one Loxone media server."""
+
+    uuid_action: str
+    name: str
+    host: str | None = None
+    mac: str | None = None
+    states: dict[str, str] = field(default_factory=dict)
+
+
+@slotted_dataclass
 class LoxoneStructure:
     """Parsed Loxone structure."""
 
@@ -66,3 +78,4 @@ class LoxoneStructure:
     controls: list[LoxoneControl]
     controls_by_action: dict[str, LoxoneControl]
     states: dict[str, LoxoneStateRef]
+    media_servers_by_uuid_action: dict[str, LoxoneMediaServer] = field(default_factory=dict)

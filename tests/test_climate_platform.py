@@ -116,8 +116,9 @@ class _FakeBridge:
     serial = "1234567890"
     available = True
 
-    def __init__(self, values):
+    def __init__(self, values, controls=None):
         self._values = values
+        self.controls = controls or []
         self.commands: list[tuple[str, str]] = []
 
     def add_listener(self, _callback_fn, _watched_uuids):
@@ -128,6 +129,16 @@ class _FakeBridge:
 
     async def async_send_action(self, _uuid_action, _command):
         self.commands.append((_uuid_action, _command))
+
+
+class _FakeConfigEntry:
+    def __init__(self, entry_id: str) -> None:
+        self.entry_id = entry_id
+
+
+class _FakeHass:
+    def __init__(self, entry_id: str, bridge, domain: str) -> None:
+        self.data = {domain: {"bridges": {entry_id: bridge}}}
 
 
 _install_homeassistant_stubs()
@@ -242,6 +253,71 @@ class ClimateCommandMappingTests(unittest.IsolatedAsyncioTestCase):
         await entity.async_set_temperature(temperature=75)
 
         self.assertEqual(bridge.commands, [("sauna-action", "temp/75")])
+
+    async def test_air_condition_uses_set_target_command(self) -> None:
+        control = LoxoneControl(
+            uuid="ac-uuid",
+            uuid_action="ac-action",
+            name="Salon AC",
+            type="ACControl",
+            states={"targetTemperature": "state-target"},
+        )
+        bridge = _FakeBridge({"state-target": 24})
+        entity = LoxoneClimateEntity(bridge, control)
+
+        await entity.async_set_temperature(temperature=23)
+
+        self.assertEqual(bridge.commands, [("ac-action", "setTarget/23")])
+
+    async def test_air_condition_accepts_legacy_accontrol_type_name(self) -> None:
+        control = LoxoneControl(
+            uuid="ac-uuid",
+            uuid_action="ac-action",
+            name="Salon AC",
+            type="AcControl",
+            states={"targetTemperature": "state-target"},
+        )
+        bridge = _FakeBridge({"state-target": 24})
+        entity = LoxoneClimateEntity(bridge, control)
+
+        await entity.async_set_temperature(temperature=22.5)
+
+        self.assertEqual(bridge.commands, [("ac-action", "setTarget/22.5")])
+
+
+class ClimateSetupAliasTests(unittest.IsolatedAsyncioTestCase):
+    """Verify climate setup accepts known controller type aliases."""
+
+    async def test_setup_includes_room_controller_v2_alias(self) -> None:
+        room_controller = LoxoneControl(
+            uuid="room-uuid",
+            uuid_action="room-action",
+            name="Salon",
+            type="RoomControllerV2",
+            states={
+                "tempActual": "state-temp-actual",
+                "tempTarget": "state-temp-target",
+            },
+        )
+        bridge = _FakeBridge(
+            {
+                "state-temp-actual": 21.0,
+                "state-temp-target": 22.0,
+            },
+            controls=[room_controller],
+        )
+        entry = _FakeConfigEntry("entry-1")
+        hass = _FakeHass(entry.entry_id, bridge, "loxone_home_assistant")
+        entities: list = []
+
+        await climate_module.async_setup_entry(
+            hass,
+            entry,
+            lambda new_entities: entities.extend(new_entities),
+        )
+
+        self.assertEqual(len(entities), 1)
+        self.assertEqual(entities[0].control.uuid_action, "room-action")
 
 
 if __name__ == "__main__":

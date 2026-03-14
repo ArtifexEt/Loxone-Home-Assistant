@@ -204,6 +204,113 @@ class ParseStructureTests(unittest.TestCase):
         self.assertIn("event-source-list", structure.states)
         self.assertEqual(structure.states["event-source-list"].state_name, "sourceList")
 
+    def test_parse_structure_maps_control_icons_with_fallbacks(self) -> None:
+        payload = {
+            "msInfo": {
+                "msName": "Dom",
+                "serialNr": "1234567890",
+            },
+            "rooms": {
+                "room-1": {"name": "Salon", "image": "IconsFilled/sofa-1.svg"},
+            },
+            "cats": {
+                "cat-1": {"name": "Oswietlenie", "image": "IconsFilled/lightbulb-3.svg"},
+            },
+            "controls": {
+                "switch-own-icon": {
+                    "name": "Tryb Nocny",
+                    "type": "Switch",
+                    "uuidAction": "action-own",
+                    "room": "room-1",
+                    "cat": "cat-1",
+                    "defaultIcon": "IconsFilled/night-mode.svg",
+                    "states": {"active": "state-own"},
+                },
+                "switch-control-image": {
+                    "name": "Tryb Party",
+                    "type": "Switch",
+                    "uuidAction": "action-control-image",
+                    "room": "room-1",
+                    "cat": "cat-1",
+                    "image": "IconsFilled/party-mode.svg",
+                    "states": {"active": "state-control-image"},
+                },
+                "switch-category-fallback": {
+                    "name": "Lampy",
+                    "type": "Switch",
+                    "uuidAction": "action-category",
+                    "cat": "cat-1",
+                    "states": {"active": "state-category"},
+                },
+                "switch-room-fallback": {
+                    "name": "Salon",
+                    "type": "Switch",
+                    "uuidAction": "action-room",
+                    "room": "room-1",
+                    "states": {"active": "state-room"},
+                },
+            },
+        }
+
+        structure = parse_structure(payload)
+
+        self.assertEqual(
+            structure.controls_by_action["action-own"].icon,
+            "IconsFilled/night-mode.svg",
+        )
+        self.assertEqual(
+            structure.controls_by_action["action-control-image"].icon,
+            "IconsFilled/party-mode.svg",
+        )
+        self.assertEqual(
+            structure.controls_by_action["action-category"].icon,
+            "IconsFilled/lightbulb-3.svg",
+        )
+        self.assertEqual(
+            structure.controls_by_action["action-room"].icon,
+            "IconsFilled/sofa-1.svg",
+        )
+
+    def test_parse_structure_parses_media_server_with_normalized_mac(self) -> None:
+        payload = {
+            "msInfo": {
+                "msName": "Dom",
+                "serialNr": "1234567890",
+            },
+            "controls": {
+                "audio-zone": {
+                    "name": "Salon Audio",
+                    "type": "AudioZoneV2",
+                    "uuidAction": "audio-zone-action",
+                    "states": {
+                        "playState": "state-play",
+                    },
+                }
+            },
+            "mediaServer": {
+                "media-server-uuid": {
+                    "name": "AudioServer",
+                    "host": "audioserver.lan:7091",
+                    "mac": "aa:bb:cc:dd:ee:ff",
+                    "states": {
+                        "serverState": "state-server",
+                        "connState": "state-conn",
+                        "host": "state-host",
+                    },
+                }
+            },
+        }
+
+        structure = parse_structure(payload)
+        media_server = structure.media_servers_by_uuid_action["media-server-uuid"]
+
+        self.assertEqual(media_server.name, "AudioServer")
+        self.assertEqual(media_server.host, "audioserver.lan:7091")
+        self.assertEqual(media_server.mac, "AABBCCDDEEFF")
+        self.assertEqual(media_server.states["serverState"], "state-server")
+        self.assertEqual(media_server.states["connState"], "state-conn")
+        self.assertEqual(media_server.states["host"], "state-host")
+
 
 if __name__ == "__main__":
     unittest.main()

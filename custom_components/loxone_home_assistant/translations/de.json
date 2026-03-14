@@ -1,0 +1,71 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Installationsmodus wählen",
+        "description": "Wählen Sie automatische Netzwerkerkennung oder manuelle Host-Einrichtung. Während der Erstinstallation können Sie auch Kontrollkästchen für Beleuchtung und Automatisierungen konfigurieren.",
+        "data": {
+          "use_manual_setup": "Manuelle Host-Einrichtung (automatische Erkennung deaktivieren)",
+          "enable_light_mood_select": "Stimmungsauswahl des LightController bereitstellen",
+          "expose_controller_child_lights": "Einzelne Lichter im LightController bereitstellen",
+          "auto_create_automations": "Vorgeschlagene Automatisierungen automatisch hinzufügen"
+        }
+      },
+      "auto": {
+        "title": "Automatische Loxone-Erkennung",
+        "description": "Geben Sie Ihren Loxone-Benutzernamen und Ihr Passwort ein. Die Integration durchsucht das lokale Netzwerk nach einem Loxone-Server (Miniserver, Miniserver Go, Miniserver Compact).",
+        "data": {
+          "username": "Benutzername",
+          "password": "Passwort"
+        }
+      },
+      "select": {
+        "title": "Loxone-Server auswählen",
+        "description": "Es wurde mehr als ein Loxone-Server gefunden. Wählen Sie das Gerät aus, mit dem Sie sich verbinden möchten.",
+        "data": {
+          "device": "Gefundenes Gerät"
+        }
+      },
+      "manual": {
+        "title": "Manuelle Loxone-Server-Einrichtung",
+        "description": "Die automatische Erkennung wurde nicht abgeschlossen. Geben Sie den lokalen Host des Loxone-Servers manuell ein.",
+        "data": {
+          "host": "Host",
+          "port": "Port",
+          "username": "Benutzername",
+          "password": "Passwort",
+          "verify_ssl": "TLS-Zertifikat verifizieren"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Verbindung zum Loxone-Server nicht möglich.",
+      "invalid_auth": "Ungültiger Benutzername oder ungültiges Passwort.",
+      "legacy_not_supported": "Diese Integration unterstützt derzeit nur lokale Loxone-Server mit aktiviertem TLS/WSS.",
+      "unsupported_version": "Nicht unterstützte Version der Loxone-Server-Software. Die minimale unterstützte Version ist 10.2.",
+      "no_device_found": "Im lokalen Netzwerk wurde kein unterstützter Loxone-Server gefunden."
+    },
+    "abort": {
+      "already_configured": "Dieser Loxone-Server ist bereits konfiguriert."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Loxone-Optionen",
+        "description": "Hub: {entry_title}\nSeriennummer: {serial}\nLoxAPP-Strukturversion: {loxapp_version}\nErkannte Loxone-API-Softwareversion: {current_api_version}\nMinimal unterstützte API-Softwareversion: {min_api_version}\n\nWarnung: Das Deaktivieren einzelner untergeordneter Lichter entfernt diese Entitäten aus Home Assistant (sie können aus Dashboards und Automatisierungen verschwinden).",
+        "data": {
+          "host": "Host",
+          "port": "Port",
+          "username": "Benutzername",
+          "password": "Passwort (leer lassen, um den aktuellen Wert beizubehalten)",
+          "verify_ssl": "TLS-Zertifikat verifizieren",
+          "scan_timeout": "Erkennungs-Timeout (Sekunden)",
+          "enable_light_mood_select": "Stimmungsauswahl des LightController bereitstellen",
+          "expose_controller_child_lights": "Einzelne Lichter im LightController bereitstellen",
+          "auto_create_automations": "Vorgeschlagene Automatisierungen automatisch hinzufügen"
+        }
+      }
+    }
+  }
+}

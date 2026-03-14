@@ -336,6 +336,49 @@ class CameraPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(image, b"alert-image")
         self.assertEqual(session.calls, [(expected_image_url, True)])
 
+    async def test_intercom_v2_video_settings_state_uses_intercom_address_host(self) -> None:
+        control = LoxoneControl(
+            uuid="intercom-v2-uuid",
+            uuid_action="intercom-v2-action",
+            name="Brama",
+            type="IntercomV2",
+            states={
+                "videoSettingsExtern": "state-video-settings",
+                "address": "state-address",
+            },
+            details={},
+        )
+        expected_stream_url = "https://198.51.100.70/rest/stream.mjpg"
+        expected_snapshot_url = "https://198.51.100.70/rest/live.jpg"
+        expected_history_url = "https://198.51.100.70/rest/events.json"
+        session = _FakeSession(
+            {
+                (expected_snapshot_url, True): (200, b"external-live"),
+            }
+        )
+        bridge = _FakeBridge(
+            [control],
+            {
+                "state-address": "198.51.100.70",
+                "state-video-settings": {
+                    "streamUrl": "/rest/stream.mjpg",
+                    "alertImage": "/rest/live.jpg",
+                    "lastBellEvents": "/rest/events.json",
+                },
+            },
+            session,
+        )
+        entity = LoxoneIntercomCameraEntity(bridge, control)
+
+        self.assertEqual(await entity.stream_source(), expected_stream_url)
+        self.assertEqual(entity.extra_state_attributes["snapshot_url"], expected_snapshot_url)
+        self.assertEqual(
+            entity.extra_state_attributes["history_events_url"],
+            expected_history_url,
+        )
+        image = await entity.async_camera_image()
+        self.assertEqual(image, b"external-live")
+
     async def test_camera_setup_accepts_variant_type_and_case_insensitive_details(self) -> None:
         control = LoxoneControl(
             uuid="door-station-uuid",

@@ -6,15 +6,6 @@
 
 Custom HACS integration for local Loxone Miniserver, Miniserver Go, and Miniserver Compact control from Home Assistant.
 
-## Beta status
-
-This branch is prepared for community beta validation:
-
-- no hardcoded credentials in runtime paths
-- config/runtime handling aligned with current Home Assistant config entry patterns
-- reduced reconnect log spam (transition-based availability logs)
-- unknown block types exposed as disabled diagnostics instead of being silently ignored
-
 ## Quick Start in Home Assistant
 
 1. Add this repository to HACS:
@@ -39,10 +30,21 @@ If the button does not open the flow directly, use `Settings -> Devices & Servic
 - exposes Intercom/IntercomV2 (and DoorController/DoorStation variants) as dedicated doorbell entities:
   - camera stream + snapshot preview when available
   - binary sensors for ring, call, proximity, and intercom light state
+  - Intercom Gen2 action buttons (`Answer Call`, `Mute Microphone`, `Unmute Microphone`)
   - intercom history sensor based on `lastBellEvents` (latest event timestamp + recent image URLs)
   - Home Assistant bus events (`loxone_home_assistant_intercom_event`) for automation triggers
 - exposes `AudioZone`/`AudioZoneV2`/`CentralAudioZone` as `media_player` with source selection, seek/progress, shuffle/repeat, TTS and event/command passthrough via `play_media`
+- exposes `PresenceDetector` as:
+  - `binary_sensor` for presence/motion
+  - `sensor` for illuminance (`lx`) and sound level (`dB`)
+- exposes `Tracker` as event/history sensors for log-like states
+- exposes Miniserver Web Services diagnostics as hub-level sensors:
+  - `dev/sys/numtasks` (system tasks)
+  - `dev/sys/cpu` (CPU load)
+  - `dev/sys/heap` (memory usage)
+  - `dev/sys/ints` (system interrupts)
 - adds hub-level maintenance actions (for example server restart)
+- adds a hub action button to force diagnostics refresh (`Refresh System Stats`)
 - registers integration services once in integration setup (HA-compatible service lifecycle)
 
 ## Supported platforms
@@ -76,6 +78,7 @@ If the button does not open the flow directly, use `Settings -> Devices & Servic
 - `IRoomControllerV2`
 - `InfoOnlyAnalog`
 - `InfoOnlyDigital`
+- `PresenceDetector`
 - `PowerSupply`
 - `PowerSupplyV2`
 - `Alarm`
@@ -102,6 +105,7 @@ If the button does not open the flow directly, use `Settings -> Devices & Servic
 - `AudioZone`
 - `AudioZoneV2`
 - `CentralAudioZone`
+- `ACControl` (AC Unit Controller / Air Condition)
 - access/keypad-style controls with `access`/`granted` and `wrongCode`/`denied` states (exposed as binary sensors)
 
 Unsupported block types are still exposed, when possible, as disabled-by-default diagnostic sensors or binary sensors based on their raw states.
@@ -117,6 +121,7 @@ Based on the current integration parser, the following `LoxAPP3.json` sections a
 - `controls` (including nested `subControls`)
 - `rooms`
 - `cats`
+- `mediaServer` (audio server metadata/state fallback for `media_player`)
 
 The following documented sections are currently not mapped to dedicated Home Assistant entities:
 
@@ -126,7 +131,6 @@ The following documented sections are currently not mapped to dedicated Home Ass
 - `times`
 - `caller`
 - `autopilot`
-- `mediaServer`
 - `messageCenter`
 
 ## Important scope
@@ -150,31 +154,6 @@ This version targets modern Loxone servers (Miniserver, Miniserver Go, Miniserve
    - local host/IP (for example `192.0.2.10`), or
    - Cloud DNS form based on MAC (`02AABBCCDDEE` or `https://dns.loxonecloud.com/02AABBCCDDEE`).
 
-## Version pinning in HACS
-
-You can stay on an older integration version directly in HACS:
-
-1. Open HACS and go to the `Loxone` integration page.
-2. Use the menu (`...`) and choose `Redownload`.
-3. In `Need a different version?`, select the release version you want.
-4. Reinstall and restart Home Assistant.
-
-This repository now publishes installable versions from Git tags (`vX.Y.Z` for stable and `vX.Y.ZbN` for beta) as GitHub Releases, which makes those versions selectable in HACS.
-
-## Stable/Beta update channels
-
-You can maintain and update `stable` and `beta` separately:
-
-- stable channel:
-  - publish from branch `stable`
-  - use a normal version tag, for example `v1.2.3`
-  - release is published as regular (non-prerelease)
-- beta channel:
-  - updates automatically after every push to `main`
-  - workflow creates a prerelease tag, for example `v1.2.4b123`
-  - prerelease is published automatically and can be installed by users who enabled beta/prerelease updates in HACS
-
-In HACS, users can stay on `stable` or opt into `beta` by enabling prerelease/beta versions for this integration.
 
 ## Configuration flow
 
@@ -225,6 +204,64 @@ Fields:
 - `uuid_action`
 - `message`
 - `volume` optional 0-100
+
+### `loxone_home_assistant.call_intercom_function`
+
+Trigger a child function assigned to an Intercom block (for example `Open`, `Close`, `Open and Pull`).
+
+Fields:
+
+- `entry_id` optional when only one Loxone entry exists
+- `uuid_action` parent Intercom UUID action
+- `function` function selector:
+  - child function name (for example `Open`)
+  - full child `uuidAction`
+  - numeric suffix/index (for example `1`)
+
+### `loxone_home_assistant.call_intercom_command`
+
+Send a validated Intercom Gen2 command directly to the parent Intercom control.
+
+Fields:
+
+- `entry_id` optional when only one Loxone entry exists
+- `uuid_action` parent Intercom UUID action
+- `command` supported command name:
+  - `answer`
+  - `playTts` (alias `tts`)
+  - `mute` (`0` unmute, `1` mute)
+  - `setAnswers` (aliases: `setanswer`, `setallanswer`)
+  - `setvideosettings`, `setallvideosettings`
+  - `setframerate`, `setresolution`
+  - `getnumberbellimages`, `setnumberbellimages`
+- `arguments` optional:
+  - slash-separated string (for example `0/20/1`, `Package box/Call owner`)
+  - or YAML list (recommended when text contains special characters)
+
+Examples:
+
+```yaml
+service: loxone_home_assistant.call_intercom_command
+data:
+  uuid_action: intercom-v2-uuid-action
+  command: answer
+```
+
+```yaml
+service: loxone_home_assistant.call_intercom_command
+data:
+  uuid_action: intercom-v2-uuid-action
+  command: mute
+  arguments: "1"
+```
+
+```yaml
+service: loxone_home_assistant.call_intercom_command
+data:
+  uuid_action: intercom-v2-uuid-action
+  command: setanswers
+  arguments: "Leave package at box/Call owner"
+```
 
 ## Logging and troubleshooting
 

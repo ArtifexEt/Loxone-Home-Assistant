@@ -139,6 +139,7 @@ media_player_module = load_integration_module(
     "custom_components.loxone_home_assistant.media_player"
 )
 LoxoneControl = models.LoxoneControl
+LoxoneMediaServer = models.LoxoneMediaServer
 LoxoneAudioZoneEntity = media_player_module.LoxoneAudioZoneEntity
 
 
@@ -146,9 +147,10 @@ class _FakeBridge:
     serial = "1234567890"
     available = True
 
-    def __init__(self, controls, values):
+    def __init__(self, controls, values, media_servers=None):
         self.controls = controls
         self._values = values
+        self.media_servers_by_uuid_action = media_servers or {}
         self.commands: list[tuple[str, str]] = []
 
     def add_listener(self, _callback_fn, _watched_uuids):
@@ -494,6 +496,69 @@ class MediaPlayerPlatformTests(unittest.IsolatedAsyncioTestCase):
                 ("central-audio-action", "selectedcontrols/1,2/alarm"),
             ],
         )
+
+    def test_audio_zone_uses_media_server_states_and_matches_by_host(self) -> None:
+        control = self._audio_zone_v2()
+        control.states.pop("serverState", None)
+        control.details["audioServerHost"] = "audioserver.lan:7091"
+
+        media_server = LoxoneMediaServer(
+            uuid_action="media-server-action",
+            name="AudioServer",
+            host="audioserver.lan:7091",
+            mac="AABBCCDDEEFF",
+            states={
+                "serverState": "state-media-server",
+                "connState": "state-media-conn",
+                "certificateValid": "state-media-cert",
+                "host": "state-media-host",
+            },
+        )
+        bridge = _FakeBridge(
+            [control],
+            {
+                "state-media-server": 2,
+                "state-media-conn": 1,
+                "state-media-cert": 1,
+                "state-media-host": "audioserver.lan:7091",
+            },
+            media_servers={media_server.uuid_action: media_server},
+        )
+        entity = LoxoneAudioZoneEntity(bridge, control)
+
+        attrs = entity.extra_state_attributes
+        self.assertEqual(attrs["server_state"], 2)
+        self.assertEqual(attrs["audio_server_name"], "AudioServer")
+        self.assertEqual(attrs["audio_server_uuid_action"], "media-server-action")
+        self.assertEqual(attrs["audio_server_host"], "audioserver.lan:7091")
+        self.assertEqual(attrs["audio_server_conn_state"], 1)
+        self.assertTrue(attrs["audio_server_certificate_valid"])
+        self.assertEqual(attrs["audio_server_mac"], "AABBCC****FF")
+        self.assertTrue(attrs["audio_server_local_hint"])
+        self.assertIn("state-media-server", set(entity.relevant_state_uuids()))
+
+    def test_audio_zone_can_match_media_server_by_mac_hint(self) -> None:
+        control = self._audio_zone_v2()
+        control.details["audioServerMac"] = "aa-bb-cc-dd-ee-ff"
+
+        media_server = LoxoneMediaServer(
+            uuid_action="media-server-action",
+            name="AudioServer",
+            host="198.51.100.25:7091",
+            mac="AABBCCDDEEFF",
+            states={},
+        )
+        bridge = _FakeBridge(
+            [control],
+            {},
+            media_servers={media_server.uuid_action: media_server},
+        )
+
+        entity = LoxoneAudioZoneEntity(bridge, control)
+        attrs = entity.extra_state_attributes
+
+        self.assertEqual(attrs["audio_server_uuid_action"], "media-server-action")
+        self.assertEqual(attrs["audio_server_mac"], "AABBCC****FF")
 
 
 if __name__ == "__main__":

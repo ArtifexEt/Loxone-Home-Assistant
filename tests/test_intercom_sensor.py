@@ -253,6 +253,65 @@ class IntercomSensorTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIsNotNone(history_entity.native_value)
 
+    async def test_history_sensor_accepts_answers_state_payload_without_fetch(self) -> None:
+        control = LoxoneControl(
+            uuid="intercom-uuid",
+            uuid_action="intercom-action",
+            name="Furtka",
+            type="IntercomV2",
+            states={
+                "answers": "state-answers",
+                "address": "state-address",
+            },
+        )
+        payload = [
+            {
+                "timestamp": "2026-03-14T12:30:00Z",
+                "imageUrl": "/api/intercom/latest.jpg",
+            },
+            {
+                "timestamp": "2026-03-14T10:00:00Z",
+                "imageUrl": "/api/intercom/older.jpg",
+            },
+        ]
+        session = _FakeSession({})
+        bridge = _FakeBridge(
+            [control],
+            {
+                "state-answers": payload,
+                "state-address": "198.51.100.70",
+            },
+            session=session,
+        )
+        entry = _FakeConfigEntry("entry-1")
+        hass = _FakeHass(entry.entry_id, bridge, const.DOMAIN)
+        entities: list = []
+
+        await sensor_module.async_setup_entry(
+            hass,
+            entry,
+            lambda new_entities: entities.extend(new_entities),
+        )
+
+        self.assertEqual(len(entities), 1)
+        history_entity = entities[0]
+        await history_entity.async_update()
+
+        attrs = history_entity.extra_state_attributes
+        self.assertEqual(
+            attrs["latest_event_image_url"],
+            "https://198.51.100.70/api/intercom/latest.jpg",
+        )
+        self.assertEqual(
+            attrs["recent_image_urls"],
+            [
+                "https://198.51.100.70/api/intercom/latest.jpg",
+                "https://198.51.100.70/api/intercom/older.jpg",
+            ],
+        )
+        self.assertNotIn("history_events_url", attrs)
+        self.assertEqual(session.calls, [])
+
     async def test_intercom_system_schema_webpage_is_disabled_by_default(self) -> None:
         intercom = LoxoneControl(
             uuid="intercom-uuid",

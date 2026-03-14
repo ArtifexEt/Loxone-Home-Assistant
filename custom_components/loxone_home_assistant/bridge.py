@@ -11,6 +11,7 @@ import json
 import logging
 import re
 import sys
+from time import monotonic
 import uuid
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
@@ -50,7 +51,7 @@ from .intercom import (
     intercom_proximity_state_name,
     is_intercom_control,
 )
-from .models import LoxoneControl, LoxoneStructure
+from .models import LoxoneControl, LoxoneMediaServer, LoxoneStructure
 from .parser import parse_structure
 from .protocol import (
     PendingHeader,
@@ -101,6 +102,15 @@ _VERSION_KEYS = (
     "swVersion",
     "miniserverVersion",
 )
+SYSTEM_STATS_COMMANDS: dict[str, str] = {
+    "numtasks": "dev/sys/numtasks",
+    "cpu": "dev/sys/cpu",
+    "heap": "dev/sys/heap",
+    "ints": "dev/sys/ints",
+}
+SYSTEM_STATS_STATE_PREFIX = "sysdiag-"
+SYSTEM_STATS_REFRESH_SECONDS = 30
+SYSTEM_STATS_MIN_REFRESH_SECONDS = 5
 
 
 class LoxoneError(Exception):
@@ -190,8 +200,11 @@ class LoxoneBridge:
         self._pending_header: PendingHeader | None = None
         self._reader_task: asyncio.Task[None] | None = None
         self._keepalive_task: asyncio.Task[None] | None = None
+        self._system_stats_task: asyncio.Task[None] | None = None
         self._reconnect_task: asyncio.Task[None] | None = None
         self._keepalive_waiter: asyncio.Future[bool] | None = None
+        self._system_stats_lock = asyncio.Lock()
+        self._system_stats_last_refresh = 0.0
         self._closing = False
         self._unavailable_logged = False
 
@@ -218,6 +231,15 @@ class LoxoneBridge:
     def controls_by_action(self) -> dict[str, LoxoneControl]:
         """Return controls indexed by action UUID."""
         return self.structure.controls_by_action if self.structure else {}
+
+    @property
+    def media_servers_by_uuid_action(self) -> dict[str, LoxoneMediaServer]:
+        """Return parsed media servers indexed by action UUID."""
+        return (
+            self.structure.media_servers_by_uuid_action
+            if self.structure
+            else {}
+        )
 
     @property
     def loxone_state_map(self) -> dict[str, Any]:
@@ -271,6 +293,18 @@ class LoxoneBridge:
         """Return one named state of a control."""
         return self.state_value(control.state_uuid(state_name))
 
+    def system_stat_state_uuid(self, metric_key: str) -> str:
+        """Return synthetic state UUID used for system diagnostics metrics."""
+        return normalize_uuid(f"{SYSTEM_STATS_STATE_PREFIX}{metric_key}")
+
+    def system_stat_value(self, metric_key: str) -> Any:
+        """Return cached value for one system diagnostics metric."""
+        return self.state_value(self.system_stat_state_uuid(metric_key))
+
+    def system_stat_command(self, metric_key: str) -> str | None:
+        """Return the raw command path for one diagnostics metric."""
+        return SYSTEM_STATS_COMMANDS.get(metric_key)
+
     def control_for_uuid_action(self, uuid_action: str | None) -> LoxoneControl | None:
         """Return a control by uuidAction."""
         if uuid_action is None:
@@ -301,6 +335,61 @@ class LoxoneBridge:
     async def async_send_raw_command(self, command: str) -> dict[str, Any]:
         """Send a raw command through the authenticated websocket."""
         return await self._send_loxone_command(command)
+
+    async def async_refresh_system_stats(
+        self,
+        *,
+        force: bool = False,
+        ensure_connected: bool = True,
+    ) -> dict[str, Any]:
+        """Fetch and cache diagnostics from `dev/sys/*` commands."""
+        now = monotonic()
+        if (
+            not force
+            and self._system_stats_last_refresh
+            and now - self._system_stats_last_refresh < SYSTEM_STATS_MIN_REFRESH_SECONDS
+        ):
+            return {
+                key: self.system_stat_value(key)
+                for key in SYSTEM_STATS_COMMANDS
+            }
+
+        async with self._system_stats_lock:
+            now = monotonic()
+            if (
+                not force
+                and self._system_stats_last_refresh
+                and now - self._system_stats_last_refresh < SYSTEM_STATS_MIN_REFRESH_SECONDS
+            ):
+                return {
+                    key: self.system_stat_value(key)
+                    for key in SYSTEM_STATS_COMMANDS
+                }
+
+            changed: dict[str, Any] = {}
+            for metric_key, command in SYSTEM_STATS_COMMANDS.items():
+                try:
+                    response = await self._send_loxone_command(
+                        command,
+                        ensure_connected=ensure_connected,
+                    )
+                except LoxoneError as err:
+                    _LOGGER.debug(
+                        "Could not refresh system diagnostics metric %s via %s: %s",
+                        metric_key,
+                        command,
+                        err,
+                    )
+                    continue
+                changed[self.system_stat_state_uuid(metric_key)] = response.get("value")
+
+            self._system_stats_last_refresh = monotonic()
+            if changed:
+                self._merge_changed_states(changed)
+            return {
+                key: self.system_stat_value(key)
+                for key in SYSTEM_STATS_COMMANDS
+            }
 
     async def _ensure_connected(self, load_structure: bool = False) -> None:
         async with self._connect_lock:
@@ -354,6 +443,11 @@ class LoxoneBridge:
                 ensure_connected=False,
             )
             _LOGGER.debug("Loxone bridge: status updates enabled")
+            await self.async_refresh_system_stats(
+                force=True,
+                ensure_connected=False,
+            )
+            self._ensure_system_stats_task()
         except Exception:
             # During initial setup errors we explicitly avoid background reconnect
             # loops, because they can block HA startup and keep stale tasks alive.
@@ -584,6 +678,26 @@ class LoxoneBridge:
                 with contextlib.suppress(ClientError, RuntimeError):
                     await self._ws.close()
 
+    def _ensure_system_stats_task(self) -> None:
+        if self._system_stats_task and not self._system_stats_task.done():
+            return
+        self._system_stats_task = self.hass.async_create_background_task(
+            self._system_stats_loop(),
+            "loxone_system_stats",
+        )
+
+    async def _system_stats_loop(self) -> None:
+        try:
+            while True:
+                if self.available:
+                    try:
+                        await self.async_refresh_system_stats(force=True)
+                    except LoxoneError as err:
+                        _LOGGER.debug("System diagnostics refresh failed: %s", err)
+                await asyncio.sleep(SYSTEM_STATS_REFRESH_SECONDS)
+        except asyncio.CancelledError:
+            raise
+
     def _schedule_reconnect(self) -> None:
         if self._reconnect_task and not self._reconnect_task.done():
             return
@@ -651,7 +765,7 @@ class LoxoneBridge:
     ) -> None:
         current_task = asyncio.current_task()
 
-        for task in (self._keepalive_task, self._reader_task):
+        for task in (self._keepalive_task, self._reader_task, self._system_stats_task):
             if task and task is not current_task:
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
@@ -676,6 +790,7 @@ class LoxoneBridge:
         elif self._reader_task and self._reader_task.done():
             self._reader_task = None
         self._keepalive_task = None
+        self._system_stats_task = None
         if cancel_reconnect:
             self._reconnect_task = None
 
