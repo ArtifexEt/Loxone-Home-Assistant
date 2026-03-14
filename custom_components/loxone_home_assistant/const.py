@@ -215,6 +215,7 @@ PRIMARY_STATE_CANDIDATES = (
 
 STATE_NAME_UNITS = {
     "batteryLevel": "%",
+    "batteryStateOfCharge": "%",
     "chargeLevel": "%",
     "humidity": "%",
     "humidityActual": "%",

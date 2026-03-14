@@ -39,6 +39,7 @@ POWER_UNITS = {"w", "kw", "mw", "gw"}
 DURATION_UNITS = {"ms", "s", "min", "h", "d"}
 POWER_SUPPLY_BATTERY_STATE_CANDIDATES = (
     "batteryLevel",
+    "batteryStateOfCharge",
     "stateOfCharge",
     "chargeLevel",
     "batteryPercent",
@@ -46,6 +47,7 @@ POWER_SUPPLY_BATTERY_STATE_CANDIDATES = (
 POWER_SUPPLY_REMAINING_TIME_STATE_CANDIDATES = (
     "remainingTime",
     "timeRemaining",
+    "supplyTimeRemaining",
     "remainingRuntime",
     "remainingDuration",
     "batteryRuntime",

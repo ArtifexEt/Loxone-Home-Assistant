@@ -237,6 +237,7 @@ def infer_unit(control: LoxoneControl, state_name: str | None = None) -> str | N
     elif state_name and normalize_state_name(state_name) in {
         normalize_state_name("remainingTime"),
         normalize_state_name("timeRemaining"),
+        normalize_state_name("supplyTimeRemaining"),
         normalize_state_name("remainingRuntime"),
         normalize_state_name("remainingDuration"),
         normalize_state_name("batteryRuntime"),
@@ -244,6 +245,8 @@ def infer_unit(control: LoxoneControl, state_name: str | None = None) -> str | N
         keys = (
             "remainingTimeFormat",
             "timeRemainingFormat",
+            "supplyTimeRemainingFormat",
+            "supplyRemainingTimeFormat",
             "remainingRuntimeFormat",
             "remainingDurationFormat",
             "batteryRuntimeFormat",

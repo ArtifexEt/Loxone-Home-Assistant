@@ -212,6 +212,52 @@ class PowerSupplyPlatformTests(unittest.IsolatedAsyncioTestCase):
             time_entity.device_class, sensor_module.SensorDeviceClass.DURATION
         )
 
+    async def test_sensor_platform_supports_battery_state_of_charge_and_supply_time_remaining(self) -> None:
+        control = self._build_control(
+            states={
+                "BatteryStateOfCharge": "state-battery",
+                "SupplyTimeRemaining": "state-remaining",
+                "isCharging": "state-charging",
+            },
+            details={"supplyTimeRemainingFormat": "%.1f h"},
+        )
+        bridge = _FakeBridge(
+            [control],
+            {
+                "state-battery": 88,
+                "state-remaining": 3,
+                "state-charging": 0,
+            },
+        )
+        hass = types.SimpleNamespace(
+            data={const_module.DOMAIN: {"bridges": {"entry-id": bridge}}}
+        )
+        entry = types.SimpleNamespace(entry_id="entry-id")
+
+        entities: list = []
+
+        def _add_entities(new_entities):
+            entities.extend(new_entities)
+
+        await sensor_module.async_setup_entry(hass, entry, _add_entities)
+
+        self.assertEqual(len(entities), 2)
+        by_kind = {entity._kind: entity for entity in entities}
+        battery_entity = by_kind[sensor_module.POWER_SUPPLY_KIND_BATTERY]
+        time_entity = by_kind[sensor_module.POWER_SUPPLY_KIND_REMAINING_TIME]
+
+        self.assertEqual(battery_entity.native_value, 88.0)
+        self.assertEqual(battery_entity.native_unit_of_measurement, "%")
+        self.assertEqual(
+            battery_entity.device_class, sensor_module.SensorDeviceClass.BATTERY
+        )
+
+        self.assertEqual(time_entity.native_value, 3.0)
+        self.assertEqual(time_entity.native_unit_of_measurement, "h")
+        self.assertEqual(
+            time_entity.device_class, sensor_module.SensorDeviceClass.DURATION
+        )
+
     async def test_binary_sensor_platform_creates_charging_entity(self) -> None:
         control = self._build_control(
             states={
