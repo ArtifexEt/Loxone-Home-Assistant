@@ -27,6 +27,7 @@ If the button does not open the flow directly, use `Settings -> Devices & Servic
 - imports the Loxone structure from `LoxAPP3.json`
 - keeps two-way state sync between Home Assistant and Loxone
 - exposes common Loxone blocks as Home Assistant entities
+- exposes Intercom/IntercomV2 as camera preview entities (stream + snapshot when available)
 - exposes `AudioZone`/`AudioZoneV2` as `media_player` with source selection, seek/progress, shuffle/repeat and TTS (`AudioZoneV2`)
 - adds hub-level maintenance actions (for example server restart)
 
@@ -39,6 +40,7 @@ If the button does not open the flow directly, use `Settings -> Devices & Servic
 - `sensor`
 - `binary_sensor`
 - `button`
+- `camera`
 - `number`
 - `select`
 - `text`

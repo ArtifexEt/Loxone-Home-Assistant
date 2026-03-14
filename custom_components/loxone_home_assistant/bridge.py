@@ -228,6 +228,31 @@ class LoxoneBridge:
             CONF_TOKEN_VALID_UNTIL: self.token_valid_until,
         }
 
+    def resolve_http_url(self, value: str | None) -> str | None:
+        """Resolve a possibly relative Miniserver URL to an absolute HTTP(S) URL."""
+        if not isinstance(value, str):
+            return None
+        raw = value.strip()
+        if not raw:
+            return None
+
+        split = urlsplit(raw)
+        if split.scheme in {"http", "https"} and split.netloc:
+            return raw
+
+        scheme = "https" if self.use_tls else "http"
+        if raw.startswith("//"):
+            return f"{scheme}:{raw}"
+
+        path = raw if raw.startswith("/") else f"/{raw}"
+        prefix = self._ws_path_prefix.rstrip("/")
+        if prefix and path != prefix and not path.startswith(f"{prefix}/"):
+            path = f"{prefix}{path}"
+
+        default_port = 443 if self.use_tls else 80
+        port_part = "" if self.port == default_port else f":{self.port}"
+        return f"{scheme}://{self.host}{port_part}{path}"
+
     def state_value(self, state_uuid: str | None) -> Any:
         """Return the latest state value for a UUID."""
         if state_uuid is None:

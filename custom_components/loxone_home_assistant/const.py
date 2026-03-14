@@ -20,6 +20,7 @@ INTEGRATION_TITLE = "Loxone"
 PLATFORMS: list[Platform | str] = [
     Platform.BINARY_SENSOR,
     Platform.BUTTON,
+    getattr(Platform, "CAMERA", "camera"),
     Platform.CLIMATE,
     Platform.COVER,
     Platform.LIGHT,
@@ -95,6 +96,7 @@ NUMBER_CONTROL_TYPES = {"Slider", "UpDownLeftRight", "ValueSelector"}
 TEXT_CONTROL_TYPES = {"TextInput"}
 MEDIA_PLAYER_CONTROL_TYPES = {"AudioZone", "AudioZoneV2"}
 RADIO_SELECT_CONTROL_TYPES = {"Radio"}
+INTERCOM_CAMERA_CONTROL_TYPES = {"Intercom", "IntercomV2"}
 
 DOORBELL_STATE_CANDIDATES = (
     "bell",
@@ -232,6 +234,7 @@ STATE_NAME_UNITS = {
 PLATFORM_DOMAINS = {
     BINARY_SENSOR_DOMAIN,
     BUTTON_DOMAIN,
+    "camera",
     CLIMATE_DOMAIN,
     COVER_DOMAIN,
     LIGHT_DOMAIN,
