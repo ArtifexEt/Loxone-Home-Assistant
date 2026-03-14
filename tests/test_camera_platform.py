@@ -304,6 +304,43 @@ class CameraPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(image, b"alert-image")
         self.assertEqual(session.calls, [(expected_image_url, True)])
 
+    async def test_camera_setup_accepts_variant_type_and_case_insensitive_details(self) -> None:
+        control = LoxoneControl(
+            uuid="door-station-uuid",
+            uuid_action="door-station-action",
+            name="Bramofon",
+            type="DoorStationV2",
+            states={},
+            details={
+                "VideoInfo": {
+                    "StreamURL": "/dev/variant-stream.mjpg",
+                    "LiveImageURL": "/dev/variant-live.jpg",
+                },
+            },
+        )
+        session = _FakeSession()
+        bridge = _FakeBridge([control], {}, session)
+        entry = _FakeConfigEntry("entry-1")
+        hass = _FakeHass(entry.entry_id, bridge, const.DOMAIN)
+        entities: list = []
+
+        await camera_module.async_setup_entry(
+            hass,
+            entry,
+            lambda new_entities: entities.extend(new_entities),
+        )
+
+        self.assertEqual(len(entities), 1)
+        entity = entities[0]
+        self.assertEqual(
+            await entity.stream_source(),
+            "https://mini.local/dev/variant-stream.mjpg",
+        )
+        self.assertEqual(
+            entity.extra_state_attributes["snapshot_url"],
+            "https://mini.local/dev/variant-live.jpg",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

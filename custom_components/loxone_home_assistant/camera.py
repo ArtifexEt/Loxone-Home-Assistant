@@ -31,7 +31,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import DOMAIN, INTERCOM_CAMERA_CONTROL_TYPES
-from .entity import LoxoneEntity, first_matching_state_name
+from .entity import LoxoneEntity, first_matching_state_name, normalize_state_name
 from .models import LoxoneControl
 
 _LOGGER = logging.getLogger(__name__)
@@ -57,6 +57,9 @@ SNAPSHOT_DETAIL_PATHS = (
     "liveImageUrl",
 )
 LAST_BELL_EVENTS_DETAIL_PATHS = ("lastBellEvents",)
+INTERCOM_CAMERA_CONTROL_TYPES_NORMALIZED = {
+    value.casefold() for value in INTERCOM_CAMERA_CONTROL_TYPES
+}
 
 
 async def async_setup_entry(
@@ -66,7 +69,7 @@ async def async_setup_entry(
     entities = [
         LoxoneIntercomCameraEntity(bridge, control)
         for control in bridge.controls
-        if control.type in INTERCOM_CAMERA_CONTROL_TYPES
+        if _is_intercom_camera_control(control)
     ]
     async_add_entities(entities)
 
@@ -154,12 +157,34 @@ def _resolve_control_detail_url(bridge, control: LoxoneControl, detail_paths: tu
     return None
 
 
+def _is_intercom_camera_control(control: LoxoneControl) -> bool:
+    normalized_type = control.type.casefold()
+    if normalized_type in INTERCOM_CAMERA_CONTROL_TYPES_NORMALIZED:
+        return True
+    if "intercom" in normalized_type:
+        return True
+
+    normalized_states = {
+        normalize_state_name(state_name) for state_name in control.states
+    }
+    for candidate in (*STREAM_STATE_CANDIDATES, *SNAPSHOT_STATE_CANDIDATES):
+        if normalize_state_name(candidate) in normalized_states:
+            return True
+
+    detail_paths = (
+        *STREAM_DETAIL_PATHS,
+        *SNAPSHOT_DETAIL_PATHS,
+        *LAST_BELL_EVENTS_DETAIL_PATHS,
+    )
+    return any(_nested_detail_value(control.details, path) is not None for path in detail_paths)
+
+
 def _nested_detail_value(details: Mapping[str, Any], path: str) -> Any:
     current: Any = details
     for part in path.split("."):
         if not isinstance(current, Mapping):
             return None
-        current = current.get(part)
+        current = _mapping_get_case_insensitive(current, part)
     return current
 
 
@@ -168,3 +193,14 @@ def _coerce_text(value: Any) -> str | None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def _mapping_get_case_insensitive(mapping: Mapping[str, Any], key: str) -> Any:
+    if key in mapping:
+        return mapping[key]
+
+    wanted = normalize_state_name(key)
+    for current_key, value in mapping.items():
+        if isinstance(current_key, str) and normalize_state_name(current_key) == wanted:
+            return value
+    return None
