@@ -44,6 +44,10 @@ def _install_homeassistant_stubs() -> None:
         CLOSE = 2
         STOP = 4
         SET_POSITION = 8
+        OPEN_TILT = 16
+        CLOSE_TILT = 32
+        STOP_TILT = 64
+        SET_TILT_POSITION = 128
 
     cover.CoverEntity = CoverEntity
     cover.CoverEntityFeature = CoverEntityFeature
@@ -146,7 +150,7 @@ LoxoneControl = models.LoxoneControl
 
 
 class CoverPlatformTests(unittest.IsolatedAsyncioTestCase):
-    """Verify Gate and UpDownLeftRight mappings."""
+    """Verify Gate, UpDownLeftRight and Jalousie mappings."""
 
     async def test_gate_commands_use_open_close_stop(self) -> None:
         control = LoxoneControl(
@@ -221,6 +225,75 @@ class CoverPlatformTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(entities), 1)
         self.assertEqual(entities[0].control.uuid_action, "gate-action")
+
+    async def test_jalousie_with_lamella_states_exposes_tilt_support(self) -> None:
+        control = LoxoneControl(
+            uuid="jalousie-uuid",
+            uuid_action="jalousie-action",
+            name="Zaluzje",
+            type="Jalousie",
+            states={
+                "position": "state-position",
+                "shadePosition": "state-shade-position",
+                "targetPositionLamelle": "state-target-lamella",
+            },
+        )
+        bridge = _FakeBridge(
+            [control],
+            {
+                "state-position": 30,
+                "state-shade-position": 25,
+            },
+        )
+        entity = cover_module.LoxoneCoverEntity(bridge, control)
+
+        self.assertEqual(entity.current_cover_position, 70)
+        self.assertEqual(entity.current_cover_tilt_position, 75)
+        self.assertTrue(entity.supported_features & cover_module.CoverEntityFeature.SET_POSITION)
+        self.assertTrue(
+            entity.supported_features
+            & cover_module.CoverEntityFeature.SET_TILT_POSITION
+        )
+
+        await entity.async_open_cover_tilt()
+        await entity.async_close_cover_tilt()
+        await entity.async_stop_cover_tilt()
+        await entity.async_set_cover_tilt_position(tilt_position=20)
+
+        self.assertEqual(
+            bridge.commands,
+            [
+                ("jalousie-action", "manualLamelle/0"),
+                ("jalousie-action", "manualLamelle/100"),
+                ("jalousie-action", "stop"),
+                ("jalousie-action", "manualLamelle/80"),
+            ],
+        )
+
+    async def test_jalousie_with_animation_zero_enables_tilt_commands(self) -> None:
+        control = LoxoneControl(
+            uuid="jalousie-details-uuid",
+            uuid_action="jalousie-details-action",
+            name="Zaluzje Taras",
+            type="Jalousie",
+            states={"position": "state-position"},
+            details={"animation": 0},
+        )
+        bridge = _FakeBridge([control], {"state-position": 0})
+        entity = cover_module.LoxoneCoverEntity(bridge, control)
+
+        self.assertTrue(
+            entity.supported_features
+            & cover_module.CoverEntityFeature.SET_TILT_POSITION
+        )
+        self.assertIsNone(entity.current_cover_tilt_position)
+
+        await entity.async_set_cover_tilt_position(tilt_position=40)
+
+        self.assertEqual(
+            bridge.commands,
+            [("jalousie-details-action", "manualLamelle/60")],
+        )
 
 
 if __name__ == "__main__":

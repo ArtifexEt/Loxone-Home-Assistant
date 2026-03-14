@@ -40,7 +40,15 @@ from .const import (
     DEFAULT_PORT,
     DEFAULT_SCAN_TIMEOUT,
     DEFAULT_VERIFY_SSL,
+    EVENT_INTERCOM,
     WEB_PERMISSION,
+)
+from .intercom import (
+    intercom_call_state_name,
+    intercom_doorbell_state_name,
+    intercom_light_state_name,
+    intercom_proximity_state_name,
+    is_intercom_control,
 )
 from .models import LoxoneControl, LoxoneStructure
 from .parser import parse_structure
@@ -185,6 +193,7 @@ class LoxoneBridge:
         self._reconnect_task: asyncio.Task[None] | None = None
         self._keepalive_waiter: asyncio.Future[bool] | None = None
         self._closing = False
+        self._unavailable_logged = False
 
     async def async_initialize(self) -> None:
         """Open the websocket, authenticate and load structure."""
@@ -198,8 +207,7 @@ class LoxoneBridge:
 
         await self._cleanup_connection(cancel_reconnect=True)
 
-        self.available = False
-        self._notify_listeners()
+        self._mark_unavailable()
 
     @property
     def controls(self) -> list[LoxoneControl]:
@@ -352,8 +360,7 @@ class LoxoneBridge:
             await self._cleanup_connection(cancel_reconnect=True)
             raise
 
-        self.available = True
-        self._notify_listeners()
+        self._mark_available()
 
     async def _authenticate(self) -> None:
         auth_username = _auth_path_segment(self.username)
@@ -490,17 +497,21 @@ class LoxoneBridge:
 
     async def _reader_loop(self) -> None:
         assert self._ws is not None
+        loop_error: Exception | None = None
         try:
             async for message in self._ws:
                 await self._handle_ws_message(message)
         except asyncio.CancelledError:
             raise
         except Exception as err:  # noqa: BLE001
-            _LOGGER.warning("Loxone websocket reader stopped: %s", err)
+            loop_error = err
+            _LOGGER.debug("Loxone websocket reader stopped: %s", err)
         finally:
             if not self._closing:
-                self.available = False
-                self._notify_listeners()
+                self._mark_unavailable(
+                    reason="websocket reader stopped",
+                    err=loop_error,
+                )
                 await self._cleanup_connection(cancel_reconnect=False, close_ws=False)
                 self._schedule_reconnect()
 
@@ -567,7 +578,8 @@ class LoxoneBridge:
         except asyncio.CancelledError:
             raise
         except Exception as err:  # noqa: BLE001
-            _LOGGER.warning("Loxone keepalive loop failed: %s", err)
+            _LOGGER.debug("Loxone keepalive loop failed: %s", err)
+            self._mark_unavailable(reason="keepalive loop failed", err=err)
             if self._ws is not None and not self._ws.closed:
                 with contextlib.suppress(ClientError, RuntimeError):
                     await self._ws.close()
@@ -591,6 +603,35 @@ class LoxoneBridge:
                 delay = min(delay * 2, 60)
                 continue
             return
+
+    def _mark_available(self) -> None:
+        """Set bridge as available and emit one recovery log if needed."""
+        was_available = self.available
+        self.available = True
+        if self._unavailable_logged:
+            _LOGGER.info("Loxone connection restored.")
+            self._unavailable_logged = False
+        if not was_available:
+            self._notify_listeners()
+
+    def _mark_unavailable(
+        self,
+        *,
+        reason: str | None = None,
+        err: Exception | None = None,
+    ) -> None:
+        """Set bridge as unavailable and log transition once."""
+        was_available = self.available
+        self.available = False
+        if was_available:
+            self._notify_listeners()
+        if reason is None or self._unavailable_logged:
+            return
+        if err is None:
+            _LOGGER.info("Loxone connection unavailable: %s", reason)
+        else:
+            _LOGGER.info("Loxone connection unavailable (%s): %s", reason, err)
+        self._unavailable_logged = True
 
     def _token_expired(self) -> bool:
         if not self.token_valid_until:
@@ -672,8 +713,56 @@ class LoxoneBridge:
         }
         if not normalized:
             return
+        previous_values = {
+            state_uuid: self.state_values.get(state_uuid)
+            for state_uuid in normalized
+        }
         self.state_values.update(normalized)
+        self._emit_intercom_events(normalized, previous_values)
         self._notify_listeners(set(normalized))
+
+    def _emit_intercom_events(
+        self,
+        changed: Mapping[str, Any],
+        previous_values: Mapping[str, Any],
+    ) -> None:
+        structure = getattr(self, "structure", None)
+        if structure is None:
+            return
+
+        hass = getattr(self, "hass", None)
+        bus = getattr(hass, "bus", None)
+        fire_event = getattr(bus, "async_fire", None)
+        if fire_event is None:
+            return
+
+        for state_uuid, new_value in changed.items():
+            state_ref = structure.states.get(state_uuid)
+            if state_ref is None:
+                continue
+            control = self.controls_by_action.get(state_ref.control_uuid_action)
+            if control is None or not is_intercom_control(control):
+                continue
+
+            event_name = _intercom_event_name_for_state(control, state_ref.state_name)
+            if event_name is None:
+                continue
+
+            if not _state_triggered(previous_values.get(state_uuid), new_value):
+                continue
+
+            event_data: dict[str, Any] = {
+                "serial": self.serial,
+                "uuid_action": control.uuid_action,
+                "control_name": control.display_name,
+                "control_type": control.type,
+                "room": control.room_name,
+                "category": control.category_name,
+                "state_name": state_ref.state_name,
+                "event": event_name,
+                "value": new_value,
+            }
+            fire_event(EVENT_INTERCOM, event_data)
 
     @callback
     def _notify_listeners(self, changed_uuids: set[str] | None = None) -> None:
@@ -685,6 +774,59 @@ class LoxoneBridge:
                     _LOGGER.exception(
                         "Loxone listener callback failed; keeping websocket connection alive."
                     )
+
+
+def _intercom_event_name_for_state(control: LoxoneControl, state_name: str) -> str | None:
+    if state_name == intercom_doorbell_state_name(control):
+        return "doorbell"
+    if state_name == intercom_call_state_name(control):
+        return "call"
+    if state_name == intercom_proximity_state_name(control):
+        return "proximity"
+    if state_name == intercom_light_state_name(control):
+        return "light"
+
+    normalized_state_name = _normalize_state_name(state_name)
+    if "bell" in normalized_state_name or "ring" in normalized_state_name:
+        return "doorbell"
+    if "call" in normalized_state_name or "talk" in normalized_state_name:
+        return "call"
+    if "prox" in normalized_state_name or "near" in normalized_state_name:
+        return "proximity"
+    if "light" in normalized_state_name or "led" in normalized_state_name:
+        return "light"
+    return None
+
+
+def _state_triggered(previous_value: Any, new_value: Any) -> bool:
+    previous_bool = _coerce_event_bool(previous_value)
+    current_bool = _coerce_event_bool(new_value)
+    if current_bool is None:
+        return False
+    if previous_bool is None:
+        return current_bool
+    return not previous_bool and current_bool
+
+
+def _coerce_event_bool(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        lowered = value.strip().casefold()
+        if lowered in {"1", "true", "on", "yes", "open"}:
+            return True
+        if lowered in {"0", "false", "off", "no", "closed"}:
+            return False
+    if isinstance(value, Mapping):
+        nested_value = value.get("value", value.get("active", value.get("state")))
+        return _coerce_event_bool(nested_value)
+    return None
+
+
+def _normalize_state_name(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", value.casefold())
 
 
 async def async_discover_miniservers(

@@ -115,6 +115,8 @@ def _install_homeassistant_stubs() -> None:
 
 _install_homeassistant_stubs()
 bridge = load_integration_module("custom_components.loxone_home_assistant.bridge")
+models = load_integration_module("custom_components.loxone_home_assistant.models")
+LoxoneControl = models.LoxoneControl
 
 
 class _FakeResponse:
@@ -452,6 +454,45 @@ class BridgeTextStateUpdateTests(unittest.TestCase):
 
         self.assertEqual(candidate.state_values[state_uuid], 1)
         self.assertEqual(healthy_calls, 1)
+
+    def test_intercom_rising_edge_fires_hass_bus_event(self) -> None:
+        candidate = self._new_bridge()
+        state_uuid = "12345678-1234-5678-1234-567812345678"
+        intercom_control = LoxoneControl(
+            uuid="intercom-uuid",
+            uuid_action="intercom-action",
+            name="Furtka",
+            type="IntercomV2",
+            states={"bell": state_uuid},
+        )
+        candidate.structure = types.SimpleNamespace(
+            states={
+                state_uuid: types.SimpleNamespace(
+                    control_uuid_action="intercom-action",
+                    state_name="bell",
+                )
+            },
+            controls_by_action={"intercom-action": intercom_control},
+        )
+        candidate.serial = "1234567890"
+        fired_events: list[tuple[str, dict]] = []
+        candidate.hass = types.SimpleNamespace(
+            bus=types.SimpleNamespace(
+                async_fire=lambda event_type, data: fired_events.append((event_type, data))
+            )
+        )
+
+        candidate._deliver_text(
+            '{"LL":{"control":"dev/sps/io/12345678-1234-5678-1234-567812345678","value":1}}'
+        )
+        candidate._deliver_text(
+            '{"LL":{"control":"dev/sps/io/12345678-1234-5678-1234-567812345678","value":1}}'
+        )
+
+        self.assertEqual(len(fired_events), 1)
+        self.assertEqual(fired_events[0][0], bridge.EVENT_INTERCOM)
+        self.assertEqual(fired_events[0][1]["event"], "doorbell")
+        self.assertEqual(fired_events[0][1]["uuid_action"], "intercom-action")
 
 
 if __name__ == "__main__":

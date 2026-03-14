@@ -251,6 +251,129 @@ class AccessBinarySensorTests(unittest.IsolatedAsyncioTestCase):
         ]
         self.assertEqual(access_entities, [])
 
+    async def test_climate_control_exposes_j_locked_binary_sensor(self) -> None:
+        control = LoxoneControl(
+            uuid="climate-uuid",
+            uuid_action="climate-action",
+            name="Salon",
+            type="IRoomControllerV2",
+            states={
+                "jLocked": "state-j-locked",
+                "tempActual": "state-temp-actual",
+                "tempTarget": "state-temp-target",
+            },
+        )
+        bridge = _FakeBridge(
+            [control],
+            {
+                "state-j-locked": {"locked": 2, "reason": "Central lock"},
+                "state-temp-actual": 21.5,
+                "state-temp-target": 22.0,
+            },
+        )
+        entry = _FakeConfigEntry("entry-1")
+        hass = _FakeHass(entry.entry_id, bridge, const.DOMAIN)
+        entities = []
+
+        await binary_sensor_module.async_setup_entry(
+            hass,
+            entry,
+            lambda new_entities: entities.extend(new_entities),
+        )
+
+        lock_entities = [
+            entity
+            for entity in entities
+            if isinstance(entity, binary_sensor_module.LoxoneControlLockBinaryEntity)
+        ]
+        self.assertEqual(len(lock_entities), 1)
+        lock_entity = lock_entities[0]
+        self.assertTrue(lock_entity.is_on)
+        self.assertEqual(lock_entity.extra_state_attributes["lock_state"], "jLocked")
+        self.assertEqual(lock_entity.extra_state_attributes["locked_code"], 2)
+        self.assertEqual(lock_entity.extra_state_attributes["lock_source"], "logic")
+        self.assertEqual(lock_entity.extra_state_attributes["lock_reason"], "Central lock")
+
+    async def test_climate_control_falls_back_to_is_locked_when_present(self) -> None:
+        control = LoxoneControl(
+            uuid="climate-uuid",
+            uuid_action="climate-action",
+            name="Gabinet",
+            type="IRoomController",
+            states={
+                "isLocked": "state-is-locked",
+                "tempActual": "state-temp-actual",
+                "tempTarget": "state-temp-target",
+            },
+        )
+        bridge = _FakeBridge(
+            [control],
+            {
+                "state-is-locked": 1,
+                "state-temp-actual": 20.0,
+                "state-temp-target": 21.0,
+            },
+        )
+        entry = _FakeConfigEntry("entry-1")
+        hass = _FakeHass(entry.entry_id, bridge, const.DOMAIN)
+        entities = []
+
+        await binary_sensor_module.async_setup_entry(
+            hass,
+            entry,
+            lambda new_entities: entities.extend(new_entities),
+        )
+
+        lock_entities = [
+            entity
+            for entity in entities
+            if isinstance(entity, binary_sensor_module.LoxoneControlLockBinaryEntity)
+        ]
+        self.assertEqual(len(lock_entities), 1)
+        self.assertTrue(lock_entities[0].is_on)
+        self.assertEqual(lock_entities[0].extra_state_attributes["lock_state"], "isLocked")
+
+    async def test_jalousie_control_exposes_j_locked_binary_sensor(self) -> None:
+        control = LoxoneControl(
+            uuid="jalousie-uuid",
+            uuid_action="jalousie-action",
+            name="Roleta Salon",
+            type="Jalousie",
+            states={
+                "position": "state-position",
+                "jLocked": "state-j-locked",
+            },
+        )
+        bridge = _FakeBridge(
+            [control],
+            {
+                "state-position": 55,
+                "state-j-locked": {"locked": 1, "reason": "Visualization lock"},
+            },
+        )
+        entry = _FakeConfigEntry("entry-1")
+        hass = _FakeHass(entry.entry_id, bridge, const.DOMAIN)
+        entities = []
+
+        await binary_sensor_module.async_setup_entry(
+            hass,
+            entry,
+            lambda new_entities: entities.extend(new_entities),
+        )
+
+        lock_entities = [
+            entity
+            for entity in entities
+            if isinstance(entity, binary_sensor_module.LoxoneControlLockBinaryEntity)
+        ]
+        self.assertEqual(len(lock_entities), 1)
+        lock_entity = lock_entities[0]
+        self.assertTrue(lock_entity.is_on)
+        self.assertEqual(lock_entity._attr_name, "Roleta Salon J Locked")
+        self.assertEqual(lock_entity.extra_state_attributes["lock_state"], "jLocked")
+        self.assertEqual(lock_entity.extra_state_attributes["locked_code"], 1)
+        self.assertEqual(lock_entity.extra_state_attributes["lock_source"], "visualization")
+
 
 if __name__ == "__main__":
     unittest.main()

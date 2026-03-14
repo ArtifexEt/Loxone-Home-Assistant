@@ -17,8 +17,9 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import DOMAIN, MEDIA_PLAYER_CONTROL_TYPES
+from .const import MEDIA_PLAYER_CONTROL_TYPES
 from .entity import LoxoneEntity, coerce_bool, coerce_float, first_matching_state_name
+from .runtime import entry_bridge
 
 try:  # Home Assistant >= 2022.10
     from homeassistant.components.media_player import MediaType
@@ -56,6 +57,10 @@ FEATURE_PLAY_MEDIA = getattr(MediaPlayerEntityFeature, "PLAY_MEDIA", 0)
 FEATURE_SHUFFLE_SET = getattr(MediaPlayerEntityFeature, "SHUFFLE_SET", 0)
 FEATURE_REPEAT_SET = getattr(MediaPlayerEntityFeature, "REPEAT_SET", 0)
 FEATURE_SEEK = getattr(MediaPlayerEntityFeature, "SEEK", 0)
+FEATURE_VOLUME_MUTE = getattr(MediaPlayerEntityFeature, "VOLUME_MUTE", 0)
+
+AUDIO_ZONE_V2_CONTROL_TYPE = "AudioZoneV2"
+CENTRAL_AUDIO_ZONE_CONTROL_TYPE = "CentralAudioZone"
 
 STATE_OFF = -1
 STATE_IDLE = 0
@@ -83,7 +88,7 @@ SUPPORTED_FEATURES = (
 async def async_setup_entry(
     hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
 ) -> None:
-    bridge = hass.data[DOMAIN]["bridges"][entry.entry_id]
+    bridge = entry_bridge(hass, entry)
     entities = [
         LoxoneAudioZoneEntity(bridge, control)
         for control in bridge.controls
@@ -99,6 +104,7 @@ class LoxoneAudioZoneEntity(LoxoneEntity, MediaPlayerEntity):
 
     def __init__(self, bridge, control) -> None:
         super().__init__(bridge, control)
+        self._media_position_updated_at: datetime | None = None
         self._play_state_name = first_matching_state_name(control, PLAY_STATE_CANDIDATES)
         self._power_state_name = first_matching_state_name(control, POWER_STATE_CANDIDATES)
         self._volume_state_name = first_matching_state_name(control, VOLUME_STATE_CANDIDATES)
@@ -123,10 +129,16 @@ class LoxoneAudioZoneEntity(LoxoneEntity, MediaPlayerEntity):
     @property
     def state(self) -> MediaPlayerState | None:
         power = coerce_bool(self.state_value(self._power_state_name)) if self._power_state_name else None
+        play_state = _coerce_int(self.state_value(self._play_state_name))
+
+        # AudioZoneV2 commonly reports `power=0` together with `playState=0` (stopped),
+        # but still allows full playback control like in the Loxone app.
+        if self.control.type == AUDIO_ZONE_V2_CONTROL_TYPE and play_state == STATE_IDLE:
+            return MediaPlayerState.IDLE
+
         if power is False:
             return MediaPlayerState.OFF
 
-        play_state = _coerce_int(self.state_value(self._play_state_name))
         if play_state == STATE_PLAYING:
             return MediaPlayerState.PLAYING
         if play_state == STATE_PAUSED:
@@ -205,11 +217,7 @@ class LoxoneAudioZoneEntity(LoxoneEntity, MediaPlayerEntity):
 
     @property
     def media_position_updated_at(self) -> datetime | None:
-        if self.media_position is None:
-            return None
-        if self.state not in {MediaPlayerState.PLAYING, MediaPlayerState.PAUSED}:
-            return None
-        return datetime.now(timezone.utc)
+        return self._media_position_updated_at
 
     @property
     def shuffle(self) -> bool | None:
@@ -249,6 +257,8 @@ class LoxoneAudioZoneEntity(LoxoneEntity, MediaPlayerEntity):
         features = SUPPORTED_FEATURES
         if self._source_options() or self._source_state_name is not None:
             features |= FEATURE_SELECT_SOURCE
+        if self._mute_state_name is not None:
+            features |= FEATURE_VOLUME_MUTE
         if self._shuffle_state_name is not None:
             features |= FEATURE_SHUFFLE_SET
         if self._repeat_state_name is not None:
@@ -306,17 +316,30 @@ class LoxoneAudioZoneEntity(LoxoneEntity, MediaPlayerEntity):
             f"volume/{volume_percent}",
         )
 
+    async def async_mute_volume(self, mute: bool) -> None:
+        command_value = 1 if mute else 0
+        await self.bridge.async_send_action(
+            self.control.uuid_action,
+            f"mute/{command_value}",
+        )
+
     async def async_volume_up(self) -> None:
-        if self.control.type == "AudioZoneV2":
+        if self.control.type == AUDIO_ZONE_V2_CONTROL_TYPE:
             await self.bridge.async_send_action(self.control.uuid_action, "volUp")
+            return
+        if self.control.type == CENTRAL_AUDIO_ZONE_CONTROL_TYPE:
+            await self.bridge.async_send_action(self.control.uuid_action, "volup")
             return
         await self.bridge.async_send_action(
             self.control.uuid_action, f"volstep/{self._volume_step()}"
         )
 
     async def async_volume_down(self) -> None:
-        if self.control.type == "AudioZoneV2":
+        if self.control.type == AUDIO_ZONE_V2_CONTROL_TYPE:
             await self.bridge.async_send_action(self.control.uuid_action, "volDown")
+            return
+        if self.control.type == CENTRAL_AUDIO_ZONE_CONTROL_TYPE:
+            await self.bridge.async_send_action(self.control.uuid_action, "voldown")
             return
         await self.bridge.async_send_action(
             self.control.uuid_action, f"volstep/{-self._volume_step()}"
@@ -332,7 +355,7 @@ class LoxoneAudioZoneEntity(LoxoneEntity, MediaPlayerEntity):
         self,
         media_type: str | None,
         media_id: str,
-        **kwargs: Any,  # noqa: ARG002
+        **kwargs: Any,
     ) -> None:
         kind = (media_type or "").strip().casefold()
         if kind in {"source", "favorite", "favourite", "playlist", "music"}:
@@ -343,10 +366,31 @@ class LoxoneAudioZoneEntity(LoxoneEntity, MediaPlayerEntity):
                 await self._async_send_source_slot(slot)
             return
 
-        if kind in {"tts", "announce", "announcement"} and self.control.type == "AudioZoneV2":
+        if kind in {"tts", "announce", "announcement"} and self.control.type in {
+            AUDIO_ZONE_V2_CONTROL_TYPE,
+            CENTRAL_AUDIO_ZONE_CONTROL_TYPE,
+        }:
             text = _coerce_text(media_id)
             if text:
-                await self.bridge.async_send_action(self.control.uuid_action, f"tts/{text}")
+                volume = _coerce_tts_volume(kwargs)
+                encoded_text = _encode_tts_text(text)
+                command = (
+                    f"tts/{encoded_text}"
+                    if volume is None
+                    else f"tts/{encoded_text}/{volume}"
+                )
+                await self.bridge.async_send_action(self.control.uuid_action, command)
+            return
+
+        if kind in {"command", "raw", "event", "loxone"}:
+            command = _coerce_text(media_id)
+            if command:
+                await self.bridge.async_send_action(self.control.uuid_action, command)
+            return
+
+        if kind in {"alarm", "firealarm", "fire_alarm", "bell", "buzzer"}:
+            command = kind.replace("_", "")
+            await self.bridge.async_send_action(self.control.uuid_action, command)
             return
 
         if kind in {"play", "resume"}:
@@ -383,6 +427,15 @@ class LoxoneAudioZoneEntity(LoxoneEntity, MediaPlayerEntity):
             self.control.uuid_action, f"repeat/{repeat_mode}"
         )
 
+    def _handle_bridge_update(self) -> None:
+        if self.media_position is None:
+            self._media_position_updated_at = None
+        elif self.state in {MediaPlayerState.PLAYING, MediaPlayerState.PAUSED}:
+            self._media_position_updated_at = datetime.now(timezone.utc)
+        else:
+            self._media_position_updated_at = None
+        super()._handle_bridge_update()
+
     def _volume_step(self) -> int:
         raw_value = None
         if self._volume_step_state_name:
@@ -406,7 +459,11 @@ class LoxoneAudioZoneEntity(LoxoneEntity, MediaPlayerEntity):
         return _extract_source_slots(parsed)
 
     async def _async_send_source_slot(self, slot: int) -> None:
-        command_name = "playZoneFav" if self.control.type == "AudioZoneV2" else "source"
+        command_name = (
+            "playZoneFav"
+            if self.control.type in {AUDIO_ZONE_V2_CONTROL_TYPE, CENTRAL_AUDIO_ZONE_CONTROL_TYPE}
+            else "source"
+        )
         await self.bridge.async_send_action(
             self.control.uuid_action,
             f"{command_name}/{slot}",
@@ -432,6 +489,23 @@ def _positive_float(value: Any) -> float | None:
     if numeric is None or numeric < 0:
         return None
     return numeric
+
+
+def _coerce_tts_volume(kwargs: Mapping[str, Any]) -> int | None:
+    raw_value = kwargs.get("volume")
+    if raw_value is None:
+        extra = kwargs.get("extra")
+        if isinstance(extra, Mapping):
+            raw_value = extra.get("volume")
+    volume = _coerce_int(raw_value)
+    if volume is None:
+        return None
+    return max(0, min(100, volume))
+
+
+def _encode_tts_text(value: str) -> str:
+    # Keep `/` literal inside a single TTS segment to avoid path splits.
+    return value.replace("/", "%2F")
 
 
 def _deserialize_source_list(value: Any) -> Any | None:

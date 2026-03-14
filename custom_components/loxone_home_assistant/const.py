@@ -51,18 +51,23 @@ CONF_SERVER_MODEL = "server_model"
 CONF_USE_TLS = "use_tls"
 CONF_ENABLE_LIGHT_MOOD_SELECT = "enable_light_mood_select"
 CONF_EXPOSE_CONTROLLER_CHILD_LIGHTS = "expose_controller_child_lights"
+CONF_AUTO_CREATE_AUTOMATIONS = "auto_create_automations"
 
 DEFAULT_ENABLE_LIGHT_MOOD_SELECT = False
 DEFAULT_EXPOSE_CONTROLLER_CHILD_LIGHTS = False
+DEFAULT_AUTO_CREATE_AUTOMATIONS = False
 
 DATA_BRIDGES = "bridges"
 
 SERVICE_SEND_COMMAND = "send_command"
 SERVICE_SEND_RAW_COMMAND = "send_raw_command"
+SERVICE_SEND_TTS = "send_tts"
 
 SERVICE_ATTR_ENTRY_ID = "entry_id"
 SERVICE_ATTR_UUID_ACTION = "uuid_action"
 SERVICE_ATTR_COMMAND = "command"
+SERVICE_ATTR_MESSAGE = "message"
+SERVICE_ATTR_VOLUME = "volume"
 
 LIGHT_CONTROL_TYPES = {
     "ColorPicker",
@@ -83,8 +88,6 @@ SENSOR_CONTROL_TYPES = {
     "Heatmixer",
     "Hourcounter",
     "InfoOnlyAnalog",
-    "Intercom",
-    "IntercomV2",
     "Meter",
     "TextState",
     "Tracker",
@@ -94,9 +97,17 @@ BINARY_SENSOR_CONTROL_TYPES = {"Alarm", "InfoOnlyDigital", "PresenceDetector", "
 POWER_SUPPLY_CONTROL_TYPES = {"PowerSupply", "PowerSupplyV2"}
 NUMBER_CONTROL_TYPES = {"Slider", "UpDownLeftRight", "ValueSelector"}
 TEXT_CONTROL_TYPES = {"TextInput"}
-MEDIA_PLAYER_CONTROL_TYPES = {"AudioZone", "AudioZoneV2"}
+MEDIA_PLAYER_CONTROL_TYPES = {"AudioZone", "AudioZoneV2", "CentralAudioZone"}
 RADIO_SELECT_CONTROL_TYPES = {"Radio"}
-INTERCOM_CAMERA_CONTROL_TYPES = {"Intercom", "IntercomV2"}
+INTERCOM_CONTROL_TYPES = {
+    "Intercom",
+    "IntercomV2",
+    "DoorController",
+    "DoorControllerV2",
+    "DoorStation",
+    "DoorStationV2",
+}
+INTERCOM_CAMERA_CONTROL_TYPES = INTERCOM_CONTROL_TYPES
 
 DOORBELL_STATE_CANDIDATES = (
     "bell",
@@ -105,6 +116,53 @@ DOORBELL_STATE_CANDIDATES = (
     "ringing",
     "isRinging",
     "call",
+)
+INTERCOM_PROXIMITY_STATE_CANDIDATES = (
+    "proximity",
+    "distance",
+    "isNear",
+    "near",
+    "approach",
+    "approaching",
+    "personDetected",
+    "person",
+    "motion",
+    "presence",
+)
+INTERCOM_CALL_STATE_CANDIDATES = (
+    "call",
+    "callActive",
+    "isInCall",
+    "incomingCall",
+    "activeCall",
+    "talking",
+    "isTalking",
+    "conversation",
+    "voiceSession",
+)
+INTERCOM_LIGHT_STATE_CANDIDATES = (
+    "light",
+    "lightOn",
+    "illumination",
+    "backlight",
+    "led",
+    "ledOn",
+    "flash",
+    "floodlight",
+)
+INTERCOM_HISTORY_STATE_CANDIDATES = (
+    "lastBellEvents",
+    "lastBellTimestamp",
+    "lastEventTimestamp",
+)
+INTERCOM_SYSTEM_SCHEMA_NAME_HINTS = (
+    "system schema",
+    "systemschemat",
+    "schemat systemu",
+    "schema",
+    "schemat",
+    "topology",
+    "topologia",
 )
 
 ACCESS_TYPE_HINTS = (
@@ -183,7 +241,10 @@ HANDLED_CONTROL_TYPES = (
     | TEXT_CONTROL_TYPES
     | MEDIA_PLAYER_CONTROL_TYPES
     | RADIO_SELECT_CONTROL_TYPES
+    | INTERCOM_CONTROL_TYPES
 )
+
+EVENT_INTERCOM = f"{DOMAIN}_intercom_event"
 
 BOOLEAN_STATE_NAMES = {
     "active",

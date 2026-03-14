@@ -15,15 +15,15 @@ from .const import (
     CLIMATE_CURRENT_TEMPERATURE_STATE_CANDIDATES,
     CLIMATE_HUMIDITY_STATE_CANDIDATES,
     CLIMATE_TARGET_TEMPERATURE_STATE_CANDIDATES,
-    DOMAIN,
 )
 from .entity import LoxoneEntity, coerce_float, first_matching_state_name, infer_unit
+from .runtime import entry_bridge
 
 
 async def async_setup_entry(
     hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
 ) -> None:
-    bridge = hass.data[DOMAIN]["bridges"][entry.entry_id]
+    bridge = entry_bridge(hass, entry)
     entities = [
         LoxoneClimateEntity(bridge, control)
         for control in bridge.controls

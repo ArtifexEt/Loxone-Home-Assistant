@@ -15,14 +15,20 @@ from .const import (
 )
 from .entity import LoxoneEntity, coerce_bool
 from .light import should_expose_as_light
+from .options import option_enabled
+from .runtime import entry_bridge
 
 
 async def async_setup_entry(
     hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
 ) -> None:
-    bridge = hass.data[DOMAIN]["bridges"][entry.entry_id]
-    expose_controller_children = _option_enabled(
-        entry.options.get(CONF_EXPOSE_CONTROLLER_CHILD_LIGHTS),
+    bridge = entry_bridge(hass, entry)
+    entry_data = getattr(entry, "data", {}) or {}
+    expose_controller_children = option_enabled(
+        entry.options.get(
+            CONF_EXPOSE_CONTROLLER_CHILD_LIGHTS,
+            entry_data.get(CONF_EXPOSE_CONTROLLER_CHILD_LIGHTS),
+        ),
         DEFAULT_EXPOSE_CONTROLLER_CHILD_LIGHTS,
     )
     entities = [
@@ -69,16 +75,3 @@ class LoxoneSwitchEntity(LoxoneEntity, SwitchEntity):
             return
         await self.bridge.async_send_action(self.control.uuid_action, "off")
 
-
-def _option_enabled(value, default: bool) -> bool:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, (int, float)):
-        return bool(value)
-    if isinstance(value, str):
-        lowered = value.strip().lower()
-        if lowered in {"1", "true", "on", "yes"}:
-            return True
-        if lowered in {"0", "false", "off", "no"}:
-            return False
-    return default

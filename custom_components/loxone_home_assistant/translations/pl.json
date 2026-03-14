@@ -2,7 +2,17 @@
   "config": {
     "step": {
       "user": {
-        "title": "Połącz z Loxone",
+        "title": "Wybierz tryb instalacji",
+        "description": "Wybierz automatyczne wyszukiwanie w sieci lokalnej lub konfigurację manualną hosta. Na tym etapie możesz też ustawić checkboxy encji oświetlenia i automatyzacji.",
+        "data": {
+          "use_manual_setup": "Manualna konfiguracja hosta (bez automatycznego wyszukiwania)",
+          "enable_light_mood_select": "Wystaw selektor nastroju LightController",
+          "expose_controller_child_lights": "Wystaw indywidualne światła w LightController",
+          "auto_create_automations": "Automatycznie dodawaj sugerowane automatyzacje"
+        }
+      },
+      "auto": {
+        "title": "Automatyczne wyszukiwanie Loxone",
         "description": "Podaj login i hasło Loxone. Integracja przeskanuje lokalną sieć i spróbuje znaleźć serwer Loxone (Miniserver, Miniserver Go, Miniserver Compact).",
         "data": {
           "username": "Login",
@@ -52,7 +62,8 @@
           "verify_ssl": "Weryfikuj certyfikat TLS",
           "scan_timeout": "Limit czasu wyszukiwania (sekundy)",
           "enable_light_mood_select": "Wystaw selektor nastroju LightController",
-          "expose_controller_child_lights": "Wystaw indywidualne światła w LightController"
+          "expose_controller_child_lights": "Wystaw indywidualne światła w LightController",
+          "auto_create_automations": "Automatycznie dodawaj sugerowane automatyzacje"
         }
       }
     }

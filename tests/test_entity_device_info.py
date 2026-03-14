@@ -186,5 +186,42 @@ class EntityDeviceInfoTests(unittest.TestCase):
         self.assertNotEqual(entity_a._attr_unique_id, entity_b._attr_unique_id)
 
 
+class InferUnitTests(unittest.TestCase):
+    """Verify unit inference from format strings and state names."""
+
+    @staticmethod
+    def _control(*, details: dict | None = None) -> LoxoneControl:
+        return LoxoneControl(
+            uuid="sensor-uuid",
+            uuid_action="sensor-action",
+            name="Sensor",
+            type="InfoOnlyAnalog",
+            states={"value": "state-value"},
+            details=details or {},
+        )
+
+    def test_infer_unit_handles_compact_percent_format(self) -> None:
+        control = self._control(details={"format": "%.1f%%"})
+
+        self.assertEqual(entity.infer_unit(control, "value"), "%")
+
+    def test_infer_unit_handles_spaced_percent_format(self) -> None:
+        control = self._control(details={"format": "%.1f %%"})
+
+        self.assertEqual(entity.infer_unit(control, "value"), "%")
+
+    def test_infer_unit_uses_case_insensitive_state_fallback(self) -> None:
+        control = LoxoneControl(
+            uuid="sensor-uuid",
+            uuid_action="sensor-action",
+            name="Sensor",
+            type="InfoOnlyAnalog",
+            states={"BatteryLevel": "state-battery"},
+            details={},
+        )
+
+        self.assertEqual(entity.infer_unit(control, "BatteryLevel"), "%")
+
+
 if __name__ == "__main__":
     unittest.main()

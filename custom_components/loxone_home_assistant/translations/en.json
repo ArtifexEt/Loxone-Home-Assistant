@@ -2,8 +2,18 @@
   "config": {
     "step": {
       "user": {
-        "title": "Connect to Loxone",
-        "description": "Enter your Loxone username and password. The integration will then scan the local network for a Loxone server (Miniserver, Miniserver Go, Miniserver Compact).",
+        "title": "Choose installation mode",
+        "description": "Choose automatic network discovery or manual host setup. You can also configure light and automation checkboxes during first installation.",
+        "data": {
+          "use_manual_setup": "Manual host setup (disable automatic discovery)",
+          "enable_light_mood_select": "Expose LightController mood selector",
+          "expose_controller_child_lights": "Expose individual lights inside LightController",
+          "auto_create_automations": "Automatically add suggested automations"
+        }
+      },
+      "auto": {
+        "title": "Automatic Loxone discovery",
+        "description": "Enter your Loxone username and password. The integration will scan the local network for a Loxone server (Miniserver, Miniserver Go, Miniserver Compact).",
         "data": {
           "username": "Username",
           "password": "Password"
@@ -52,7 +62,8 @@
           "verify_ssl": "Verify TLS certificate",
           "scan_timeout": "Discovery timeout (seconds)",
           "enable_light_mood_select": "Expose LightController mood selector",
-          "expose_controller_child_lights": "Expose individual lights inside LightController"
+          "expose_controller_child_lights": "Expose individual lights inside LightController",
+          "auto_create_automations": "Automatically add suggested automations"
         }
       }
     }

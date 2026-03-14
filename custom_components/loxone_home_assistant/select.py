@@ -22,6 +22,8 @@ from .const import (
 from .entity import LoxoneEntity, control_entity_unique_id
 from .light import CONTROLLER_TYPES
 from .models import LoxoneControl
+from .options import option_enabled
+from .runtime import entry_bridge
 
 OFF_MOOD_IDS = {0, 778}
 NON_DIGIT_RE = re.compile(r"[^0-9,.-]+")
@@ -30,9 +32,13 @@ NON_DIGIT_RE = re.compile(r"[^0-9,.-]+")
 async def async_setup_entry(
     hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
 ) -> None:
-    bridge = hass.data[DOMAIN]["bridges"][entry.entry_id]
-    mood_select_enabled = _option_enabled(
-        entry.options.get(CONF_ENABLE_LIGHT_MOOD_SELECT),
+    bridge = entry_bridge(hass, entry)
+    entry_data = getattr(entry, "data", {}) or {}
+    mood_select_enabled = option_enabled(
+        entry.options.get(
+            CONF_ENABLE_LIGHT_MOOD_SELECT,
+            entry_data.get(CONF_ENABLE_LIGHT_MOOD_SELECT),
+        ),
         DEFAULT_ENABLE_LIGHT_MOOD_SELECT,
     )
 
@@ -314,16 +320,3 @@ def _cleanup_stale_select_entities(
             continue
         registry.async_remove(registry_entry.entity_id)
 
-
-def _option_enabled(value: Any, default: bool) -> bool:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, (int, float)):
-        return bool(value)
-    if isinstance(value, str):
-        lowered = value.strip().lower()
-        if lowered in {"1", "true", "on", "yes"}:
-            return True
-        if lowered in {"0", "false", "off", "no"}:
-            return False
-    return default

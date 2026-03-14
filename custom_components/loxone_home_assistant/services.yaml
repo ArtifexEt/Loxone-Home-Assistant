@@ -38,3 +38,35 @@ send_raw_command:
       required: true
       selector:
         text:
+
+send_tts:
+  name: Send TTS
+  description: Send a TTS command to a specific Loxone control UUID (for example Intercom or AudioZone).
+  fields:
+    entry_id:
+      name: Entry ID
+      description: Optional when only one Loxone config entry exists.
+      required: false
+      selector:
+        text:
+    uuid_action:
+      name: UUID Action
+      description: The Loxone `uuidAction` to control.
+      required: true
+      selector:
+        text:
+    message:
+      name: Message
+      description: Text spoken by the target control.
+      required: true
+      selector:
+        text:
+    volume:
+      name: Volume
+      description: Optional TTS volume in percent (0-100).
+      required: false
+      selector:
+        number:
+          min: 0
+          max: 100
+          mode: slider

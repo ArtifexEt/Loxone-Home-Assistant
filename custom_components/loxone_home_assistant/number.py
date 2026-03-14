@@ -7,14 +7,15 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import DOMAIN, NUMBER_CONTROL_TYPES
+from .const import NUMBER_CONTROL_TYPES
 from .entity import LoxoneEntity, coerce_float, first_numeric_state_name
+from .runtime import entry_bridge
 
 
 async def async_setup_entry(
     hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
 ) -> None:
-    bridge = hass.data[DOMAIN]["bridges"][entry.entry_id]
+    bridge = entry_bridge(hass, entry)
     entities = [
         LoxoneNumberEntity(bridge, control)
         for control in bridge.controls

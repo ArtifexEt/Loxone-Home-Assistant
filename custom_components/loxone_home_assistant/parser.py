@@ -49,7 +49,7 @@ def parse_structure(payload: Mapping[str, Any]) -> LoxoneStructure:
             room_name=rooms.get(room_uuid),
             category_uuid=category_uuid,
             category_name=categories.get(category_uuid),
-            states=_coerce_state_map(raw.get("states", {})),
+            states=_coerce_control_state_map(raw),
             details=_coerce_details(raw),
             parent_uuid_action=parent.uuid_action if parent else None,
             path=path,
@@ -96,6 +96,23 @@ def _coerce_state_map(raw_states: Mapping[str, Any]) -> dict[str, str]:
     for state_name, state_uuid in raw_states.items():
         if isinstance(state_uuid, str):
             states[state_name] = _normalize_uuid(state_uuid)
+    return states
+
+
+def _coerce_control_state_map(raw_control: Mapping[str, Any]) -> dict[str, str]:
+    states: dict[str, str] = {}
+
+    raw_states = raw_control.get("states")
+    if isinstance(raw_states, Mapping):
+        states.update(_coerce_state_map(raw_states))
+
+    # Some controls (for example CentralAudioZone variants) publish live UUIDs in
+    # `events` instead of `states`. Keep those UUIDs subscribed as regular states.
+    raw_events = raw_control.get("events")
+    if isinstance(raw_events, Mapping):
+        for event_name, event_uuid in _coerce_state_map(raw_events).items():
+            states.setdefault(event_name, event_uuid)
+
     return states
 
 

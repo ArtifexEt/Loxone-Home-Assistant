@@ -172,6 +172,38 @@ class ParseStructureTests(unittest.TestCase):
             "/dev/secured-stream.mjpg",
         )
 
+    def test_parse_structure_merges_event_uuids_into_runtime_state_map(self) -> None:
+        payload = {
+            "msInfo": {
+                "msName": "Dom",
+                "serialNr": "1234567890",
+            },
+            "controls": {
+                "central-audio": {
+                    "name": "Audio Central",
+                    "type": "CentralAudioZone",
+                    "uuidAction": "action-central-audio",
+                    "states": {
+                        "playState": "state-play",
+                        "power": "state-power",
+                    },
+                    "events": {
+                        "sourceList": "event-source-list",
+                        "playState": "event-should-not-override-state",
+                    },
+                }
+            },
+        }
+
+        structure = parse_structure(payload)
+        control = structure.controls_by_action["action-central-audio"]
+
+        self.assertEqual(control.states["playState"], "state-play")
+        self.assertEqual(control.states["power"], "state-power")
+        self.assertEqual(control.states["sourceList"], "event-source-list")
+        self.assertIn("event-source-list", structure.states)
+        self.assertEqual(structure.states["event-source-list"].state_name, "sourceList")
+
 
 if __name__ == "__main__":
     unittest.main()

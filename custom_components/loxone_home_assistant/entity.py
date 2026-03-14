@@ -15,9 +15,16 @@ from .models import LoxoneControl
 from .server_model import DEFAULT_SERVER_MODEL
 
 FORMAT_UNIT_RE = re.compile(r"([%°A-Za-z/]+)\s*$")
+PRINTF_SPEC_RE = re.compile(
+    r"%(?:[-+0 #]*)?(?:\d+|\*)?(?:\.(?:\d+|\*))?(?:hh|h|ll|l|L|z|j|t)?[diuoxXfFeEgGaAcspn]"
+)
 HSV_RE = re.compile(r"hsv\(([-0-9.]+),([-0-9.]+),([-0-9.]+)\)", re.IGNORECASE)
 TEMP_RE = re.compile(r"(?:temp|lumitech)\(([-0-9.]+),([-0-9.]+)\)", re.IGNORECASE)
 NON_ALNUM_STATE_RE = re.compile(r"[^a-z0-9]+")
+NORMALIZED_STATE_NAME_UNITS = {
+    NON_ALNUM_STATE_RE.sub("", state_name.casefold()): unit
+    for state_name, unit in STATE_NAME_UNITS.items()
+}
 
 
 def miniserver_device_identifier(serial: str) -> tuple[str, str]:
@@ -70,6 +77,7 @@ class LoxoneEntity(Entity):
     """Base entity for one Loxone control."""
 
     _attr_has_entity_name = True
+    _attr_should_poll = False
 
     def __init__(self, bridge, control: LoxoneControl, suffix: str | None = None) -> None:
         self.bridge = bridge
@@ -261,12 +269,17 @@ def infer_unit(control: LoxoneControl, state_name: str | None = None) -> str | N
                 return "°F"
             if "°C" in value:
                 return "°C"
-            match = FORMAT_UNIT_RE.search(value.strip())
+            cleaned = PRINTF_SPEC_RE.sub("", value).replace("%%", "%").strip()
+            if not cleaned:
+                continue
+            match = FORMAT_UNIT_RE.search(cleaned)
             if match:
                 return match.group(1)
 
-    if state_name and state_name in STATE_NAME_UNITS:
-        return STATE_NAME_UNITS[state_name]
+    if state_name:
+        normalized_state_name = normalize_state_name(state_name)
+        if normalized_state_name in NORMALIZED_STATE_NAME_UNITS:
+            return NORMALIZED_STATE_NAME_UNITS[normalized_state_name]
     return None
 
 

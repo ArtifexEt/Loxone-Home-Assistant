@@ -35,7 +35,10 @@ from .entity import (
     parse_color_state,
     percent_from_brightness,
 )
+from .intercom import intercom_light_state_name, is_intercom_control
 from .models import LoxoneControl
+from .options import option_enabled
+from .runtime import entry_bridge
 
 CONTROLLER_TYPES = {"LightController", "LightControllerV2"}
 ON_OFF_LIGHT_TYPES = {"Switch", "TimedSwitch"}
@@ -48,9 +51,13 @@ NON_DIGIT_RE = re.compile(r"[^0-9,.-]+")
 async def async_setup_entry(
     hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
 ) -> None:
-    bridge = hass.data[DOMAIN]["bridges"][entry.entry_id]
-    expose_controller_children = _option_enabled(
-        entry.options.get(CONF_EXPOSE_CONTROLLER_CHILD_LIGHTS),
+    bridge = entry_bridge(hass, entry)
+    entry_data = getattr(entry, "data", {}) or {}
+    expose_controller_children = option_enabled(
+        entry.options.get(
+            CONF_EXPOSE_CONTROLLER_CHILD_LIGHTS,
+            entry_data.get(CONF_EXPOSE_CONTROLLER_CHILD_LIGHTS),
+        ),
         DEFAULT_EXPOSE_CONTROLLER_CHILD_LIGHTS,
     )
     controls = [
@@ -58,20 +65,48 @@ async def async_setup_entry(
         for control in bridge.controls
         if should_expose_as_light(bridge, control, expose_controller_children)
     ]
-    entities = [LoxoneLightEntity(bridge, control) for control in controls]
+    intercom_light_controls: list[tuple[LoxoneControl, str]] = []
+    exported_control_ids = {control.uuid_action for control in controls}
+    for control in bridge.controls:
+        if control.uuid_action in exported_control_ids:
+            continue
+        if not is_intercom_control(control):
+            continue
+        state_name = intercom_light_state_name(control)
+        if state_name is None:
+            continue
+        intercom_light_controls.append((control, state_name))
+
+    entities: list[LightEntity] = [LoxoneLightEntity(bridge, control) for control in controls]
+    entities.extend(
+        LoxoneIntercomLightEntity(bridge, control, state_name)
+        for control, state_name in intercom_light_controls
+    )
+    valid_light_unique_ids = {
+        control_entity_unique_id(bridge.serial, control.uuid_action)
+        for control in controls
+    }
+    valid_light_unique_ids.update(
+        control_entity_unique_id(
+            bridge.serial,
+            control.uuid_action,
+            LoxoneIntercomLightEntity.UNIQUE_SUFFIX,
+        )
+        for control, _ in intercom_light_controls
+    )
     _cleanup_stale_light_entities(
         hass,
         entry,
-        {
-            control_entity_unique_id(bridge.serial, control.uuid_action)
-            for control in controls
-        },
+        valid_light_unique_ids,
     )
     _cleanup_stale_light_devices(
         hass,
         entry,
         bridge,
-        {control.uuid_action for control in controls},
+        {
+            *{control.uuid_action for control in controls},
+            *{control.uuid_action for control, _ in intercom_light_controls},
+        },
     )
     async_add_entities(entities)
 
@@ -300,6 +335,74 @@ class LoxoneLightEntity(LoxoneEntity, LightEntity):
             return None
         return self.bridge.control_for_uuid_action(master_uuid)
 
+
+class LoxoneIntercomLightEntity(LoxoneEntity, LightEntity):
+    """Optional light entity for Intercom controls exposing a light state."""
+
+    UNIQUE_SUFFIX = "intercom_light"
+
+    def __init__(
+        self,
+        bridge,
+        control: LoxoneControl,
+        state_name: str,
+    ) -> None:
+        super().__init__(bridge, control, "Light")
+        self._state_name = state_name
+        self._attr_unique_id = control_entity_unique_id(
+            bridge.serial,
+            control.uuid_action,
+            self.UNIQUE_SUFFIX,
+        )
+        self._on_command, self._off_command = _intercom_light_commands(state_name)
+
+    def relevant_state_uuids(self):
+        state_uuid = self.control.state_uuid(self._state_name)
+        return [state_uuid] if state_uuid else []
+
+    @property
+    def is_on(self) -> bool | None:
+        bool_state = coerce_bool(self.state_value(self._state_name))
+        if bool_state is not None:
+            return bool_state
+        value = coerce_float(self.state_value(self._state_name))
+        return bool(value) if value is not None else None
+
+    @property
+    def color_mode(self) -> ColorMode:
+        return ColorMode.ONOFF
+
+    @property
+    def supported_color_modes(self) -> set[ColorMode]:
+        return {ColorMode.ONOFF}
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        attrs = super().extra_state_attributes
+        attrs["intercom_light_state"] = self._state_name
+        attrs["intercom_light_command_on"] = self._on_command
+        attrs["intercom_light_command_off"] = self._off_command
+        return attrs
+
+    async def async_turn_on(self, **kwargs) -> None:
+        del kwargs
+        await self.bridge.async_send_action(self.control.uuid_action, self._on_command)
+
+    async def async_turn_off(self, **kwargs) -> None:
+        del kwargs
+        await self.bridge.async_send_action(self.control.uuid_action, self._off_command)
+
+
+def _intercom_light_commands(state_name: str) -> tuple[str, str]:
+    normalized = state_name.casefold()
+    if "led" in normalized:
+        return "ledOn", "ledOff"
+    if "flash" in normalized or "flood" in normalized:
+        return "flashOn", "flashOff"
+    if "illum" in normalized or "light" in normalized:
+        return "lightOn", "lightOff"
+    return "on", "off"
+
 def _is_child_light_control(bridge, control: LoxoneControl) -> bool:
     for candidate_parent in bridge.controls:
         if _is_child_of_controller(control, candidate_parent):
@@ -483,16 +586,3 @@ def _cleanup_stale_light_devices(
             continue
         device_registry.async_remove_device(device_entry.id)
 
-
-def _option_enabled(value: Any, default: bool) -> bool:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, (int, float)):
-        return bool(value)
-    if isinstance(value, str):
-        lowered = value.strip().lower()
-        if lowered in {"1", "true", "on", "yes"}:
-            return True
-        if lowered in {"0", "false", "off", "no"}:
-            return False
-    return default

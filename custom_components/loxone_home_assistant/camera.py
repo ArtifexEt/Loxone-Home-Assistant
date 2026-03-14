@@ -31,9 +31,11 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import DOORBELL_STATE_CANDIDATES, DOMAIN, INTERCOM_CAMERA_CONTROL_TYPES
+from .const import INTERCOM_CAMERA_CONTROL_TYPES
 from .entity import LoxoneEntity, first_matching_state_name, normalize_state_name
+from .intercom import intercom_history_state_name, is_intercom_control
 from .models import LoxoneControl
+from .runtime import entry_bridge
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -67,18 +69,9 @@ LAST_BELL_EVENTS_DETAIL_PATHS = ("lastBellEvents",)
 INTERCOM_CAMERA_CONTROL_TYPES_NORMALIZED = {
     normalize_state_name(value) for value in INTERCOM_CAMERA_CONTROL_TYPES
 }
-INTERCOM_TYPE_HINTS_NORMALIZED = {
-    normalize_state_name(value)
-    for value in ("intercom", "doorcontroller", "door station", "doorstation")
-}
 STREAM_OR_SNAPSHOT_STATE_CANDIDATES = (
     *STREAM_STATE_CANDIDATES,
     *SNAPSHOT_STATE_CANDIDATES,
-)
-INTERCOM_SIGNAL_STATE_CANDIDATES = (
-    *DOORBELL_STATE_CANDIDATES,
-    "lastBellEvents",
-    "lastBellTimestamp",
 )
 SECURED_STREAM_DETAIL_PATHS = (
     "videoInfo.streamUrl",
@@ -97,7 +90,7 @@ SECURED_SNAPSHOT_DETAIL_PATHS = (
 async def async_setup_entry(
     hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
 ) -> None:
-    bridge = hass.data[DOMAIN]["bridges"][entry.entry_id]
+    bridge = entry_bridge(hass, entry)
     entities = [
         LoxoneIntercomCameraEntity(bridge, control)
         for control in bridge.controls
@@ -116,9 +109,7 @@ class LoxoneIntercomCameraEntity(LoxoneEntity, Camera):
         super().__init__(bridge, control, "Video")
         self._stream_state_name = first_matching_state_name(control, STREAM_STATE_CANDIDATES)
         self._snapshot_state_name = first_matching_state_name(control, SNAPSHOT_STATE_CANDIDATES)
-        self._last_bell_events_state_name = first_matching_state_name(
-            control, ("lastBellEvents",)
-        )
+        self._last_bell_events_state_name = intercom_history_state_name(control)
         self._secured_details: dict[str, Any] | None = None
         self._secured_details_loaded = False
         self._secured_details_lock = asyncio.Lock()
@@ -139,6 +130,7 @@ class LoxoneIntercomCameraEntity(LoxoneEntity, Camera):
         bell_events = self._last_bell_events_url()
         if bell_events is not None:
             attrs["last_bell_events_url"] = bell_events
+            attrs["history_events_url"] = bell_events
         return attrs
 
     async def async_camera_image(
@@ -257,30 +249,30 @@ def _is_intercom_camera_control(control: LoxoneControl) -> bool:
     normalized_type = normalize_state_name(control.type)
     if normalized_type in INTERCOM_CAMERA_CONTROL_TYPES_NORMALIZED:
         return True
-    if any(hint in normalized_type for hint in INTERCOM_TYPE_HINTS_NORMALIZED):
-        return True
 
     normalized_states = {
         normalize_state_name(state_name) for state_name in control.states
     }
-    for candidate in STREAM_OR_SNAPSHOT_STATE_CANDIDATES:
-        if normalize_state_name(candidate) in normalized_states:
-            return True
-
-    intercom_signal_state_found = any(
-        normalize_state_name(candidate) in normalized_states
-        for candidate in INTERCOM_SIGNAL_STATE_CANDIDATES
-    )
-    if intercom_signal_state_found and (
-        "door" in normalized_type or "intercom" in normalized_type or "station" in normalized_type
-    ):
-        return True
-
     detail_paths = (
         *STREAM_DETAIL_PATHS,
         *SNAPSHOT_DETAIL_PATHS,
         *LAST_BELL_EVENTS_DETAIL_PATHS,
     )
+    if is_intercom_control(control):
+        has_video_state = any(
+            normalize_state_name(candidate) in normalized_states
+            for candidate in STREAM_OR_SNAPSHOT_STATE_CANDIDATES
+        )
+        has_video_details = any(
+            _nested_detail_value(control.details, path) is not None for path in detail_paths
+        )
+        if has_video_state or has_video_details:
+            return True
+
+    for candidate in STREAM_OR_SNAPSHOT_STATE_CANDIDATES:
+        if normalize_state_name(candidate) in normalized_states:
+            return True
+
     return any(_nested_detail_value(control.details, path) is not None for path in detail_paths)
 
 

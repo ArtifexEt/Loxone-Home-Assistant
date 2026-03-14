@@ -9,14 +9,15 @@ from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .bridge import LoxoneConnectionError
-from .const import BUTTON_CONTROL_TYPES, DOMAIN
+from .const import BUTTON_CONTROL_TYPES
 from .entity import LoxoneEntity, miniserver_device_info
+from .runtime import entry_bridge
 
 
 async def async_setup_entry(
     hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
 ) -> None:
-    bridge = hass.data[DOMAIN]["bridges"][entry.entry_id]
+    bridge = entry_bridge(hass, entry)
     entities = [
         LoxoneButtonEntity(bridge, control)
         for control in bridge.controls

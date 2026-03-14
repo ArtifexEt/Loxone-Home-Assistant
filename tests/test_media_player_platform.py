@@ -197,8 +197,25 @@ class MediaPlayerPlatformTests(unittest.IsolatedAsyncioTestCase):
             },
         )
 
+    def _central_audio_zone(self) -> LoxoneControl:
+        return LoxoneControl(
+            uuid="central-audio-uuid",
+            uuid_action="central-audio-action",
+            name="Central Audio",
+            type="CentralAudioZone",
+            states={
+                "playState": "state-central-play",
+                "power": "state-central-power",
+                "volume": "state-central-volume",
+                "mute": "state-central-mute",
+                "source": "state-central-source",
+                "sourceList": "state-central-source-list",
+            },
+        )
+
     async def test_setup_adds_audio_zone_controls_only(self) -> None:
         audio = self._audio_zone_v2()
+        central = self._central_audio_zone()
         switch = LoxoneControl(
             uuid="switch-uuid",
             uuid_action="switch-action",
@@ -206,7 +223,7 @@ class MediaPlayerPlatformTests(unittest.IsolatedAsyncioTestCase):
             type="Switch",
             states={"active": "state-switch"},
         )
-        bridge = _FakeBridge([audio, switch], {})
+        bridge = _FakeBridge([audio, central, switch], {})
         entry = _FakeConfigEntry("entry-1")
         hass = _FakeHass(entry.entry_id, bridge, const.DOMAIN)
         entities: list = []
@@ -217,8 +234,9 @@ class MediaPlayerPlatformTests(unittest.IsolatedAsyncioTestCase):
             lambda new_entities: entities.extend(new_entities),
         )
 
-        self.assertEqual(len(entities), 1)
+        self.assertEqual(len(entities), 2)
         self.assertEqual(entities[0].control.uuid_action, "audio-action")
+        self.assertEqual(entities[1].control.uuid_action, "central-audio-action")
 
     def test_state_volume_and_metadata_are_exposed(self) -> None:
         control = self._audio_zone_v2()
@@ -261,6 +279,19 @@ class MediaPlayerPlatformTests(unittest.IsolatedAsyncioTestCase):
         entity = LoxoneAudioZoneEntity(bridge, control)
 
         self.assertEqual(entity.state, media_player_module.MediaPlayerState.OFF)
+
+    def test_audio_zone_v2_idle_playstate_stays_idle_even_when_power_reports_off(self) -> None:
+        control = self._audio_zone_v2()
+        bridge = _FakeBridge(
+            [control],
+            {
+                "state-play": 0,
+                "state-power": 0,
+            },
+        )
+        entity = LoxoneAudioZoneEntity(bridge, control)
+
+        self.assertEqual(entity.state, media_player_module.MediaPlayerState.IDLE)
 
     def test_repeat_mode_value_2_is_treated_as_all_for_compatibility(self) -> None:
         control = self._audio_zone_v2()
@@ -394,6 +425,73 @@ class MediaPlayerPlatformTests(unittest.IsolatedAsyncioTestCase):
             [
                 ("audio-action", "playZoneFav/2"),
                 ("audio-action", "tts/Dzień dobry"),
+            ],
+        )
+
+    async def test_audio_zone_v2_tts_escapes_forward_slash(self) -> None:
+        control = self._audio_zone_v2()
+        bridge = _FakeBridge([control], {})
+        entity = LoxoneAudioZoneEntity(bridge, control)
+
+        await entity.async_play_media("tts", "Hall/Entry")
+
+        self.assertEqual(bridge.commands, [("audio-action", "tts/Hall%2FEntry")])
+
+    def test_media_position_updated_at_changes_only_on_updates(self) -> None:
+        control = self._audio_zone_v2()
+        bridge = _FakeBridge(
+            [control],
+            {
+                "state-play": 2,
+                "state-progress": 21,
+            },
+        )
+        entity = LoxoneAudioZoneEntity(bridge, control)
+        entity.async_write_ha_state = lambda: None  # type: ignore[attr-defined]
+
+        self.assertIsNone(entity.media_position_updated_at)
+        entity._handle_bridge_update()
+        first_timestamp = entity.media_position_updated_at
+        self.assertIsNotNone(first_timestamp)
+        self.assertEqual(entity.media_position_updated_at, first_timestamp)
+
+    async def test_central_audio_zone_supports_commands_events_and_tts_volume(self) -> None:
+        control = self._central_audio_zone()
+        bridge = _FakeBridge(
+            [control],
+            {
+                "state-central-source": 2,
+                "state-central-source-list": (
+                    "{'items':[{'slot':1,'name':'Radio'},{'slot':2,'name':'Jazz'}]}"
+                ),
+            },
+        )
+        entity = LoxoneAudioZoneEntity(bridge, control)
+
+        await entity.async_media_play()
+        await entity.async_media_pause()
+        await entity.async_set_volume_level(0.25)
+        await entity.async_volume_up()
+        await entity.async_volume_down()
+        await entity.async_mute_volume(True)
+        await entity.async_select_source("Jazz")
+        await entity.async_play_media("tts", "Alarm test", extra={"volume": 35})
+        await entity.async_play_media("bell", "")
+        await entity.async_play_media("command", "selectedcontrols/1,2/alarm")
+
+        self.assertEqual(
+            bridge.commands,
+            [
+                ("central-audio-action", "play"),
+                ("central-audio-action", "pause"),
+                ("central-audio-action", "volume/25"),
+                ("central-audio-action", "volup"),
+                ("central-audio-action", "voldown"),
+                ("central-audio-action", "mute/1"),
+                ("central-audio-action", "playZoneFav/2"),
+                ("central-audio-action", "tts/Alarm test/35"),
+                ("central-audio-action", "bell"),
+                ("central-audio-action", "selectedcontrols/1,2/alarm"),
             ],
         )
 

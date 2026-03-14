@@ -210,6 +210,46 @@ class DoorbellBinarySensorTests(unittest.IsolatedAsyncioTestCase):
             )
         )
 
+    async def test_setup_adds_intercom_proximity_and_call_binary_entities(self) -> None:
+        intercom = LoxoneControl(
+            uuid="intercom-uuid",
+            uuid_action="intercom-action",
+            name="Furtka",
+            type="IntercomV2",
+            states={
+                "bell": "state-bell",
+                "proximity": "state-proximity",
+                "callActive": "state-call",
+            },
+        )
+        bridge = _FakeBridge(
+            [intercom],
+            {
+                "state-bell": 0,
+                "state-proximity": 1,
+                "state-call": 1,
+            },
+        )
+        entry = _FakeConfigEntry("entry-1")
+        hass = _FakeHass(entry.entry_id, bridge, const.DOMAIN)
+        entities = []
+
+        await binary_sensor_module.async_setup_entry(
+            hass,
+            entry,
+            lambda new_entities: entities.extend(new_entities),
+        )
+
+        role_by_name = {
+            entity._attr_name: entity  # noqa: SLF001 - test-only inspection
+            for entity in entities
+            if isinstance(entity, binary_sensor_module.LoxoneIntercomStateBinaryEntity)
+        }
+        self.assertIn("Furtka Proximity", role_by_name)
+        self.assertIn("Furtka Call", role_by_name)
+        self.assertTrue(role_by_name["Furtka Proximity"].is_on)
+        self.assertTrue(role_by_name["Furtka Call"].is_on)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -214,6 +214,166 @@ class ClimateExtraSensorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(air_sensor.native_value, 32.0)
         self.assertEqual(mode_sensor.native_value, "comfort")
 
+    async def test_setup_creates_override_entries_sensor_and_skips_lock_state(self) -> None:
+        climate_control = LoxoneControl(
+            uuid="climate-uuid",
+            uuid_action="climate-action",
+            name="Sypialnia",
+            type="IRoomControllerV2",
+            states={
+                "tempActual": "state-temp-actual",
+                "tempTarget": "state-temp-target",
+                "jLocked": "state-j-locked",
+                "overrideEntries": "state-overrides",
+                "operatingMode": "state-mode",
+            },
+        )
+        bridge = _FakeBridge(
+            [climate_control],
+            {
+                "state-temp-actual": 20.5,
+                "state-temp-target": 21.0,
+                "state-j-locked": {"locked": 1, "reason": "Visualization"},
+                "state-overrides": [
+                    {"start": 1710000000, "end": 0, "reason": 3, "source": "APP"},
+                    {"start": 1710000600, "end": 1710004200, "reason": 2, "source": "Window"},
+                ],
+                "state-mode": "comfort",
+            },
+        )
+        entry = _FakeConfigEntry("entry-1")
+        hass = _FakeHass(entry.entry_id, bridge, const.DOMAIN)
+        entities = []
+
+        await sensor_module.async_setup_entry(
+            hass,
+            entry,
+            lambda new_entities: entities.extend(new_entities),
+        )
+
+        override_entities = [
+            entity
+            for entity in entities
+            if isinstance(entity, sensor_module.LoxoneClimateOverrideEntriesSensor)
+        ]
+        self.assertEqual(len(override_entities), 1)
+        override_entity = override_entities[0]
+        self.assertEqual(override_entity.native_value, 2)
+        self.assertTrue(override_entity.extra_state_attributes["override_active"])
+        self.assertEqual(
+            override_entity.extra_state_attributes["override_reason_codes"],
+            [3, 2],
+        )
+        self.assertEqual(
+            override_entity.extra_state_attributes["override_sources"],
+            ["APP", "Window"],
+        )
+
+        by_state = {
+            entity._state_name: entity
+            for entity in entities
+            if hasattr(entity, "_state_name")
+        }
+        self.assertNotIn("jLocked", by_state)
+        self.assertIn("operatingMode", by_state)
+
+    async def test_override_entries_sensor_accepts_json_string_payload(self) -> None:
+        climate_control = LoxoneControl(
+            uuid="climate-uuid",
+            uuid_action="climate-action",
+            name="Gabinet",
+            type="IRoomControllerV2",
+            states={
+                "tempActual": "state-temp-actual",
+                "tempTarget": "state-temp-target",
+                "overrideEntries": "state-overrides",
+                "operatingMode": "state-mode",
+            },
+        )
+        bridge = _FakeBridge(
+            [climate_control],
+            {
+                "state-temp-actual": 20.0,
+                "state-temp-target": 21.0,
+                "state-overrides": (
+                    '{"start":542719409,"end":542723220,"reason":1,"isTimer":false,"source":"null"}'
+                ),
+                "state-mode": "comfort",
+            },
+        )
+        entry = _FakeConfigEntry("entry-1")
+        hass = _FakeHass(entry.entry_id, bridge, const.DOMAIN)
+        entities = []
+
+        await sensor_module.async_setup_entry(
+            hass,
+            entry,
+            lambda new_entities: entities.extend(new_entities),
+        )
+
+        override_entities = [
+            entity
+            for entity in entities
+            if isinstance(entity, sensor_module.LoxoneClimateOverrideEntriesSensor)
+        ]
+        self.assertEqual(len(override_entities), 1)
+        override_entity = override_entities[0]
+        self.assertEqual(override_entity.native_value, 1)
+        self.assertTrue(override_entity.extra_state_attributes["override_active"])
+        self.assertEqual(
+            override_entity.extra_state_attributes["override_reason_codes"],
+            [1],
+        )
+
+    async def test_setup_detects_override_entries_state_with_extended_name(self) -> None:
+        climate_control = LoxoneControl(
+            uuid="climate-uuid",
+            uuid_action="climate-action",
+            name="Pokoj Dziecka",
+            type="IRoomControllerV2",
+            states={
+                "tempActual": "state-temp-actual",
+                "tempTarget": "state-temp-target",
+                "overrideEntriesCurrent": "state-overrides",
+                "operatingMode": "state-mode",
+            },
+        )
+        bridge = _FakeBridge(
+            [climate_control],
+            {
+                "state-temp-actual": 20.5,
+                "state-temp-target": 22.0,
+                "state-overrides": '{"start":1,"end":0,"reason":2}',
+                "state-mode": "comfort",
+            },
+        )
+        entry = _FakeConfigEntry("entry-1")
+        hass = _FakeHass(entry.entry_id, bridge, const.DOMAIN)
+        entities = []
+
+        await sensor_module.async_setup_entry(
+            hass,
+            entry,
+            lambda new_entities: entities.extend(new_entities),
+        )
+
+        override_entities = [
+            entity
+            for entity in entities
+            if isinstance(entity, sensor_module.LoxoneClimateOverrideEntriesSensor)
+        ]
+        self.assertEqual(len(override_entities), 1)
+        self.assertEqual(override_entities[0]._state_name, "overrideEntriesCurrent")
+        self.assertEqual(override_entities[0].native_value, 1)
+
+        climate_state_entities = [
+            entity
+            for entity in entities
+            if isinstance(entity, sensor_module.LoxoneClimateStateSensor)
+        ]
+        climate_state_names = {entity._state_name for entity in climate_state_entities}
+        self.assertNotIn("overrideEntriesCurrent", climate_state_names)
+
 
 if __name__ == "__main__":
     unittest.main()

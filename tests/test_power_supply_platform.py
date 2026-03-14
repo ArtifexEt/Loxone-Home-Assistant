@@ -325,6 +325,82 @@ class PowerSupplyPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(entities), 1)
         self.assertFalse(entities[0].is_on)
 
+    async def test_text_state_history_is_compacted_to_latest_entry(self) -> None:
+        history_value = "|".join(
+            (
+                "2026-03-14 11:15:11 Wykryto obecność\x14Czujnik obecności Tree (Sypialnia)",
+                "2026-03-14 11:22:10 Obecność zakończona\x14Ostatnia obecność: Czujnik obecności Tree (Sypialnia)",
+                "2026-03-14 13:39:18 Overrun extended for current session due to quick presence reactivation\x14Czujnik obecności Tree (Sypialnia)",
+            )
+        )
+        self.assertGreater(len(history_value), sensor_module.MAX_LENGTH_STATE_STATE)
+
+        control = self._build_control(
+            uuid="presence-uuid",
+            uuid_action="presence-action",
+            type="TextState",
+            states={"value": "state-history"},
+        )
+        bridge = _FakeBridge([control], {"state-history": history_value})
+        hass = types.SimpleNamespace(
+            data={const_module.DOMAIN: {"bridges": {"entry-id": bridge}}}
+        )
+        entry = types.SimpleNamespace(entry_id="entry-id")
+        entities: list = []
+
+        await sensor_module.async_setup_entry(hass, entry, lambda new: entities.extend(new))
+
+        self.assertEqual(len(entities), 1)
+        entity = entities[0]
+        self.assertEqual(
+            entity.native_value,
+            (
+                "2026-03-14 13:39:18 Overrun extended for current session due to quick "
+                "presence reactivation - Czujnik obecności Tree (Sypialnia)"
+            ),
+        )
+        self.assertLessEqual(
+            len(entity.native_value),
+            sensor_module.MAX_LENGTH_STATE_STATE,
+        )
+
+
+class SensorStateLengthSafetyTests(unittest.TestCase):
+    """Verify helper logic keeps sensor text state within HA limits."""
+
+    def test_plain_long_text_is_truncated_to_max_state_length(self) -> None:
+        value = "x" * (sensor_module.MAX_LENGTH_STATE_STATE + 100)
+
+        compacted = sensor_module._truncate_state_text(value)
+
+        self.assertEqual(len(compacted), sensor_module.MAX_LENGTH_STATE_STATE)
+        self.assertTrue(compacted.endswith("..."))
+
+    def test_short_text_cleans_control_characters(self) -> None:
+        value = "2026-03-14 11:15:11 Wykryto obecność\x14Czujnik obecności Tree (WC)"
+
+        compacted = sensor_module._truncate_state_text(value)
+
+        self.assertEqual(
+            compacted,
+            "2026-03-14 11:15:11 Wykryto obecność - Czujnik obecności Tree (WC)",
+        )
+
+    def test_non_string_values_are_serialized_safely(self) -> None:
+        value = {
+            "events": [
+                "Tryb zasilania awaryjnego rozpoczęty",
+                "Zasilanie awaryjne zakończone",
+            ],
+            "count": 2,
+        }
+
+        compacted = sensor_module._sensor_native_value(value)
+
+        self.assertIsInstance(compacted, str)
+        self.assertIn("\"count\":2", compacted)
+        self.assertLessEqual(len(compacted), sensor_module.MAX_LENGTH_STATE_STATE)
+
 
 if __name__ == "__main__":
     unittest.main()

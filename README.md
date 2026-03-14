@@ -6,6 +6,15 @@
 
 Custom HACS integration for local Loxone Miniserver, Miniserver Go, and Miniserver Compact control from Home Assistant.
 
+## Beta status
+
+This branch is prepared for community beta validation:
+
+- no hardcoded credentials in runtime paths
+- config/runtime handling aligned with current Home Assistant config entry patterns
+- reduced reconnect log spam (transition-based availability logs)
+- unknown block types exposed as disabled diagnostics instead of being silently ignored
+
 ## Quick Start in Home Assistant
 
 1. Add this repository to HACS:
@@ -27,9 +36,14 @@ If the button does not open the flow directly, use `Settings -> Devices & Servic
 - imports the Loxone structure from `LoxAPP3.json`
 - keeps two-way state sync between Home Assistant and Loxone
 - exposes common Loxone blocks as Home Assistant entities
-- exposes Intercom/IntercomV2 as camera preview entities (stream + snapshot when available)
-- exposes `AudioZone`/`AudioZoneV2` as `media_player` with source selection, seek/progress, shuffle/repeat and TTS (`AudioZoneV2`)
+- exposes Intercom/IntercomV2 (and DoorController/DoorStation variants) as dedicated doorbell entities:
+  - camera stream + snapshot preview when available
+  - binary sensors for ring, call, proximity, and intercom light state
+  - intercom history sensor based on `lastBellEvents` (latest event timestamp + recent image URLs)
+  - Home Assistant bus events (`loxone_home_assistant_intercom_event`) for automation triggers
+- exposes `AudioZone`/`AudioZoneV2`/`CentralAudioZone` as `media_player` with source selection, seek/progress, shuffle/repeat, TTS and event/command passthrough via `play_media`
 - adds hub-level maintenance actions (for example server restart)
+- registers integration services once in integration setup (HA-compatible service lifecycle)
 
 ## Supported platforms
 
@@ -87,9 +101,12 @@ If the button does not open the flow directly, use `Settings -> Devices & Servic
 - `TextInput`
 - `AudioZone`
 - `AudioZoneV2`
+- `CentralAudioZone`
 - access/keypad-style controls with `access`/`granted` and `wrongCode`/`denied` states (exposed as binary sensors)
 
 Unsupported block types are still exposed, when possible, as disabled-by-default diagnostic sensors or binary sensors based on their raw states.
+
+`Webpage` controls that look like intercom "system schema" pages are exposed as diagnostic-only entities (disabled by default), because they are configuration/visualization links rather than runtime sensor values.
 
 ## LoxAPP3 section coverage
 
@@ -133,19 +150,49 @@ This version targets modern Loxone servers (Miniserver, Miniserver Go, Miniserve
    - local host/IP (for example `192.0.2.10`), or
    - Cloud DNS form based on MAC (`02AABBCCDDEE` or `https://dns.loxonecloud.com/02AABBCCDDEE`).
 
+## Version pinning in HACS
+
+You can stay on an older integration version directly in HACS:
+
+1. Open HACS and go to the `Loxone` integration page.
+2. Use the menu (`...`) and choose `Redownload`.
+3. In `Need a different version?`, select the release version you want.
+4. Reinstall and restart Home Assistant.
+
+This repository now publishes installable versions from Git tags (`vX.Y.Z` for stable and `vX.Y.ZbN` for beta) as GitHub Releases, which makes those versions selectable in HACS.
+
+## Stable/Beta update channels
+
+You can maintain and update `stable` and `beta` separately:
+
+- stable channel:
+  - publish from branch `stable`
+  - use a normal version tag, for example `v1.2.3`
+  - release is published as regular (non-prerelease)
+- beta channel:
+  - updates automatically after every push to `main`
+  - workflow creates a prerelease tag, for example `v1.2.4b123`
+  - prerelease is published automatically and can be installed by users who enabled beta/prerelease updates in HACS
+
+In HACS, users can stay on `stable` or opt into `beta` by enabling prerelease/beta versions for this integration.
+
 ## Configuration flow
 
-The integration first asks for:
+The integration first asks for setup mode and startup options:
+
+- automatic discovery or manual host setup
+- mood selection entities for `LightControllerV2`
+- individual child light entities inside one `LightController`
+- optional automatic creation of suggested automations
+
+If automatic discovery is selected, the next step asks for:
 
 - Loxone username
 - Loxone password
 
 It then scans the local network for one or more Loxone servers. If more than one is found, you choose the correct device. If discovery fails, a manual host fallback is offered.
 
-In integration options you can also enable:
-
-- mood selection entities for `LightControllerV2`
-- individual child light entities inside one `LightController`
+If manual setup is selected, you provide host, port, credentials, and TLS verification directly.
 
 ## Services
 
@@ -167,6 +214,62 @@ Fields:
 
 - `entry_id` optional when only one Loxone entry exists
 - `command`
+
+### `loxone_home_assistant.send_tts`
+
+Send text-to-speech to a specific Loxone control UUID (for example Intercom or AudioZone).
+
+Fields:
+
+- `entry_id` optional when only one Loxone entry exists
+- `uuid_action`
+- `message`
+- `volume` optional 0-100
+
+## Logging and troubleshooting
+
+- integration logger namespace: `custom_components.loxone_home_assistant`
+- connection logs are transition-based:
+  - one info log when connection becomes unavailable
+  - one info log when connection is restored
+- to inspect protocol/entity mapping in detail, enable debug logs in Home Assistant:
+
+```yaml
+logger:
+  logs:
+    custom_components.loxone_home_assistant: debug
+```
+
+## Intercom automation events
+
+The integration fires Home Assistant bus events with type:
+
+- `loxone_home_assistant_intercom_event`
+
+Event payload includes:
+
+- `serial`
+- `uuid_action`
+- `control_name`
+- `control_type`
+- `room`
+- `category`
+- `state_name`
+- `event` (for example `doorbell`, `call`, `proximity`, `light`)
+- `value`
+
+Events are emitted on rising edges only (for example `0 -> 1`).
+
+## Intercom live call scope
+
+Home Assistant can reliably expose the intercom video stream and control/state/event automation, but full two-way live audio/video calling UX depends on vendor-specific mobile apps and codecs that are not standardized in HA entities.
+
+This integration therefore focuses on:
+
+- live video preview (`camera`)
+- ring/call/proximity event and state automation
+- TTS command dispatch
+- intercom light control (when the block publishes compatible states)
 
 ## Development notes
 

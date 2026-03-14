@@ -28,6 +28,7 @@ from .bridge import (
     async_discover_miniservers,
 )
 from .const import (
+    CONF_AUTO_CREATE_AUTOMATIONS,
     CONF_CLIENT_UUID,
     CONF_ENABLE_LIGHT_MOOD_SELECT,
     CONF_EXPOSE_CONTROLLER_CHILD_LIGHTS,
@@ -39,6 +40,8 @@ from .const import (
     CONF_TOKEN,
     CONF_TOKEN_VALID_UNTIL,
     CONF_USE_TLS,
+    DATA_BRIDGES,
+    DEFAULT_AUTO_CREATE_AUTOMATIONS,
     DEFAULT_PORT,
     DEFAULT_ENABLE_LIGHT_MOOD_SELECT,
     DEFAULT_EXPOSE_CONTROLLER_CHILD_LIGHTS,
@@ -47,9 +50,11 @@ from .const import (
     DOMAIN,
     INTEGRATION_TITLE,
 )
+from .runtime import runtime_bridge
 from .versioning import MIN_SUPPORTED_VERSION_TEXT
 
 _LOGGER = logging.getLogger(__name__)
+CONF_USE_MANUAL_SETUP = "use_manual_setup"
 
 
 class LoxoneCommunityConfigFlow(ConfigFlow, domain=DOMAIN):
@@ -61,26 +66,54 @@ class LoxoneCommunityConfigFlow(ConfigFlow, domain=DOMAIN):
         self._auth_data: dict[str, Any] = {}
         self._devices: list[DiscoveryResult] = []
         self._legacy_found = False
+        self._setup_options: dict[str, bool] = {
+            CONF_ENABLE_LIGHT_MOOD_SELECT: DEFAULT_ENABLE_LIGHT_MOOD_SELECT,
+            CONF_EXPOSE_CONTROLLER_CHILD_LIGHTS: DEFAULT_EXPOSE_CONTROLLER_CHILD_LIGHTS,
+            CONF_AUTO_CREATE_AUTOMATIONS: DEFAULT_AUTO_CREATE_AUTOMATIONS,
+        }
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        errors: dict[str, str] = {}
+        if user_input is not None:
+            self._setup_options = {
+                CONF_ENABLE_LIGHT_MOOD_SELECT: _coerce_bool(
+                    user_input.get(CONF_ENABLE_LIGHT_MOOD_SELECT),
+                    DEFAULT_ENABLE_LIGHT_MOOD_SELECT,
+                ),
+                CONF_EXPOSE_CONTROLLER_CHILD_LIGHTS: _coerce_bool(
+                    user_input.get(CONF_EXPOSE_CONTROLLER_CHILD_LIGHTS),
+                    DEFAULT_EXPOSE_CONTROLLER_CHILD_LIGHTS,
+                ),
+                CONF_AUTO_CREATE_AUTOMATIONS: _coerce_bool(
+                    user_input.get(CONF_AUTO_CREATE_AUTOMATIONS),
+                    DEFAULT_AUTO_CREATE_AUTOMATIONS,
+                ),
+            }
+            if _coerce_bool(user_input.get(CONF_USE_MANUAL_SETUP), False):
+                return await self.async_step_manual()
+            return await self.async_step_auto()
 
+        return self._async_show_setup_form()
+
+    async def async_step_auto(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        errors: dict[str, str] = {}
         if user_input is not None:
             self._auth_data = {
                 CONF_USERNAME: user_input[CONF_USERNAME],
                 CONF_PASSWORD: user_input[CONF_PASSWORD],
                 CONF_VERIFY_SSL: DEFAULT_VERIFY_SSL,
             }
-            _LOGGER.warning("Loxone flow: starting discovery")
+            _LOGGER.debug("Loxone flow: starting discovery")
 
             discovery = await async_discover_miniservers(
                 self.hass, timeout=DEFAULT_SCAN_TIMEOUT
             )
             self._devices = discovery.devices
             self._legacy_found = discovery.legacy_found
-            _LOGGER.warning(
+            _LOGGER.debug(
                 "Loxone flow: discovery completed devices=%s legacy_found=%s",
                 len(self._devices),
                 self._legacy_found,
@@ -94,16 +127,7 @@ class LoxoneCommunityConfigFlow(ConfigFlow, domain=DOMAIN):
             errors["base"] = "legacy_not_supported" if self._legacy_found else "no_device_found"
             return await self.async_step_manual(errors=errors)
 
-        return self.async_show_form(
-            step_id="user",
-            data_schema=vol.Schema(
-                {
-                    vol.Required(CONF_USERNAME): str,
-                    vol.Required(CONF_PASSWORD): str,
-                }
-            ),
-            errors=errors,
-        )
+        return self._async_show_auto_form(errors=errors)
 
     async def async_step_select(
         self, user_input: dict[str, Any] | None = None
@@ -146,19 +170,82 @@ class LoxoneCommunityConfigFlow(ConfigFlow, domain=DOMAIN):
             )
             return await self._async_finish_setup(device, from_manual=True)
 
+        return self._async_show_manual_form(errors=errors)
+
+    def _async_show_setup_form(self) -> ConfigFlowResult:
         return self.async_show_form(
-            step_id="manual",
+            step_id="user",
             data_schema=vol.Schema(
                 {
-                    vol.Required(CONF_HOST): str,
-                    vol.Required(CONF_PORT, default=DEFAULT_PORT): int,
+                    vol.Required(CONF_USE_MANUAL_SETUP, default=False): bool,
+                    vol.Required(
+                        CONF_ENABLE_LIGHT_MOOD_SELECT,
+                        default=self._setup_option_value(
+                            CONF_ENABLE_LIGHT_MOOD_SELECT,
+                            DEFAULT_ENABLE_LIGHT_MOOD_SELECT,
+                        ),
+                    ): bool,
+                    vol.Required(
+                        CONF_EXPOSE_CONTROLLER_CHILD_LIGHTS,
+                        default=self._setup_option_value(
+                            CONF_EXPOSE_CONTROLLER_CHILD_LIGHTS,
+                            DEFAULT_EXPOSE_CONTROLLER_CHILD_LIGHTS,
+                        ),
+                    ): bool,
+                    vol.Required(
+                        CONF_AUTO_CREATE_AUTOMATIONS,
+                        default=self._setup_option_value(
+                            CONF_AUTO_CREATE_AUTOMATIONS,
+                            DEFAULT_AUTO_CREATE_AUTOMATIONS,
+                        ),
+                    ): bool,
+                }
+            ),
+        )
+
+    def _async_show_auto_form(self, *, errors: dict[str, str]) -> ConfigFlowResult:
+        return self.async_show_form(
+            step_id="auto",
+            data_schema=vol.Schema(
+                {
                     vol.Required(CONF_USERNAME, default=self._auth_data.get(CONF_USERNAME, "")): str,
                     vol.Required(CONF_PASSWORD): str,
-                    vol.Required(CONF_VERIFY_SSL, default=DEFAULT_VERIFY_SSL): bool,
                 }
             ),
             errors=errors,
         )
+
+    def _async_show_manual_form(
+        self,
+        *,
+        errors: dict[str, str],
+        host: str = "",
+        port: int = DEFAULT_PORT,
+        verify_ssl: bool | None = None,
+    ) -> ConfigFlowResult:
+        return self.async_show_form(
+            step_id="manual",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(CONF_HOST, default=host): str,
+                    vol.Required(CONF_PORT, default=port): int,
+                    vol.Required(CONF_USERNAME, default=self._auth_data.get(CONF_USERNAME, "")): str,
+                    vol.Required(CONF_PASSWORD): str,
+                    vol.Required(
+                        CONF_VERIFY_SSL,
+                        default=(
+                            self._auth_data.get(CONF_VERIFY_SSL, DEFAULT_VERIFY_SSL)
+                            if verify_ssl is None
+                            else verify_ssl
+                        ),
+                    ): bool,
+                }
+            ),
+            errors=errors,
+        )
+
+    def _setup_option_value(self, key: str, default: bool) -> bool:
+        return _coerce_bool(self._setup_options.get(key), default)
 
     async def _async_finish_setup(
         self, device: DiscoveryResult, *, from_manual: bool
@@ -175,71 +262,30 @@ class LoxoneCommunityConfigFlow(ConfigFlow, domain=DOMAIN):
         try:
             info = await _async_validate_input(self.hass, entry_data)
         except LoxoneVersionUnsupportedError:
-            return self.async_show_form(
-                step_id="manual",
-                data_schema=vol.Schema(
-                    {
-                        vol.Required(CONF_HOST, default=device.host): str,
-                        vol.Required(CONF_PORT, default=device.port): int,
-                        vol.Required(CONF_USERNAME, default=self._auth_data.get(CONF_USERNAME, "")): str,
-                        vol.Required(CONF_PASSWORD): str,
-                        vol.Required(CONF_VERIFY_SSL, default=self._auth_data.get(CONF_VERIFY_SSL, DEFAULT_VERIFY_SSL)): bool,
-                    }
-                ),
+            return self._async_show_manual_form(
                 errors={"base": "unsupported_version"},
+                host=device.host,
+                port=device.port,
             )
         except LoxoneAuthenticationError:
             if from_manual:
-                return self.async_show_form(
-                    step_id="manual",
-                    data_schema=vol.Schema(
-                        {
-                            vol.Required(CONF_HOST, default=device.host): str,
-                            vol.Required(CONF_PORT, default=device.port): int,
-                            vol.Required(CONF_USERNAME, default=self._auth_data.get(CONF_USERNAME, "")): str,
-                            vol.Required(CONF_PASSWORD): str,
-                            vol.Required(CONF_VERIFY_SSL, default=self._auth_data.get(CONF_VERIFY_SSL, DEFAULT_VERIFY_SSL)): bool,
-                        }
-                    ),
+                return self._async_show_manual_form(
                     errors={"base": "invalid_auth"},
+                    host=device.host,
+                    port=device.port,
                 )
-            return self.async_show_form(
-                step_id="user",
-                data_schema=vol.Schema(
-                    {
-                        vol.Required(CONF_USERNAME, default=self._auth_data.get(CONF_USERNAME, "")): str,
-                        vol.Required(CONF_PASSWORD): str,
-                    }
-                ),
-                errors={"base": "invalid_auth"},
-            )
+            return self._async_show_auto_form(errors={"base": "invalid_auth"})
         except LoxoneUnsupportedError:
-            return self.async_show_form(
-                step_id="manual",
-                data_schema=vol.Schema(
-                    {
-                        vol.Required(CONF_HOST, default=device.host): str,
-                        vol.Required(CONF_PORT, default=device.port): int,
-                        vol.Required(CONF_USERNAME, default=self._auth_data.get(CONF_USERNAME, "")): str,
-                        vol.Required(CONF_PASSWORD): str,
-                        vol.Required(CONF_VERIFY_SSL, default=self._auth_data.get(CONF_VERIFY_SSL, DEFAULT_VERIFY_SSL)): bool,
-                    }
-                ),
+            return self._async_show_manual_form(
                 errors={"base": "legacy_not_supported"},
+                host=device.host,
+                port=device.port,
             )
         except LoxoneConnectionError:
-            return self.async_show_form(
-                step_id="manual",
-                data_schema=vol.Schema(
-                    {
-                        vol.Required(CONF_HOST, default=device.host): str,
-                        vol.Required(CONF_PORT, default=device.port): int,
-                        vol.Required(CONF_USERNAME, default=self._auth_data.get(CONF_USERNAME, "")): str,
-                        vol.Required(CONF_PASSWORD): str,
-                        vol.Required(CONF_VERIFY_SSL, default=self._auth_data.get(CONF_VERIFY_SSL, DEFAULT_VERIFY_SSL)): bool,
-                    }
-                ),
+            return self._async_show_manual_form(
                 errors={"base": "cannot_connect"},
+                host=device.host,
+                port=device.port,
             )
 
         await self.async_set_unique_id(info[CONF_SERIAL])
@@ -256,6 +302,18 @@ class LoxoneCommunityConfigFlow(ConfigFlow, domain=DOMAIN):
                 CONF_SERVER_MODEL: info[CONF_SERVER_MODEL],
                 CONF_TOKEN: info.get(CONF_TOKEN),
                 CONF_TOKEN_VALID_UNTIL: info.get(CONF_TOKEN_VALID_UNTIL),
+                CONF_ENABLE_LIGHT_MOOD_SELECT: self._setup_option_value(
+                    CONF_ENABLE_LIGHT_MOOD_SELECT,
+                    DEFAULT_ENABLE_LIGHT_MOOD_SELECT,
+                ),
+                CONF_EXPOSE_CONTROLLER_CHILD_LIGHTS: self._setup_option_value(
+                    CONF_EXPOSE_CONTROLLER_CHILD_LIGHTS,
+                    DEFAULT_EXPOSE_CONTROLLER_CHILD_LIGHTS,
+                ),
+                CONF_AUTO_CREATE_AUTOMATIONS: self._setup_option_value(
+                    CONF_AUTO_CREATE_AUTOMATIONS,
+                    DEFAULT_AUTO_CREATE_AUTOMATIONS,
+                ),
             },
         )
 
@@ -321,18 +379,24 @@ class LoxoneCommunityOptionsFlow(OptionsFlow):
             form_data.get(CONF_EXPOSE_CONTROLLER_CHILD_LIGHTS),
             DEFAULT_EXPOSE_CONTROLLER_CHILD_LIGHTS,
         )
+        auto_create_automations_default = _coerce_bool(
+            form_data.get(CONF_AUTO_CREATE_AUTOMATIONS),
+            DEFAULT_AUTO_CREATE_AUTOMATIONS,
+        )
         serial = str(form_data.get(CONF_SERIAL) or "unknown")
         loxapp_version = str(form_data.get(CONF_LOXAPP_VERSION) or "unknown")
         current_api_version = _coerce_text(form_data.get(CONF_SOFTWARE_VERSION), "unknown")
         if config_entry is not None:
-            runtime_bridge = (
-                self.hass.data.get(DOMAIN, {})
-                .get("bridges", {})
-                .get(config_entry.entry_id)
-            )
-            if runtime_bridge is not None:
+            active_bridge = runtime_bridge(config_entry)
+            if active_bridge is None:
+                active_bridge = (
+                    self.hass.data.get(DOMAIN, {})
+                    .get(DATA_BRIDGES, {})
+                    .get(config_entry.entry_id)
+                )
+            if active_bridge is not None:
                 current_api_version = _coerce_text(
-                    getattr(runtime_bridge, "software_version", None),
+                    getattr(active_bridge, "software_version", None),
                     current_api_version,
                 )
 
@@ -353,6 +417,10 @@ class LoxoneCommunityOptionsFlow(OptionsFlow):
                     vol.Required(
                         CONF_EXPOSE_CONTROLLER_CHILD_LIGHTS,
                         default=child_lights_default,
+                    ): bool,
+                    vol.Required(
+                        CONF_AUTO_CREATE_AUTOMATIONS,
+                        default=auto_create_automations_default,
                     ): bool,
                 }
             ),

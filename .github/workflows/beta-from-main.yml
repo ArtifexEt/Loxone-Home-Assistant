@@ -1,0 +1,59 @@
+name: Beta From Main
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  tag_beta:
+    name: Create beta tag from main
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Build beta tag name
+        id: meta
+        run: |
+          set -euo pipefail
+
+          manifest_version="$(jq -r '.version' custom_components/loxone_home_assistant/manifest.json)"
+
+          if [[ ! "${manifest_version}" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+) ]]; then
+            echo "Manifest version ${manifest_version} does not start with major.minor.patch."
+            exit 1
+          fi
+
+          major="${BASH_REMATCH[1]}"
+          minor="${BASH_REMATCH[2]}"
+          patch="${BASH_REMATCH[3]}"
+          next_patch="$((patch + 1))"
+
+          beta_version="${major}.${minor}.${next_patch}b${GITHUB_RUN_NUMBER}"
+          beta_tag="v${beta_version}"
+
+          echo "beta_tag=${beta_tag}" >> "${GITHUB_OUTPUT}"
+          echo "beta_version=${beta_version}" >> "${GITHUB_OUTPUT}"
+
+      - name: Create and push beta tag
+        run: |
+          set -euo pipefail
+
+          beta_tag="${{ steps.meta.outputs.beta_tag }}"
+
+          if [ -n "$(git ls-remote --tags origin "refs/tags/${beta_tag}")" ]; then
+            echo "Tag ${beta_tag} already exists. Nothing to do."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag "${beta_tag}" "${GITHUB_SHA}"
+          git push origin "${beta_tag}"

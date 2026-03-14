@@ -5,5 +5,6 @@
     "loxone_home_assistant"
   ],
   "homeassistant": "2025.1.0",
+  "hide_default_branch": true,
   "render_readme": true
 }
