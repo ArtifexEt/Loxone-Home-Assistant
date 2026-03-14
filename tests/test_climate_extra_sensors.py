@@ -214,6 +214,73 @@ class ClimateExtraSensorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(air_sensor.native_value, 32.0)
         self.assertEqual(mode_sensor.native_value, "comfort")
 
+    async def test_climate_state_sensors_use_canonical_units_for_indexed_humidity_and_co2(self) -> None:
+        climate_control = LoxoneControl(
+            uuid="climate-indexed-uuid",
+            uuid_action="climate-indexed-action",
+            name="Inteligentny Regulator Pomieszczeniowy",
+            type="IRoomControllerV2",
+            details={"format": "%.1f°"},
+            states={
+                "tempActual": "state-temp-actual",
+                "tempTarget": "state-temp-target",
+                "humidity_5": "state-humidity",
+                "co2_6": "state-co2",
+                "operatingMode": "state-mode",
+            },
+        )
+        bridge = _FakeBridge(
+            [climate_control],
+            {
+                "state-temp-actual": 21.5,
+                "state-temp-target": 22.0,
+                "state-humidity": 47,
+                "state-co2": 820,
+                "state-mode": "comfort",
+            },
+        )
+        entry = _FakeConfigEntry("entry-1")
+        hass = _FakeHass(entry.entry_id, bridge, const.DOMAIN)
+        entities = []
+
+        await sensor_module.async_setup_entry(
+            hass,
+            entry,
+            lambda new_entities: entities.extend(new_entities),
+        )
+
+        by_state = {entity._state_name: entity for entity in entities}
+        self.assertEqual(set(by_state), {"humidity_5", "co2_6", "operatingMode"})
+
+        humidity_sensor = by_state["humidity_5"]
+        co2_sensor = by_state["co2_6"]
+        mode_sensor = by_state["operatingMode"]
+
+        self.assertEqual(humidity_sensor.native_value, 47.0)
+        self.assertEqual(
+            humidity_sensor.device_class,
+            sensor_module.SensorDeviceClass.HUMIDITY,
+        )
+        self.assertEqual(humidity_sensor.native_unit_of_measurement, "%")
+        self.assertEqual(
+            humidity_sensor.state_class,
+            sensor_module.SensorStateClass.MEASUREMENT,
+        )
+
+        self.assertEqual(co2_sensor.native_value, 820.0)
+        self.assertEqual(
+            co2_sensor.device_class,
+            sensor_module.SensorDeviceClass.CO2,
+        )
+        self.assertEqual(co2_sensor.native_unit_of_measurement, "ppm")
+        self.assertEqual(
+            co2_sensor.state_class,
+            sensor_module.SensorStateClass.MEASUREMENT,
+        )
+
+        self.assertEqual(mode_sensor.native_value, "comfort")
+        self.assertIsNone(mode_sensor.native_unit_of_measurement)
+
     async def test_setup_creates_air_condition_state_sensors_except_temperatures(self) -> None:
         climate_control = LoxoneControl(
             uuid="ac-uuid",

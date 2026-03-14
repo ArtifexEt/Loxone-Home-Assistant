@@ -267,6 +267,7 @@ PRESENCE_BINARY_STATE_KEYS = {
 }
 PRESENCE_ILLUMINANCE_HINTS = ("illum", "bright", "lux", "lumi", "light")
 PRESENCE_SOUND_HINTS = ("noise", "sound", "acoust", "loud", "db", "decibel")
+CLIMATE_STATE_TRAILING_INDEX_RE = re.compile(r"[_\-\s]+\d+$")
 CLIMATE_METADATA_STATE_HINTS = (
     "mode",
     "status",
@@ -304,6 +305,33 @@ def _normalized_unit(value: str | None) -> str | None:
     if value is None:
         return None
     return value.strip().lower()
+
+
+def _climate_state_key_candidates(state_name: str) -> tuple[str, ...]:
+    normalized = normalize_state_name(state_name)
+    stripped = CLIMATE_STATE_TRAILING_INDEX_RE.sub("", state_name)
+    if stripped == state_name:
+        return (normalized,)
+    stripped_normalized = normalize_state_name(stripped)
+    if stripped_normalized == normalized:
+        return (normalized,)
+    return (normalized, stripped_normalized)
+
+
+def _state_name_matches_any_key(state_name: str, keys: set[str]) -> bool:
+    return any(candidate in keys for candidate in _climate_state_key_candidates(state_name))
+
+
+def _is_humidity_state_name(state_name: str) -> bool:
+    return _state_name_matches_any_key(state_name, HUMIDITY_STATE_KEYS)
+
+
+def _is_co2_state_name(state_name: str) -> bool:
+    return _state_name_matches_any_key(state_name, CO2_STATE_KEYS)
+
+
+def _is_air_quality_state_name(state_name: str) -> bool:
+    return _state_name_matches_any_key(state_name, AIR_QUALITY_STATE_KEYS)
 
 
 def _is_energy_unit(value: str | None) -> bool:
@@ -1042,12 +1070,11 @@ def _build_climate_state_sensors(bridge, control: LoxoneControl) -> list[SensorE
 
 
 def _climate_state_suffix(state_name: str) -> str:
-    normalized = normalize_state_name(state_name)
-    if normalized in HUMIDITY_STATE_KEYS:
+    if _is_humidity_state_name(state_name):
         return "Humidity"
-    if normalized in CO2_STATE_KEYS:
+    if _is_co2_state_name(state_name):
         return "CO2"
-    if normalized in AIR_QUALITY_STATE_KEYS:
+    if _is_air_quality_state_name(state_name):
         return "Air Quality"
 
     humanized = CAMEL_CASE_SPLIT_RE.sub(" ", state_name)
@@ -1454,6 +1481,10 @@ class LoxoneClimateStateSensor(LoxoneSingleStateSensor):
             return None
         if _is_climate_metadata_state_name(self._state_name):
             return None
+        if _is_humidity_state_name(self._state_name):
+            return "%"
+        if _is_co2_state_name(self._state_name):
+            return "ppm"
 
         unit = infer_unit(self.control, self._state_name)
         if unit is None:
@@ -1464,14 +1495,13 @@ class LoxoneClimateStateSensor(LoxoneSingleStateSensor):
 
     @property
     def device_class(self) -> SensorDeviceClass | None:
-        normalized = normalize_state_name(self._state_name)
-        if normalized in HUMIDITY_STATE_KEYS:
+        if _is_humidity_state_name(self._state_name):
             return getattr(SensorDeviceClass, "HUMIDITY", None)
-        if normalized in CO2_STATE_KEYS:
+        if _is_co2_state_name(self._state_name):
             return getattr(SensorDeviceClass, "CO2", None)
-        if normalized == normalize_state_name("voc"):
+        if _state_name_matches_any_key(self._state_name, {normalize_state_name("voc")}):
             return getattr(SensorDeviceClass, "VOLATILE_ORGANIC_COMPOUNDS", None)
-        if normalized in AIR_QUALITY_STATE_KEYS:
+        if _is_air_quality_state_name(self._state_name):
             return getattr(SensorDeviceClass, "AQI", None)
         return None
 
@@ -1480,14 +1510,13 @@ class LoxoneClimateStateSensor(LoxoneSingleStateSensor):
         if coerce_float(self.state_value(self._state_name)) is None:
             return None
 
-        normalized = normalize_state_name(self._state_name)
-        if normalized in HUMIDITY_STATE_KEYS:
+        if _is_humidity_state_name(self._state_name):
             return SensorStateClass.MEASUREMENT
-        if normalized in CO2_STATE_KEYS:
+        if _is_co2_state_name(self._state_name):
             return SensorStateClass.MEASUREMENT
-        if normalized in AIR_QUALITY_STATE_KEYS:
+        if _is_air_quality_state_name(self._state_name):
             return SensorStateClass.MEASUREMENT
-        if normalized == normalize_state_name("voc"):
+        if _state_name_matches_any_key(self._state_name, {normalize_state_name("voc")}):
             return SensorStateClass.MEASUREMENT
         if _is_climate_metadata_state_name(self._state_name):
             return None
