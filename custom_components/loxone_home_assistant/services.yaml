@@ -1,0 +1,124 @@
+send_command:
+  name: Send command
+  description: Send a command to a specific Loxone control UUID.
+  fields:
+    entry_id:
+      name: Entry ID
+      description: Optional when only one Loxone config entry exists.
+      required: false
+      example: a1b2c3d4e5
+      selector:
+        text:
+    uuid_action:
+      name: UUID Action
+      description: The Loxone `uuidAction` to control.
+      required: true
+      selector:
+        text:
+    command:
+      name: Command
+      description: The Loxone command to send.
+      required: true
+      selector:
+        text:
+
+send_raw_command:
+  name: Send raw command
+  description: Send a raw authenticated Loxone command over the websocket.
+  fields:
+    entry_id:
+      name: Entry ID
+      description: Optional when only one Loxone config entry exists.
+      required: false
+      selector:
+        text:
+    command:
+      name: Command
+      description: The full Loxone command string.
+      required: true
+      selector:
+        text:
+
+send_tts:
+  name: Send TTS
+  description: Send a TTS command to a specific Loxone control UUID (for example Intercom or AudioZone).
+  fields:
+    entry_id:
+      name: Entry ID
+      description: Optional when only one Loxone config entry exists.
+      required: false
+      selector:
+        text:
+    uuid_action:
+      name: UUID Action
+      description: The Loxone `uuidAction` to control.
+      required: true
+      selector:
+        text:
+    message:
+      name: Message
+      description: Text spoken by the target control.
+      required: true
+      selector:
+        text:
+    volume:
+      name: Volume
+      description: Optional TTS volume in percent (0-100). Used for AudioZone targets and ignored for Intercom targets.
+      required: false
+      selector:
+        number:
+          min: 0
+          max: 100
+          mode: slider
+
+call_intercom_function:
+  name: Call intercom function
+  description: Trigger a child function assigned to an Intercom control (for example Open or Close).
+  fields:
+    entry_id:
+      name: Entry ID
+      description: Optional when only one Loxone config entry exists.
+      required: false
+      selector:
+        text:
+    uuid_action:
+      name: Intercom UUID Action
+      description: The parent Intercom `uuidAction`.
+      required: true
+      selector:
+        text:
+    function:
+      name: Function
+      description: Child function selector by name, child uuidAction or numeric suffix (for example 1, Open, Close).
+      required: true
+      selector:
+        text:
+
+call_intercom_command:
+  name: Call intercom command
+  description: Send an Intercom Gen2 command to the parent intercom uuidAction (for example answer, mute, playTts, setvideosettings).
+  fields:
+    entry_id:
+      name: Entry ID
+      description: Optional when only one Loxone config entry exists.
+      required: false
+      selector:
+        text:
+    uuid_action:
+      name: Intercom UUID Action
+      description: The parent Intercom `uuidAction`.
+      required: true
+      selector:
+        text:
+    command:
+      name: Command
+      description: Intercom command name (for example answer, playTts, mute, setAnswers, setvideosettings, setframerate).
+      required: true
+      selector:
+        text:
+    arguments:
+      name: Arguments
+      description: Optional command arguments. Use slash-separated string (for example 0/20/1, Answer 1/Answer 2) or a YAML list.
+      required: false
+      selector:
+        text:

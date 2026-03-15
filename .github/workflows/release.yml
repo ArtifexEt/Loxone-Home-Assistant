@@ -1,0 +1,69 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    name: Publish release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Fetch remote branches
+        run: git fetch origin "+refs/heads/*:refs/remotes/origin/*"
+
+      - name: Validate tag, version, and channel branch
+        id: channel
+        run: |
+          set -euo pipefail
+
+          tag_name="${GITHUB_REF_NAME}"
+          tag_version="${GITHUB_REF_NAME#v}"
+          manifest_version="$(jq -r '.version' custom_components/loxone_home_assistant/manifest.json)"
+
+          lower_tag="$(echo "${tag_version}" | tr '[:upper:]' '[:lower:]')"
+          prerelease="false"
+
+          if [[ "${lower_tag}" =~ (alpha|beta|rc|pre) ]] || [[ "${lower_tag}" =~ [ab][0-9]+$ ]]; then
+            prerelease="true"
+          fi
+
+          if [ "${prerelease}" = "true" ]; then
+            required_branch="main"
+          else
+            required_branch="stable"
+
+            if [ "${tag_version}" != "${manifest_version}" ]; then
+              echo "Stable tag version (${tag_version}) does not match manifest version (${manifest_version})."
+              exit 1
+            fi
+          fi
+
+          if ! git show-ref --verify --quiet "refs/remotes/origin/${required_branch}"; then
+            echo "Required branch origin/${required_branch} does not exist."
+            exit 1
+          fi
+
+          if ! git merge-base --is-ancestor "${GITHUB_SHA}" "origin/${required_branch}"; then
+            echo "Tag ${tag_name} must point to a commit contained in origin/${required_branch}."
+            exit 1
+          fi
+
+          echo "prerelease=${prerelease}" >> "${GITHUB_OUTPUT}"
+          echo "required_branch=${required_branch}" >> "${GITHUB_OUTPUT}"
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          prerelease: ${{ steps.channel.outputs.prerelease == 'true' }}

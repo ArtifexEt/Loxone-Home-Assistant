@@ -1,0 +1,78 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Additional setup options",
+        "description": "Discovery and authentication are complete. Configure optional light and automation behavior for this installation.",
+        "data": {
+          "enable_light_mood_select": "Expose LightController mood selector",
+          "expose_controller_child_lights": "Expose individual lights inside LightController",
+          "auto_create_automations": "Automatically add suggested automations",
+          "use_loxone_icons": "Use Loxone icons as entity pictures"
+        },
+        "data_description": {
+          "expose_controller_child_lights": "Warning: disabling this option removes those entities from Home Assistant (they may disappear from dashboards and automations)."
+        }
+      },
+      "auto": {
+        "title": "Automatic Loxone discovery",
+        "description": "Enter your Loxone username and password. The integration will scan the local network for a Loxone server (Miniserver, Miniserver Go, Miniserver Compact).",
+        "data": {
+          "username": "Username",
+          "password": "Password"
+        }
+      },
+      "select": {
+        "title": "Select Loxone server",
+        "description": "More than one Loxone server was found. Choose the device you want to connect.",
+        "data": {
+          "device": "Discovered device"
+        }
+      },
+      "manual": {
+        "title": "Manual Loxone server setup",
+        "description": "Automatic discovery did not complete. Enter the local Loxone server host manually.",
+        "data": {
+          "host": "Host",
+          "port": "Port",
+          "username": "Username",
+          "password": "Password",
+          "verify_ssl": "Verify TLS certificate"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Cannot connect to the Loxone server.",
+      "invalid_auth": "Invalid username or password.",
+      "legacy_not_supported": "This integration currently supports local TLS/WSS enabled Loxone servers only.",
+      "unsupported_version": "Unsupported Loxone server software version. Minimum supported version is 10.2.",
+      "no_device_found": "No supported Loxone server was found on the local network."
+    },
+    "abort": {
+      "already_configured": "This Loxone server is already configured."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Loxone options",
+        "description": "Hub: {entry_title}\nSerial: {serial}\nLoxAPP structure version: {loxapp_version}\nDetected Loxone API software version: {current_api_version}\nMinimum supported API software version: {min_api_version}",
+        "data": {
+          "host": "Host",
+          "port": "Port",
+          "username": "Username",
+          "password": "Password (leave empty to keep current)",
+          "verify_ssl": "Verify TLS certificate",
+          "scan_timeout": "Discovery timeout (seconds)",
+          "enable_light_mood_select": "Expose LightController mood selector",
+          "expose_controller_child_lights": "Expose individual lights inside LightController",
+          "auto_create_automations": "Automatically add suggested automations",
+          "use_loxone_icons": "Use Loxone icons as entity pictures"
+        },
+        "data_description": {
+          "expose_controller_child_lights": "Warning: disabling this option removes those entities from Home Assistant (they may disappear from dashboards and automations)."
+        }
+      }
+    }
+  }
+}
