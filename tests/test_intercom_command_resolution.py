@@ -91,6 +91,10 @@ class IntercomCommandResolutionTests(unittest.TestCase):
         command = resolve_intercom_command("tts", "2")
         self.assertEqual(command, "playTts/2")
 
+    def test_resolve_play_tts_accepts_non_numeric_text(self) -> None:
+        command = resolve_intercom_command("playTts", "Kod niepoprawny")
+        self.assertEqual(command, "playTts/Kod%20niepoprawny")
+
     def test_resolve_setanswers_from_slash_text(self) -> None:
         command = resolve_intercom_command("setanswers", "Leave package/Call owner")
         self.assertEqual(command, "setAnswers/Leave%20package/Call%20owner")

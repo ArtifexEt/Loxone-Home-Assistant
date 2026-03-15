@@ -289,6 +289,7 @@ HANDLED_CONTROL_TYPES = (
 )
 
 EVENT_INTERCOM = f"{DOMAIN}_intercom_event"
+EVENT_ACCESS = f"{DOMAIN}_access_event"
 
 BOOLEAN_STATE_NAMES = {
     "active",

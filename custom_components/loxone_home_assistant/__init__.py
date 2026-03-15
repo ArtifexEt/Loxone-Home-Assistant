@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
+from typing import Any
 from urllib.parse import quote
 
 from aiohttp import BasicAuth, ClientError, web
@@ -12,8 +13,13 @@ from homeassistant.components.http import HomeAssistantView
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_PASSWORD
 from homeassistant.core import HomeAssistant, ServiceCall
-from homeassistant.exceptions import ServiceValidationError
+from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers import config_validation as cv, device_registry as dr
+
+try:
+    from homeassistant.core import SupportsResponse
+except ImportError:  # pragma: no cover - compatibility for lightweight test stubs
+    SupportsResponse = None  # type: ignore[assignment]
 
 from .bridge import LoxoneBridge
 from .const import (
@@ -90,6 +96,21 @@ DATA_ICON_CACHE = "icon_cache"
 DATA_ICON_VIEW_REGISTERED = "icon_view_registered"
 
 
+def _command_service_register_kwargs() -> dict[str, Any]:
+    """Return kwargs enabling optional service responses when supported by HA."""
+    if SupportsResponse is None:
+        return {}
+    return {"supports_response": SupportsResponse.OPTIONAL}
+
+
+def _service_validation_exception(message: str) -> Exception:
+    """Build a validation error compatible with multiple HA core versions."""
+    try:
+        return ServiceValidationError(message)
+    except TypeError:
+        return HomeAssistantError(message)
+
+
 class LoxoneIconProxyView(HomeAssistantView):
     """Serve Loxone icons through authenticated HA endpoint."""
 
@@ -142,6 +163,7 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
             SERVICE_SEND_COMMAND,
             _make_send_command_handler(hass),
             schema=SEND_COMMAND_SCHEMA,
+            **_command_service_register_kwargs(),
         )
 
     if not hass.services.has_service(DOMAIN, SERVICE_SEND_RAW_COMMAND):
@@ -150,6 +172,7 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
             SERVICE_SEND_RAW_COMMAND,
             _make_send_raw_command_handler(hass),
             schema=SEND_RAW_COMMAND_SCHEMA,
+            **_command_service_register_kwargs(),
         )
 
     if not hass.services.has_service(DOMAIN, SERVICE_SEND_TTS):
@@ -158,6 +181,7 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
             SERVICE_SEND_TTS,
             _make_send_tts_handler(hass),
             schema=SEND_TTS_SCHEMA,
+            **_command_service_register_kwargs(),
         )
 
     if not hass.services.has_service(DOMAIN, SERVICE_CALL_INTERCOM_FUNCTION):
@@ -166,6 +190,7 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
             SERVICE_CALL_INTERCOM_FUNCTION,
             _make_call_intercom_function_handler(hass),
             schema=CALL_INTERCOM_FUNCTION_SCHEMA,
+            **_command_service_register_kwargs(),
         )
     if not hass.services.has_service(DOMAIN, SERVICE_CALL_INTERCOM_COMMAND):
         hass.services.async_register(
@@ -173,6 +198,7 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
             SERVICE_CALL_INTERCOM_COMMAND,
             _make_call_intercom_command_handler(hass),
             schema=CALL_INTERCOM_COMMAND_SCHEMA,
+            **_command_service_register_kwargs(),
         )
 
     return True
@@ -224,24 +250,24 @@ async def async_reload_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
     await hass.config_entries.async_reload(entry.entry_id)
 
 
-async def _async_handle_send_command(hass: HomeAssistant, call: ServiceCall) -> None:
+async def _async_handle_send_command(hass: HomeAssistant, call: ServiceCall) -> dict[str, Any]:
     bridge = _resolve_bridge(hass, call)
-    await bridge.async_send_action(
+    return await bridge.async_send_action(
         call.data[SERVICE_ATTR_UUID_ACTION],
         call.data[SERVICE_ATTR_COMMAND],
     )
 
 
-async def _async_handle_send_raw_command(hass: HomeAssistant, call: ServiceCall) -> None:
+async def _async_handle_send_raw_command(hass: HomeAssistant, call: ServiceCall) -> dict[str, Any]:
     bridge = _resolve_bridge(hass, call)
-    await bridge.async_send_raw_command(call.data[SERVICE_ATTR_COMMAND])
+    return await bridge.async_send_raw_command(call.data[SERVICE_ATTR_COMMAND])
 
 
-async def _async_handle_send_tts(hass: HomeAssistant, call: ServiceCall) -> None:
+async def _async_handle_send_tts(hass: HomeAssistant, call: ServiceCall) -> dict[str, Any]:
     bridge = _resolve_bridge(hass, call)
     message = str(call.data[SERVICE_ATTR_MESSAGE]).strip()
     if not message:
-        raise ServiceValidationError("TTS message cannot be empty.")
+        raise _service_validation_exception("TTS message cannot be empty.")
 
     volume = call.data.get(SERVICE_ATTR_VOLUME)
     encoded_message = quote(message, safe="")
@@ -250,21 +276,25 @@ async def _async_handle_send_tts(hass: HomeAssistant, call: ServiceCall) -> None
         if volume is None
         else f"tts/{encoded_message}/{int(volume)}"
     )
-    await bridge.async_send_action(call.data[SERVICE_ATTR_UUID_ACTION], command)
+    return await bridge.async_send_action(call.data[SERVICE_ATTR_UUID_ACTION], command)
 
 
-async def _async_handle_call_intercom_function(hass: HomeAssistant, call: ServiceCall) -> None:
+async def _async_handle_call_intercom_function(
+    hass: HomeAssistant, call: ServiceCall
+) -> dict[str, Any]:
     bridge = _resolve_bridge(hass, call)
     intercom_uuid_action = call.data[SERVICE_ATTR_UUID_ACTION]
     selector = str(call.data[SERVICE_ATTR_FUNCTION]).strip()
     if not selector:
-        raise ServiceValidationError("Intercom function selector cannot be empty.")
+        raise _service_validation_exception("Intercom function selector cannot be empty.")
 
     intercom_control = bridge.control_for_uuid_action(intercom_uuid_action)
     if intercom_control is None:
-        raise ServiceValidationError(f"Unknown intercom uuid_action: {intercom_uuid_action}")
+        raise _service_validation_exception(
+            f"Unknown intercom uuid_action: {intercom_uuid_action}"
+        )
     if not is_intercom_control(intercom_control):
-        raise ServiceValidationError(
+        raise _service_validation_exception(
             f"Control {intercom_uuid_action} is not recognized as an intercom."
         )
 
@@ -274,7 +304,7 @@ async def _async_handle_call_intercom_function(hass: HomeAssistant, call: Servic
         if control.parent_uuid_action == intercom_control.uuid_action
     ]
     if not available_controls:
-        raise ServiceValidationError(
+        raise _service_validation_exception(
             f"Intercom {intercom_uuid_action} has no mapped child functions."
         )
 
@@ -284,21 +314,30 @@ async def _async_handle_call_intercom_function(hass: HomeAssistant, call: Servic
     )
     if selected_control is None:
         available_labels = ", ".join(control.name for control in available_controls)
-        raise ServiceValidationError(
+        raise _service_validation_exception(
             f"Unknown intercom function '{selector}'. Available: {available_labels}."
         )
 
-    await bridge.async_send_action(selected_control.uuid_action, "pulse")
+    response = await bridge.async_send_action(selected_control.uuid_action, "pulse")
+    return {
+        **response,
+        "resolved_uuid_action": selected_control.uuid_action,
+        "resolved_function_name": selected_control.name,
+    }
 
 
-async def _async_handle_call_intercom_command(hass: HomeAssistant, call: ServiceCall) -> None:
+async def _async_handle_call_intercom_command(
+    hass: HomeAssistant, call: ServiceCall
+) -> dict[str, Any]:
     bridge = _resolve_bridge(hass, call)
     intercom_uuid_action = call.data[SERVICE_ATTR_UUID_ACTION]
     intercom_control = bridge.control_for_uuid_action(intercom_uuid_action)
     if intercom_control is None:
-        raise ServiceValidationError(f"Unknown intercom uuid_action: {intercom_uuid_action}")
+        raise _service_validation_exception(
+            f"Unknown intercom uuid_action: {intercom_uuid_action}"
+        )
     if not is_intercom_control(intercom_control):
-        raise ServiceValidationError(
+        raise _service_validation_exception(
             f"Control {intercom_uuid_action} is not recognized as an intercom."
         )
 
@@ -308,42 +347,42 @@ async def _async_handle_call_intercom_command(hass: HomeAssistant, call: Service
             call.data.get(SERVICE_ATTR_ARGUMENTS),
         )
     except ValueError as err:
-        raise ServiceValidationError(str(err)) from err
+        raise _service_validation_exception(str(err)) from err
 
-    await bridge.async_send_action(intercom_control.uuid_action, resolved_command)
+    return await bridge.async_send_action(intercom_control.uuid_action, resolved_command)
 
 
 def _make_send_command_handler(hass: HomeAssistant):
-    async def handler(call: ServiceCall) -> None:
-        await _async_handle_send_command(hass, call)
+    async def handler(call: ServiceCall) -> dict[str, Any]:
+        return await _async_handle_send_command(hass, call)
 
     return handler
 
 
 def _make_send_raw_command_handler(hass: HomeAssistant):
-    async def handler(call: ServiceCall) -> None:
-        await _async_handle_send_raw_command(hass, call)
+    async def handler(call: ServiceCall) -> dict[str, Any]:
+        return await _async_handle_send_raw_command(hass, call)
 
     return handler
 
 
 def _make_send_tts_handler(hass: HomeAssistant):
-    async def handler(call: ServiceCall) -> None:
-        await _async_handle_send_tts(hass, call)
+    async def handler(call: ServiceCall) -> dict[str, Any]:
+        return await _async_handle_send_tts(hass, call)
 
     return handler
 
 
 def _make_call_intercom_function_handler(hass: HomeAssistant):
-    async def handler(call: ServiceCall) -> None:
-        await _async_handle_call_intercom_function(hass, call)
+    async def handler(call: ServiceCall) -> dict[str, Any]:
+        return await _async_handle_call_intercom_function(hass, call)
 
     return handler
 
 
 def _make_call_intercom_command_handler(hass: HomeAssistant):
-    async def handler(call: ServiceCall) -> None:
-        await _async_handle_call_intercom_command(hass, call)
+    async def handler(call: ServiceCall) -> dict[str, Any]:
+        return await _async_handle_call_intercom_command(hass, call)
 
     return handler
 
@@ -405,17 +444,19 @@ def _resolve_bridge(hass: HomeAssistant, call: ServiceCall) -> LoxoneBridge:
     if entry_id:
         bridge = bridges.get(entry_id)
         if bridge is None:
-            raise ServiceValidationError(f"Unknown or unloaded Loxone entry_id: {entry_id}")
+            raise _service_validation_exception(
+                f"Unknown or unloaded Loxone entry_id: {entry_id}"
+            )
         return bridge
 
     if len(bridges) == 1:
         return next(iter(bridges.values()))
     if not bridges:
-        raise ServiceValidationError(
+        raise _service_validation_exception(
             "No configured Loxone entries are currently loaded."
         )
 
-    raise ServiceValidationError(
+    raise _service_validation_exception(
         "More than one Loxone entry exists. Please provide entry_id."
     )
 

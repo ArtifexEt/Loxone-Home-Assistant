@@ -26,6 +26,10 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 try:
+    from homeassistant.helpers import entity_registry as er
+except ImportError:  # pragma: no cover - fallback for lightweight test stubs
+    er = None  # type: ignore[assignment]
+try:
     from homeassistant.const import MAX_LENGTH_STATE_STATE
 except ImportError:  # pragma: no cover - fallback for test stubs
     MAX_LENGTH_STATE_STATE = 255
@@ -62,6 +66,7 @@ from .entity import (
 from .intercom import (
     intercom_address_state_name,
     intercom_history_state_name,
+    intercom_synthetic_history_urls,
     is_intercom_control,
     is_intercom_system_schema_webpage,
     resolve_intercom_http_url,
@@ -127,7 +132,6 @@ UNIVERSAL_EVENT_STATE_CANDIDATES = (
 ACCESS_INFO_STATE_CANDIDATES = (
     "codeDate",
     "historyDate",
-    "deviceState",
     "keyPadAuthType",
     "lastCode",
     "lastId",
@@ -328,12 +332,16 @@ UNIVERSAL_EVENT_STATE_KEYS = {
 ACCESS_INFO_STATE_KEYS = {
     normalize_state_name(value) for value in ACCESS_INFO_STATE_CANDIDATES
 }
+LOCK_STATE_KEYS = {
+    normalize_state_name(value) for value in LOCK_STATE_CANDIDATES
+}
 TIMESTAMP_STATE_KEYS = {
     normalize_state_name(value) for value in TIMESTAMP_STATE_CANDIDATES
 }
 STATE_HISTORY_SEPARATOR = "|"
 STATE_DETAIL_SEPARATOR = "\x14"
 STATE_CONTROL_CHAR_RE = re.compile(r"[\x00-\x1f]+")
+EVENT_LOG_ATTRIBUTE_MAX_ENTRIES = 50
 
 
 def _normalized_unit(value: str | None) -> str | None:
@@ -482,6 +490,80 @@ def _sensor_native_value(value: Any) -> Any:
             encoded = str(value)
         return _truncate_state_text(encoded)
     return _truncate_state_text(str(value)) if value is not None else None
+
+
+def _event_log_entries(
+    value: Any,
+    *,
+    max_entries: int | None = EVENT_LOG_ATTRIBUTE_MAX_ENTRIES,
+) -> list[str]:
+    entries = _collect_event_log_entries(value)
+    if max_entries is None:
+        return entries
+    return entries[:max_entries]
+
+
+def _collect_event_log_entries(value: Any) -> list[str]:
+    if value is None:
+        return []
+
+    if isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return []
+        if raw.startswith("{") or raw.startswith("["):
+            try:
+                parsed = json.loads(raw)
+            except (TypeError, ValueError):
+                return _split_event_log_text(raw)
+            return _collect_event_log_entries(parsed)
+        return _split_event_log_text(raw)
+
+    if isinstance(value, Mapping):
+        for key in (
+            "entries",
+            "events",
+            "items",
+            "history",
+            "records",
+            "log",
+            "result",
+            "value",
+        ):
+            nested = _mapping_get_case_insensitive(value, key)
+            nested_entries = _collect_event_log_entries(nested)
+            if nested_entries:
+                return nested_entries
+        try:
+            encoded = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+        except TypeError:
+            encoded = str(value)
+        encoded = encoded.strip()
+        return [encoded] if encoded else []
+
+    if isinstance(value, (list, tuple, set)):
+        entries: list[str] = []
+        for item in value:
+            entries.extend(_collect_event_log_entries(item))
+        return entries
+
+    text = str(value).strip()
+    return [text] if text else []
+
+
+def _split_event_log_text(value: str) -> list[str]:
+    cleaned = value.replace(STATE_DETAIL_SEPARATOR, " - ")
+    cleaned = STATE_CONTROL_CHAR_RE.sub(" ", cleaned)
+    cleaned = cleaned.strip()
+    if not cleaned:
+        return []
+
+    entries = [
+        " ".join(fragment.split())
+        for fragment in re.split(r"[\r\n|]+", cleaned)
+        if fragment and fragment.strip()
+    ]
+    return entries or [" ".join(cleaned.split())]
 
 
 def _coerce_override_entries(value: Any) -> list[dict[str, Any]]:
@@ -911,6 +993,8 @@ def _build_access_state_sensors(
     for state_name in control.states:
         if state_name in excluded or state_is_boolean(control, state_name):
             continue
+        if normalize_state_name(state_name) in LOCK_STATE_KEYS:
+            continue
         entities.append(LoxoneAccessStateSensor(bridge, control, state_name))
     return entities
 
@@ -1051,6 +1135,9 @@ def _build_control_sensor_entities(bridge, control: LoxoneControl) -> list[Senso
         entities.append(LoxonePrimarySensor(bridge, control))
         return entities
 
+    if control.type in HANDLED_CONTROL_TYPES:
+        return entities
+
     access_entities = _build_access_state_sensors(
         bridge,
         control,
@@ -1058,9 +1145,6 @@ def _build_control_sensor_entities(bridge, control: LoxoneControl) -> list[Senso
     )
     if access_entities:
         entities.extend(access_entities)
-        return entities
-
-    if control.type in HANDLED_CONTROL_TYPES:
         return entities
 
     entities.extend(
@@ -1084,7 +1168,60 @@ async def async_setup_entry(
     for control in bridge.controls:
         entities.extend(_build_control_sensor_entities(bridge, control))
 
+    _restore_tracker_entries_entities(hass, entities)
     async_add_entities(entities)
+
+
+def _restore_tracker_entries_entities(
+    hass: HomeAssistant,
+    entities: list[SensorEntity],
+) -> None:
+    """Re-enable tracker entries sensors disabled by older default behavior."""
+    if er is None:
+        return
+
+    registry_get = getattr(er, "async_get", None)
+    if not callable(registry_get):
+        return
+    registry = registry_get(hass)
+    if not all(
+        hasattr(registry, attr)
+        for attr in ("async_get_entity_id", "async_get", "async_update_entity")
+    ):
+        return
+
+    integration_disabled_flag = getattr(
+        getattr(er, "RegistryEntryDisabler", object),
+        "INTEGRATION",
+        "integration",
+    )
+
+    normalized_entries = normalize_state_name("entries")
+    for entity in entities:
+        if not isinstance(entity, LoxoneEventStateSensor):
+            continue
+        if entity.control.type not in TRACKER_CONTROL_TYPES:
+            continue
+        if normalize_state_name(getattr(entity, "_state_name", "")) != normalized_entries:
+            continue
+
+        unique_id = getattr(entity, "unique_id", None) or getattr(
+            entity, "_attr_unique_id", None
+        )
+        if not isinstance(unique_id, str) or not unique_id:
+            continue
+
+        entity_id = registry.async_get_entity_id("sensor", DOMAIN, unique_id)
+        if entity_id is None:
+            continue
+        registry_entry = registry.async_get(entity_id)
+        if registry_entry is None:
+            continue
+
+        disabled_by = getattr(registry_entry, "disabled_by", None)
+        if disabled_by not in (integration_disabled_flag, "integration"):
+            continue
+        registry.async_update_entity(entity_id, disabled_by=None)
 
 
 def _supports_miniserver_system_diagnostics(bridge) -> bool:
@@ -1685,35 +1822,38 @@ class LoxoneIntercomHistorySensor(LoxoneEntity, SensorEntity):
                 self._apply_normalized_events(normalized_events)
                 return
 
-        events_url = _resolve_intercom_history_url(
+        for events_url in _intercom_history_url_candidates(
             self.bridge,
             self.control,
             self._history_state_name,
             address_value,
             dynamic_state_names=self._dynamic_history_state_names,
-        )
-        self._events_url = events_url
-        if events_url is None:
-            self._latest_event_time = None
-            self._latest_event_image_url = None
-            self._event_count = 0
-            self._recent_image_urls = []
+        ):
+            payload = await _async_fetch_json(
+                self.bridge,
+                events_url,
+            )
+            if payload is None:
+                continue
+
+            normalized_events = _extract_intercom_events(
+                payload,
+                self.bridge,
+                self.control,
+                address_value,
+            )
+            if not normalized_events:
+                continue
+
+            self._events_url = events_url
+            self._apply_normalized_events(normalized_events)
             return
 
-        payload = await _async_fetch_json(
-            self.bridge,
-            events_url,
-        )
-        if payload is None:
-            return
-
-        normalized_events = _extract_intercom_events(
-            payload,
-            self.bridge,
-            self.control,
-            address_value,
-        )
-        self._apply_normalized_events(normalized_events)
+        self._events_url = None
+        self._latest_event_time = None
+        self._latest_event_image_url = None
+        self._event_count = 0
+        self._recent_image_urls = []
 
     def _address_state_value(self) -> Any:
         if self._address_state_name is None:
@@ -1810,6 +1950,14 @@ class LoxoneEventStateSensor(LoxoneNamedStateSensor):
     def extra_state_attributes(self) -> dict:
         attrs = super().extra_state_attributes
         attrs["event_state"] = self._state_name
+        log_entries = _event_log_entries(
+            self.state_value(self._state_name),
+            max_entries=None,
+        )
+        if log_entries:
+            attrs["log_entry_count"] = len(log_entries)
+            attrs["latest_log_entry"] = log_entries[-1]
+            attrs["log_entries"] = log_entries[-EVENT_LOG_ATTRIBUTE_MAX_ENTRIES:]
         return attrs
 
 
@@ -1901,6 +2049,37 @@ def _resolve_intercom_history_url(
         key_hints=INTERCOM_HISTORY_URL_KEY_HINTS,
         address_value=address_value,
     )
+
+
+def _intercom_history_url_candidates(
+    bridge,
+    control: LoxoneControl,
+    history_state_name: str | None,
+    address_value: Any = None,
+    *,
+    dynamic_state_names: tuple[str, ...] = (),
+) -> tuple[str, ...]:
+    candidates: list[str] = []
+
+    resolved_url = _resolve_intercom_history_url(
+        bridge,
+        control,
+        history_state_name,
+        address_value,
+        dynamic_state_names=dynamic_state_names,
+    )
+    if resolved_url is not None:
+        candidates.append(resolved_url)
+
+    for synthetic_url in intercom_synthetic_history_urls(
+        bridge,
+        control,
+        address_value=address_value,
+    ):
+        if synthetic_url not in candidates:
+            candidates.append(synthetic_url)
+
+    return tuple(candidates)
 
 
 def _dynamic_intercom_history_state_names(control: LoxoneControl) -> tuple[str, ...]:

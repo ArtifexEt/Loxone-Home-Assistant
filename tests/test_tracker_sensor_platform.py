@@ -181,6 +181,60 @@ class TrackerSensorPlatformTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNotNone(entity.native_value)
             self.assertTrue(getattr(entity, "_attr_force_update", False))
 
+        entries_sensor = next(
+            entity
+            for entity in entities
+            if getattr(entity, "_state_name", None) == "entries"
+        )
+        attrs = entries_sensor.extra_state_attributes
+        self.assertEqual(attrs["log_entry_count"], 1)
+        self.assertEqual(attrs["latest_log_entry"], "2026-03-14 10:00 Door opened")
+        self.assertEqual(attrs["log_entries"], ["2026-03-14 10:00 Door opened"])
+
+    async def test_tracker_entries_state_exposes_log_count_for_pipe_separated_history(self) -> None:
+        control = LoxoneControl(
+            uuid="tracker-uuid",
+            uuid_action="tracker-action",
+            name="Access Tracker",
+            type="Tracker",
+            states={
+                "entries": "state-entries",
+            },
+        )
+        bridge = _FakeBridge(
+            [control],
+            {
+                "state-entries": (
+                    "2026-03-14 08:00 Door opened|"
+                    "2026-03-14 08:10 Door closed|"
+                    "2026-03-14 09:30 Door opened"
+                ),
+            },
+        )
+        entry = _FakeConfigEntry("entry-1")
+        hass = _FakeHass(entry.entry_id, bridge, const.DOMAIN)
+        entities: list = []
+
+        await sensor_module.async_setup_entry(
+            hass,
+            entry,
+            lambda new_entities: entities.extend(new_entities),
+        )
+
+        self.assertEqual(len(entities), 1)
+        entries_sensor = entities[0]
+        attrs = entries_sensor.extra_state_attributes
+        self.assertEqual(attrs["log_entry_count"], 3)
+        self.assertEqual(attrs["latest_log_entry"], "2026-03-14 09:30 Door opened")
+        self.assertEqual(
+            attrs["log_entries"],
+            [
+                "2026-03-14 08:00 Door opened",
+                "2026-03-14 08:10 Door closed",
+                "2026-03-14 09:30 Door opened",
+            ],
+        )
+
     async def test_tracker_falls_back_to_named_sensor_when_only_boolean_state_exists(self) -> None:
         control = LoxoneControl(
             uuid="tracker-uuid",

@@ -33,11 +33,12 @@ If the button does not open the flow directly, use `Settings -> Devices & Servic
   - Intercom Gen2 action buttons (`Answer Call`, `Mute Microphone`, `Unmute Microphone`)
   - intercom history sensor based on `lastBellEvents` (latest event timestamp + recent image URLs)
   - Home Assistant bus events (`loxone_home_assistant_intercom_event`) for automation triggers
+- exposes access/keypad-style activity events as Home Assistant bus events (`loxone_home_assistant_access_event`) so automations can react to granted/denied attempts (for example wrong PIN)
 - exposes `AudioZone`/`AudioZoneV2`/`CentralAudioZone` as `media_player` with source selection, seek/progress, shuffle/repeat, TTS and event/command passthrough via `play_media`
 - exposes `PresenceDetector` as:
   - `binary_sensor` for presence/motion
   - `sensor` for illuminance (`lx`) and sound level (`dB`)
-- exposes `Tracker` as event/history sensors for log-like states
+- exposes `Tracker` as event/history sensors for log-like states (with `log_entry_count`, `latest_log_entry`, and `log_entries` attributes on event sensors such as `entries`)
 - exposes Miniserver Web Services diagnostics as hub-level sensors:
   - `dev/sys/numtasks` (system tasks)
   - `dev/sys/cpu` (CPU load)
@@ -276,11 +277,12 @@ logger:
     custom_components.loxone_home_assistant: debug
 ```
 
-## Intercom automation events
+## Automation events
 
 The integration fires Home Assistant bus events with type:
 
 - `loxone_home_assistant_intercom_event`
+- `loxone_home_assistant_access_event`
 
 Event payload includes:
 
@@ -291,10 +293,11 @@ Event payload includes:
 - `room`
 - `category`
 - `state_name`
-- `event` (for example `doorbell`, `call`, `proximity`, `light`)
+- `event` (for example `doorbell`, `call`, `proximity`, `light`, `access_denied`, `access_granted`, `access_activity`)
 - `value`
 
-Events are emitted on rising edges only (for example `0 -> 1`).
+Intercom events are emitted on rising edges only (for example `0 -> 1`).
+Access/keypad events are emitted on rising edges for boolean-like states and on value change for log/text-like states.
 
 ## Intercom live call scope
 

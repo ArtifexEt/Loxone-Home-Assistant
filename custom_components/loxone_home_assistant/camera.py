@@ -41,6 +41,9 @@ from .entity import LoxoneEntity, first_matching_state_name, normalize_state_nam
 from .intercom import (
     intercom_address_state_name,
     intercom_history_state_name,
+    intercom_synthetic_history_urls,
+    intercom_synthetic_snapshot_urls,
+    intercom_synthetic_stream_urls,
     is_intercom_control,
     resolve_intercom_http_url,
 )
@@ -163,6 +166,8 @@ _TEXT_ERROR_HINTS = (
     "not found",
 )
 _BINARY_IMAGE_CONTENT_TYPES = {"application/octet-stream", "binary/octet-stream"}
+_MJPEG_MAX_SCAN_BYTES = 4 * 1024 * 1024
+_MJPEG_CHUNK_SIZE = 16 * 1024
 
 
 async def async_setup_entry(
@@ -241,7 +246,11 @@ class LoxoneIntercomCameraEntity(LoxoneEntity, Camera):
                         if response.status == 401 and request_auth is not None:
                             continue
                         response.raise_for_status()
-                        payload = await response.read()
+                        content_type = _response_content_type(response)
+                        if content_type == "multipart/x-mixed-replace":
+                            payload = await _extract_first_mjpeg_frame(response)
+                        else:
+                            payload = await response.read()
                         if _is_image_payload(response, payload):
                             return payload
                         _LOGGER.debug(
@@ -323,13 +332,21 @@ class LoxoneIntercomCameraEntity(LoxoneEntity, Camera):
             )
             if from_secured_details is not None:
                 return from_secured_details
-            return _resolve_url_from_payload_with_key_hints(
+            from_secured_payload = _resolve_url_from_payload_with_key_hints(
                 self.bridge,
                 self.control,
                 self._secured_details,
                 key_hints=STREAM_KEY_HINTS,
                 address_value=address_value,
             )
+            if from_secured_payload is not None:
+                return from_secured_payload
+        for synthetic_url in intercom_synthetic_stream_urls(
+            self.bridge,
+            self.control,
+            address_value=address_value,
+        ):
+            return synthetic_url
         return None
 
     def _snapshot_url(self) -> str | None:
@@ -389,13 +406,21 @@ class LoxoneIntercomCameraEntity(LoxoneEntity, Camera):
             )
             if from_secured_details is not None:
                 return from_secured_details
-            return _resolve_url_from_payload_with_key_hints(
+            from_secured_payload = _resolve_url_from_payload_with_key_hints(
                 self.bridge,
                 self.control,
                 self._secured_details,
                 key_hints=SNAPSHOT_KEY_HINTS,
                 address_value=address_value,
             )
+            if from_secured_payload is not None:
+                return from_secured_payload
+        for synthetic_url in intercom_synthetic_snapshot_urls(
+            self.bridge,
+            self.control,
+            address_value=address_value,
+        ):
+            return synthetic_url
         return None
 
     def _last_bell_events_url(self) -> str | None:
@@ -434,7 +459,7 @@ class LoxoneIntercomCameraEntity(LoxoneEntity, Camera):
         )
         if from_detail_payload is not None:
             return from_detail_payload
-        return _resolve_url_from_intercom_state_payloads(
+        from_dynamic_states = _resolve_url_from_intercom_state_payloads(
             self.bridge,
             self.control,
             self._dynamic_detail_state_names,
@@ -442,6 +467,15 @@ class LoxoneIntercomCameraEntity(LoxoneEntity, Camera):
             key_hints=HISTORY_KEY_HINTS,
             address_value=address_value,
         )
+        if from_dynamic_states is not None:
+            return from_dynamic_states
+        for synthetic_url in intercom_synthetic_history_urls(
+            self.bridge,
+            self.control,
+            address_value=address_value,
+        ):
+            return synthetic_url
+        return None
 
     def _selected_history_image_url(self, *, address_value: Any = None) -> str | None:
         selected_images = getattr(self.bridge, "_intercom_selected_history_images", None)
@@ -765,6 +799,8 @@ def _is_image_payload(response: Any, payload: bytes) -> bool:
     content_type = _response_content_type(response)
     if content_type is None:
         return _looks_like_image_bytes(payload)
+    if content_type == "multipart/x-mixed-replace":
+        return _looks_like_image_bytes(payload)
     if content_type.startswith("image/"):
         return not _looks_like_text_error(payload)
     if content_type in _BINARY_IMAGE_CONTENT_TYPES:
@@ -819,3 +855,37 @@ def _looks_like_text_error(payload: bytes) -> bool:
 def _payload_preview(payload: bytes) -> str:
     sample = payload[:120]
     return sample.decode("utf-8", errors="replace").replace("\n", " ").strip()
+
+
+async def _extract_first_mjpeg_frame(response: Any) -> bytes:
+    content = getattr(response, "content", None)
+    if content is None:
+        payload = await response.read()
+        return _extract_jpeg_from_bytes(payload) or b""
+
+    buffer = bytearray()
+    try:
+        async for chunk in content.iter_chunked(_MJPEG_CHUNK_SIZE):
+            if not chunk:
+                continue
+            buffer.extend(chunk)
+            frame = _extract_jpeg_from_bytes(buffer)
+            if frame is not None:
+                return frame
+            if len(buffer) >= _MJPEG_MAX_SCAN_BYTES:
+                break
+    except Exception:  # noqa: BLE001
+        return b""
+
+    return _extract_jpeg_from_bytes(buffer) or b""
+
+
+def _extract_jpeg_from_bytes(payload: bytes | bytearray) -> bytes | None:
+    start = payload.find(b"\xff\xd8")
+    if start < 0:
+        return None
+    end = payload.find(b"\xff\xd9", start + 2)
+    if end < 0:
+        return None
+    frame = payload[start : end + 2]
+    return bytes(frame) if frame else None

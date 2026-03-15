@@ -35,9 +35,9 @@ from .sensor import (
     _dynamic_intercom_history_state_names,
     _extract_intercom_events,
     _has_intercom_history_detail,
+    _intercom_history_url_candidates,
     _intercom_history_payload_from_state,
     _is_intercom_video_settings_payload,
-    _resolve_intercom_history_url,
 )
 
 OFF_MOOD_IDS = {0, 778}
@@ -259,23 +259,27 @@ class LoxoneIntercomHistorySelectEntity(LoxoneEntity, SelectEntity):
                 break
 
         if not normalized_events:
-            events_url = _resolve_intercom_history_url(
+            self._events_url = None
+            for events_url in _intercom_history_url_candidates(
                 self.bridge,
                 self.control,
                 self._history_state_name,
                 address_value,
                 dynamic_state_names=self._dynamic_history_state_names,
-            )
-            self._events_url = events_url
-            if events_url is not None:
+            ):
                 payload = await _async_fetch_json(self.bridge, events_url)
-                if payload is not None:
-                    normalized_events = _extract_intercom_events(
-                        payload,
-                        self.bridge,
-                        self.control,
-                        address_value,
-                    )
+                if payload is None:
+                    continue
+                normalized_events = _extract_intercom_events(
+                    payload,
+                    self.bridge,
+                    self.control,
+                    address_value,
+                )
+                if not normalized_events:
+                    continue
+                self._events_url = events_url
+                break
 
         options, option_to_image_url = _build_intercom_history_options(normalized_events)
         self._attr_options = options

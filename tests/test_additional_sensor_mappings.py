@@ -263,6 +263,38 @@ class AdditionalSensorMappingsTests(unittest.IsolatedAsyncioTestCase):
             sensor_module.SensorStateClass.TOTAL_INCREASING,
         )
 
+    async def test_handled_cover_control_does_not_create_access_state_sensors(self) -> None:
+        control = LoxoneControl(
+            uuid="cover-uuid",
+            uuid_action="cover-action",
+            name="Zaluzja",
+            type="Jalousie",
+            states={
+                "position": "state-position",
+                "deviceState": "state-device-state",
+                "autoState": "state-auto-state",
+            },
+        )
+        bridge = _FakeBridge(
+            [control],
+            {
+                "state-position": 0.5,
+                "state-device-state": 0,
+                "state-auto-state": 1,
+            },
+        )
+        entry = _FakeConfigEntry("entry-1")
+        hass = _FakeHass(entry.entry_id, bridge, const.DOMAIN)
+        entities: list = []
+
+        await sensor_module.async_setup_entry(
+            hass,
+            entry,
+            lambda new_entities: entities.extend(new_entities),
+        )
+
+        self.assertEqual(entities, [])
+
     async def test_primary_sensor_actual_energy_state_is_measurement(self) -> None:
         control = LoxoneControl(
             uuid="energy-actual-uuid",

@@ -191,7 +191,43 @@ class BridgeSystemStatsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(third["cpu"], 55.0)
         self.assertEqual(len(calls), 8)
 
-    async def test_send_loxone_command_wraps_invalid_json_as_loxone_error(self) -> None:
+    async def test_send_loxone_command_accepts_plain_scalar_json_responses(self) -> None:
+        bridge = bridge_module.LoxoneBridge.__new__(bridge_module.LoxoneBridge)
+
+        async def fake_send_text(command: str, *, ensure_connected: bool = True) -> str:
+            del command, ensure_connected
+            return "0"
+
+        bridge._send_text_command = fake_send_text
+
+        response = await bridge_module.LoxoneBridge._send_loxone_command(
+            bridge,
+            "dev/sys/cpu",
+            ensure_connected=False,
+        )
+        self.assertEqual(response["code"], 200)
+        self.assertEqual(response["control"], "dev/sys/cpu")
+        self.assertEqual(response["value"], 0)
+
+    async def test_send_loxone_command_accepts_non_ll_json_payloads(self) -> None:
+        bridge = bridge_module.LoxoneBridge.__new__(bridge_module.LoxoneBridge)
+
+        async def fake_send_text(command: str, *, ensure_connected: bool = True) -> str:
+            del command, ensure_connected
+            return '{"controls":{"abc":1}}'
+
+        bridge._send_text_command = fake_send_text
+
+        response = await bridge_module.LoxoneBridge._send_loxone_command(
+            bridge,
+            "data/LoxAPP3.json",
+            ensure_connected=False,
+        )
+        self.assertEqual(response["code"], 200)
+        self.assertEqual(response["control"], "data/LoxAPP3.json")
+        self.assertEqual(response["value"], {"controls": {"abc": 1}})
+
+    async def test_send_loxone_command_rejects_empty_responses(self) -> None:
         bridge = bridge_module.LoxoneBridge.__new__(bridge_module.LoxoneBridge)
 
         async def fake_send_text(command: str, *, ensure_connected: bool = True) -> str:

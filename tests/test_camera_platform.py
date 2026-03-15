@@ -111,6 +111,7 @@ class _FakeResponse:
     def __init__(self, status: int, payload: bytes, content_type: str | None = "image/jpeg") -> None:
         self.status = status
         self._payload = payload
+        self.content = _FakeStreamContent(payload)
         self.headers = {}
         if content_type is not None:
             self.headers["Content-Type"] = content_type
@@ -127,6 +128,15 @@ class _FakeResponse:
 
     async def read(self) -> bytes:
         return self._payload
+
+
+class _FakeStreamContent:
+    def __init__(self, payload: bytes) -> None:
+        self._payload = payload
+
+    async def iter_chunked(self, chunk_size: int):
+        for index in range(0, len(self._payload), chunk_size):
+            yield self._payload[index : index + chunk_size]
 
 
 class _FakeSession:
@@ -435,6 +445,48 @@ class CameraPlatformTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
+    async def test_camera_extracts_first_jpeg_frame_from_mjpeg_stream(self) -> None:
+        control = LoxoneControl(
+            uuid="intercom-v2-uuid",
+            uuid_action="intercom-v2-action",
+            name="Brama",
+            type="IntercomV2",
+            states={},
+            details={
+                "videoInfo": {
+                    "streamUrl": "/dev/stream.mjpg",
+                }
+            },
+        )
+        expected_stream_url = "https://mini.local/dev/stream.mjpg"
+        frame = b"\xff\xd8\xff\xe0JPEG-FRAME\xff\xd9"
+        mjpeg_payload = (
+            b"--frameboundary\r\n"
+            b"Content-Type: image/jpeg\r\n\r\n"
+            + frame
+            + b"\r\n--frameboundary--\r\n"
+        )
+        session = _FakeSession(
+            {
+                (
+                    expected_stream_url,
+                    True,
+                ): (200, mjpeg_payload, "multipart/x-mixed-replace; boundary=frameboundary"),
+            }
+        )
+        bridge = _FakeBridge([control], {}, session)
+        entity = LoxoneIntercomCameraEntity(bridge, control)
+
+        image = await entity.async_camera_image()
+
+        self.assertEqual(image, frame)
+        self.assertEqual(
+            session.calls,
+            [
+                (expected_stream_url, True),
+            ],
+        )
+
     async def test_intercom_v2_video_settings_state_uses_intercom_address_host(self) -> None:
         control = LoxoneControl(
             uuid="intercom-v2-uuid",
@@ -699,6 +751,34 @@ class CameraPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             bridge.action_calls,
             [("door-controller-action", "securedDetails")],
+        )
+
+    async def test_intercom_falls_back_to_synthetic_stream_url_from_serial(self) -> None:
+        control = LoxoneControl(
+            uuid="intercom-uuid",
+            uuid_action="intercom-action",
+            name="Furtka",
+            type="IntercomV2",
+            states={
+                "bell": "state-bell",
+            },
+            details={
+                "serialNr": "504F94E0A19D",
+            },
+        )
+        session = _FakeSession()
+        bridge = _FakeBridge(
+            [control],
+            {
+                "state-bell": 0,
+            },
+            session,
+        )
+        entity = LoxoneIntercomCameraEntity(bridge, control)
+
+        self.assertEqual(
+            await entity.stream_source(),
+            "http://ice0a19d/mjpg/video.mjpg",
         )
 
 

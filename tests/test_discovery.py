@@ -80,6 +80,22 @@ def _install_homeassistant_stubs() -> None:
     helpers.__path__ = []
     sys.modules["homeassistant.helpers"] = helpers
 
+    device_registry = types.ModuleType("homeassistant.helpers.device_registry")
+
+    class DeviceInfo(dict):
+        pass
+
+    device_registry.DeviceInfo = DeviceInfo
+    sys.modules["homeassistant.helpers.device_registry"] = device_registry
+
+    entity = types.ModuleType("homeassistant.helpers.entity")
+
+    class Entity:
+        pass
+
+    entity.Entity = Entity
+    sys.modules["homeassistant.helpers.entity"] = entity
+
     aiohttp_client = types.ModuleType("homeassistant.helpers.aiohttp_client")
 
     def async_get_clientsession(_hass, verify_ssl=True):
@@ -493,6 +509,50 @@ class BridgeTextStateUpdateTests(unittest.TestCase):
         self.assertEqual(fired_events[0][0], bridge.EVENT_INTERCOM)
         self.assertEqual(fired_events[0][1]["event"], "doorbell")
         self.assertEqual(fired_events[0][1]["uuid_action"], "intercom-action")
+
+    def test_repeated_access_denied_updates_fire_hass_bus_events(self) -> None:
+        candidate = self._new_bridge()
+        state_uuid = "12345678-1234-5678-1234-567812345679"
+        access_control = LoxoneControl(
+            uuid="nfc-uuid",
+            uuid_action="nfc-action",
+            name="Front Keypad",
+            type="NfcCodeTouch",
+            states={"wrongCode": state_uuid},
+        )
+        candidate.structure = types.SimpleNamespace(
+            states={
+                state_uuid: types.SimpleNamespace(
+                    control_uuid_action="nfc-action",
+                    state_name="wrongCode",
+                )
+            },
+            controls_by_action={"nfc-action": access_control},
+        )
+        candidate.serial = "1234567890"
+        fired_events: list[tuple[str, dict]] = []
+        candidate.hass = types.SimpleNamespace(
+            bus=types.SimpleNamespace(
+                async_fire=lambda event_type, data: fired_events.append((event_type, data))
+            )
+        )
+
+        candidate._deliver_text(
+            '{"LL":{"control":"dev/sps/io/12345678-1234-5678-1234-567812345679",'
+            '"value":"Wrong code"}}'
+        )
+        candidate._deliver_text(
+            '{"LL":{"control":"dev/sps/io/12345678-1234-5678-1234-567812345679",'
+            '"value":"Wrong code"}}'
+        )
+
+        self.assertEqual(len(fired_events), 2)
+        self.assertEqual(fired_events[0][0], bridge.EVENT_ACCESS)
+        self.assertEqual(fired_events[0][1]["event"], "access_denied")
+        self.assertEqual(fired_events[0][1]["uuid_action"], "nfc-action")
+        self.assertEqual(fired_events[1][0], bridge.EVENT_ACCESS)
+        self.assertEqual(fired_events[1][1]["event"], "access_denied")
+
 
 
 if __name__ == "__main__":

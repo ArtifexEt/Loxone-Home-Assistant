@@ -26,6 +26,9 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .const import (
+    ACCESS_DENIED_STATE_CANDIDATES,
+    ACCESS_GRANTED_STATE_CANDIDATES,
+    ACCESS_TYPE_HINTS,
     APP_PERMISSION,
     CLIENT_INFO,
     CONF_CLIENT_UUID,
@@ -43,6 +46,7 @@ from .const import (
     DEFAULT_SCAN_TIMEOUT,
     DEFAULT_USE_LOXONE_ICONS,
     DEFAULT_VERIFY_SSL,
+    EVENT_ACCESS,
     EVENT_INTERCOM,
     WEB_PERMISSION,
 )
@@ -104,6 +108,69 @@ _VERSION_KEYS = (
     "version",
     "swVersion",
     "miniserverVersion",
+)
+ACCESS_TYPE_HINT_KEYS = tuple(hint.casefold() for hint in ACCESS_TYPE_HINTS)
+ACCESS_EVENT_DETAIL_HINTS = (
+    "code",
+    "tag",
+    "user",
+    "auth",
+    "history",
+    "event",
+    "last",
+    "nfc",
+    "keypad",
+)
+ACCESS_DENIED_EVENT_HINTS = (
+    "denied",
+    "wrong",
+    "invalid",
+    "error",
+    "fail",
+    "rejected",
+)
+ACCESS_GRANTED_EVENT_HINTS = (
+    "granted",
+    "access",
+    "success",
+    "valid",
+    "ok",
+    "accepted",
+)
+ACCESS_DENIED_VALUE_HINTS = (
+    "accessdenied",
+    "wrongcode",
+    "invalidcode",
+    "codeerror",
+    "denied",
+    "wrong",
+    "invalid",
+    "error",
+    "fail",
+    "rejected",
+    "unauthorized",
+    "notallowed",
+    "incorrect",
+    "badcode",
+    "falsch",
+    "niepopraw",
+    "bled",
+    "odrzucon",
+)
+ACCESS_GRANTED_VALUE_HINTS = (
+    "accessgranted",
+    "codesuccess",
+    "granted",
+    "success",
+    "accepted",
+    "validcode",
+    "correctcode",
+    "authorized",
+    "allowed",
+    "unlock",
+    "opened",
+    "otwart",
+    "popraw",
 )
 SYSTEM_STATS_COMMANDS: dict[str, str] = {
     "numtasks": "dev/sys/numtasks",
@@ -570,20 +637,7 @@ class LoxoneBridge:
         self, command: str, *, ensure_connected: bool = True
     ) -> dict[str, Any]:
         raw = await self._send_text_command(command, ensure_connected=ensure_connected)
-        payload = _deserialize_json(raw)
-        root = _ensure_mapping(payload.get("LL"))
-        code = int(root.get("Code") or root.get("code") or 0)
-        if code == 401:
-            raise LoxoneAuthenticationError("Authentication failed.")
-        if code and code >= 400:
-            raise LoxoneConnectionError(
-                f"Loxone command failed with code {code}."
-            )
-        return {
-            "code": code,
-            "control": root.get("control"),
-            "value": deserialize_value(root.get("value")),
-        }
+        return _parse_loxone_command_payload(raw, command)
 
     async def _send_text_command(
         self, command: str, *, ensure_connected: bool = True
@@ -851,6 +905,7 @@ class LoxoneBridge:
         }
         self.state_values.update(normalized)
         self._emit_intercom_events(normalized, previous_values)
+        self._emit_access_events(normalized, previous_values)
         self._notify_listeners(set(normalized))
 
     def _emit_intercom_events(
@@ -896,6 +951,55 @@ class LoxoneBridge:
             }
             fire_event(EVENT_INTERCOM, event_data)
 
+    def _emit_access_events(
+        self,
+        changed: Mapping[str, Any],
+        previous_values: Mapping[str, Any],
+    ) -> None:
+        structure = getattr(self, "structure", None)
+        if structure is None:
+            return
+
+        hass = getattr(self, "hass", None)
+        bus = getattr(hass, "bus", None)
+        fire_event = getattr(bus, "async_fire", None)
+        if fire_event is None:
+            return
+
+        for state_uuid, new_value in changed.items():
+            state_ref = structure.states.get(state_uuid)
+            if state_ref is None:
+                continue
+            control = self.controls_by_action.get(state_ref.control_uuid_action)
+            if control is None or not _is_access_event_control(control):
+                continue
+
+            event_name = _access_event_name_for_state_and_value(
+                control,
+                state_ref.state_name,
+                new_value,
+            )
+            if event_name is None:
+                continue
+
+            previous_value = previous_values.get(state_uuid)
+            if not _state_triggered_or_changed(previous_value, new_value):
+                if not _should_force_access_event(event_name, new_value):
+                    continue
+
+            event_data: dict[str, Any] = {
+                "serial": self.serial,
+                "uuid_action": control.uuid_action,
+                "control_name": control.display_name,
+                "control_type": control.type,
+                "room": control.room_name,
+                "category": control.category_name,
+                "state_name": state_ref.state_name,
+                "event": event_name,
+                "value": new_value,
+            }
+            fire_event(EVENT_ACCESS, event_data)
+
     @callback
     def _notify_listeners(self, changed_uuids: set[str] | None = None) -> None:
         for callback_fn, watched in list(self._listeners.items()):
@@ -928,6 +1032,152 @@ def _intercom_event_name_for_state(control: LoxoneControl, state_name: str) -> s
     if "light" in normalized_state_name or "led" in normalized_state_name:
         return "light"
     return None
+
+
+def _is_access_event_control(control: LoxoneControl) -> bool:
+    normalized_type = control.type.casefold()
+    normalized_name = control.name.casefold()
+    if any(hint in normalized_type or hint in normalized_name for hint in ACCESS_TYPE_HINT_KEYS):
+        return True
+
+    normalized_states = {_normalize_state_name(state_name) for state_name in control.states}
+    if any(
+        _state_name_matches_candidate_set(state_name, ACCESS_GRANTED_STATE_CANDIDATES)
+        for state_name in normalized_states
+    ):
+        return True
+    if any(
+        _state_name_matches_candidate_set(state_name, ACCESS_DENIED_STATE_CANDIDATES)
+        for state_name in normalized_states
+    ):
+        return True
+    return any(
+        any(hint in state_name for hint in ACCESS_EVENT_DETAIL_HINTS)
+        for state_name in normalized_states
+    )
+
+
+def _access_event_name_for_state(control: LoxoneControl, state_name: str) -> str | None:
+    del control
+    normalized_state_name = _normalize_state_name(state_name)
+    event_name: str | None = None
+    if _state_name_matches_candidate_set(normalized_state_name, ACCESS_DENIED_STATE_CANDIDATES):
+        event_name = "access_denied"
+    elif _state_name_matches_candidate_set(normalized_state_name, ACCESS_GRANTED_STATE_CANDIDATES):
+        event_name = "access_granted"
+    elif any(hint in normalized_state_name for hint in ACCESS_DENIED_EVENT_HINTS):
+        event_name = "access_denied"
+    elif any(hint in normalized_state_name for hint in ACCESS_GRANTED_EVENT_HINTS):
+        event_name = "access_granted"
+    elif any(hint in normalized_state_name for hint in ACCESS_EVENT_DETAIL_HINTS):
+        event_name = "access_activity"
+    return event_name
+
+
+def _access_event_name_for_state_and_value(
+    control: LoxoneControl,
+    state_name: str,
+    value: Any,
+) -> str | None:
+    event_name = _access_event_name_for_state(control, state_name)
+    inferred_from_value = _access_event_name_from_value(value)
+    if inferred_from_value is None:
+        return event_name
+    if event_name is None or event_name == "access_activity":
+        return inferred_from_value
+    if event_name != inferred_from_value:
+        return inferred_from_value
+    return event_name
+
+
+def _access_event_name_from_value(value: Any) -> str | None:
+    for normalized_text in _iter_access_value_text_tokens(value):
+        if any(hint and hint in normalized_text for hint in ACCESS_DENIED_VALUE_HINTS):
+            return "access_denied"
+        if any(hint and hint in normalized_text for hint in ACCESS_GRANTED_VALUE_HINTS):
+            return "access_granted"
+    return None
+
+
+def _iter_access_value_text_tokens(value: Any) -> Iterable[str]:
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return ()
+        return (_normalize_state_name(stripped),)
+    if isinstance(value, Mapping):
+        tokens: list[str] = []
+        preferred_keys = (
+            "value",
+            "state",
+            "event",
+            "result",
+            "reason",
+            "message",
+            "text",
+            "description",
+            "authType",
+            "keyPadAuthType",
+        )
+        seen_keys: set[str] = set()
+        for key in preferred_keys:
+            nested = value.get(key, value.get(key.casefold()))
+            seen_keys.add(key.casefold())
+            for token in _iter_access_value_text_tokens(nested):
+                if token:
+                    tokens.append(token)
+        for nested_key, nested_value in value.items():
+            if isinstance(nested_key, str) and nested_key.casefold() in seen_keys:
+                continue
+            for token in _iter_access_value_text_tokens(nested_value):
+                if token:
+                    tokens.append(token)
+        return tuple(tokens)
+    if isinstance(value, (list, tuple, set)):
+        tokens: list[str] = []
+        for item in value:
+            for token in _iter_access_value_text_tokens(item):
+                if token:
+                    tokens.append(token)
+        return tuple(tokens)
+    return (_normalize_state_name(str(value)),)
+
+
+def _state_name_matches_candidate_set(normalized_state_name: str, candidates: tuple[str, ...]) -> bool:
+    return any(normalized_state_name == _normalize_state_name(candidate) for candidate in candidates)
+
+
+def _state_triggered_or_changed(previous_value: Any, new_value: Any) -> bool:
+    current_bool = _coerce_event_bool(new_value)
+    if current_bool is not None:
+        previous_bool = _coerce_event_bool(previous_value)
+        if previous_bool is None:
+            return current_bool
+        return not previous_bool and current_bool
+
+    if new_value is None:
+        return False
+    return previous_value != new_value
+
+
+def _should_force_access_event(event_name: str, new_value: Any) -> bool:
+    if event_name not in {"access_denied", "access_granted"}:
+        return False
+
+    current_bool = _coerce_event_bool(new_value)
+    if current_bool is not None:
+        return current_bool
+
+    if isinstance(new_value, str):
+        return bool(new_value.strip())
+    if isinstance(new_value, (int, float)):
+        return new_value != 0
+    if isinstance(new_value, Mapping):
+        nested_value = new_value.get("value", new_value.get("state", new_value.get("active")))
+        return _should_force_access_event(event_name, nested_value)
+    return new_value is not None
 
 
 def _state_triggered(previous_value: Any, new_value: Any) -> bool:
@@ -1136,6 +1386,57 @@ def _deserialize_json(value: str) -> dict[str, Any]:
     if not isinstance(parsed, dict):
         raise LoxoneConnectionError("Expected a JSON object from the Miniserver.")
     return parsed
+
+
+def _parse_loxone_command_payload(raw: str, command: str) -> dict[str, Any]:
+    stripped = raw.strip()
+    if not stripped:
+        raise LoxoneConnectionError("Empty response received from the Miniserver.")
+
+    try:
+        parsed = json.loads(stripped)
+    except json.JSONDecodeError:
+        return {
+            "code": 200,
+            "control": command,
+            "value": deserialize_value(stripped),
+        }
+
+    if isinstance(parsed, Mapping):
+        root = parsed.get("LL")
+        if isinstance(root, Mapping):
+            code = _coerce_response_code(root.get("Code") or root.get("code") or 0)
+            if code == 401:
+                raise LoxoneAuthenticationError("Authentication failed.")
+            if code and code >= 400:
+                raise LoxoneConnectionError(
+                    f"Loxone command failed with code {code}."
+                )
+            return {
+                "code": code,
+                "control": root.get("control") or command,
+                "value": deserialize_value(root.get("value")),
+            }
+
+        _raise_for_ll_error_payload(parsed)
+        return {
+            "code": 200,
+            "control": command,
+            "value": deserialize_value(parsed),
+        }
+
+    return {
+        "code": 200,
+        "control": command,
+        "value": deserialize_value(parsed),
+    }
+
+
+def _coerce_response_code(value: Any) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _ensure_mapping(value: Any) -> Mapping[str, Any]:

@@ -45,7 +45,7 @@ POWER_SUPPLY_CHARGING_STATE_CANDIDATES = (
     "chargeActive",
     "batteryCharging",
 )
-LOCK_STATE_CANDIDATES = ("jLocked", "isLocked")
+LOCK_STATE_CANDIDATES = ("isLocked",)
 ACCESS_TYPE_HINT_KEYS = tuple(hint.casefold() for hint in ACCESS_TYPE_HINTS)
 LOCK_SOURCE_LABELS = {
     1: "visualization",
@@ -77,8 +77,6 @@ def _coerce_int(value: object) -> int | None:
 
 
 def _lock_entity_suffix(state_name: str) -> str:
-    if normalize_state_name(state_name) == normalize_state_name("jLocked"):
-        return "J Locked"
     return "Locked"
 
 

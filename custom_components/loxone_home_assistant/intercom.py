@@ -62,7 +62,7 @@ _NON_ALNUM_RE = re.compile(r"[^a-z0-9]+")
 
 _INTERCOM_COMMAND_SPECS: dict[str, tuple[int, int | None, tuple[int, ...]]] = {
     "answer": (0, 0, ()),
-    "playTts": (1, 1, (0,)),
+    "playTts": (1, 1, ()),
     "mute": (1, 1, (0,)),
     "setAnswers": (1, None, ()),
     "setallvideosettings": (4, 4, (0, 1, 2, 3)),
@@ -87,6 +87,24 @@ _INTERCOM_COMMAND_ALIASES.update(
 _INTERCOM_COMMAND_ALIAS_DEFAULT_ARGUMENTS: dict[str, tuple[str, ...]] = {
     "unmute": ("0",),
 }
+INTERCOM_SYNTHETIC_STREAM_PATHS = (
+    "/mjpg/video.mjpg",
+    "/mjpg/stream.mjpg",
+)
+INTERCOM_SYNTHETIC_SNAPSHOT_PATHS = (
+    "/jpg/image.jpg?size=3",
+    "/jpg/image.jpg?size=2",
+    "/jpg/image.jpg?size=1",
+    "/jpg/image.jpg",
+)
+INTERCOM_SYNTHETIC_HISTORY_PATHS = (
+    "/rest/events.json",
+    "/events.json",
+    "/history.json",
+    "/history/events.json",
+    "/api/events",
+    "/api/history",
+)
 
 
 def is_intercom_control(control: LoxoneControl) -> bool:
@@ -277,6 +295,48 @@ def resolve_intercom_http_url(
     return bridge.resolve_http_url(text)
 
 
+def intercom_synthetic_stream_urls(
+    bridge,
+    control: LoxoneControl,
+    *,
+    address_value: Any = None,
+) -> tuple[str, ...]:
+    return _intercom_synthetic_urls(
+        bridge,
+        control,
+        INTERCOM_SYNTHETIC_STREAM_PATHS,
+        address_value=address_value,
+    )
+
+
+def intercom_synthetic_snapshot_urls(
+    bridge,
+    control: LoxoneControl,
+    *,
+    address_value: Any = None,
+) -> tuple[str, ...]:
+    return _intercom_synthetic_urls(
+        bridge,
+        control,
+        INTERCOM_SYNTHETIC_SNAPSHOT_PATHS,
+        address_value=address_value,
+    )
+
+
+def intercom_synthetic_history_urls(
+    bridge,
+    control: LoxoneControl,
+    *,
+    address_value: Any = None,
+) -> tuple[str, ...]:
+    return _intercom_synthetic_urls(
+        bridge,
+        control,
+        INTERCOM_SYNTHETIC_HISTORY_PATHS,
+        address_value=address_value,
+    )
+
+
 def intercom_boolean_state_roles(control: LoxoneControl) -> dict[str, str]:
     """Return role labels for recognizable intercom boolean states."""
     roles: dict[str, str] = {}
@@ -360,6 +420,75 @@ def _intercom_base_url(bridge, control: LoxoneControl, *, address_value: Any = N
     if ip_from_arp is None:
         return None
     return f"{default_scheme}://{ip_from_arp}"
+
+
+def _intercom_synthetic_urls(
+    bridge,
+    control: LoxoneControl,
+    relative_paths: tuple[str, ...],
+    *,
+    address_value: Any = None,
+) -> tuple[str, ...]:
+    urls: list[str] = []
+    for base_url in _intercom_base_url_candidates(
+        bridge,
+        control,
+        address_value=address_value,
+    ):
+        for path in relative_paths:
+            absolute_url = _build_absolute_url(base_url, path)
+            if absolute_url not in urls:
+                urls.append(absolute_url)
+    return tuple(urls)
+
+
+def _intercom_base_url_candidates(
+    bridge,
+    control: LoxoneControl,
+    *,
+    address_value: Any = None,
+) -> tuple[str, ...]:
+    urls: list[str] = []
+
+    state_name = intercom_address_state_name(control)
+    runtime_address_value = address_value
+    if runtime_address_value is None and state_name is not None:
+        runtime_address_value = bridge.control_state(control, state_name)
+
+    for scheme in ("http", "https"):
+        candidate = _base_url_from_value(runtime_address_value, default_scheme=scheme)
+        if candidate is not None and candidate not in urls:
+            urls.append(candidate)
+
+    serial = _coerce_text(_mapping_get_case_insensitive(control.details, "serialNr"))
+    if serial is None:
+        return tuple(urls)
+
+    ip_from_arp = _lookup_arp_ipv4_for_serial(serial)
+    if ip_from_arp is not None:
+        for scheme in ("http", "https"):
+            candidate = f"{scheme}://{ip_from_arp}"
+            if candidate not in urls:
+                urls.append(candidate)
+
+    for hostname in _serial_hostname_candidates(serial):
+        for scheme in ("http", "https"):
+            candidate = f"{scheme}://{hostname}"
+            if candidate not in urls:
+                urls.append(candidate)
+
+    return tuple(urls)
+
+
+def _serial_hostname_candidates(serial: str) -> tuple[str, ...]:
+    normalized_serial = _normalize_hex_mac(serial)
+    if normalized_serial is None:
+        return ()
+    suffix = normalized_serial[-6:]
+    return (
+        f"ic{suffix}",
+        f"ic{suffix}.lan",
+    )
 
 
 def _base_url_from_value(value: Any, *, default_scheme: str) -> str | None:

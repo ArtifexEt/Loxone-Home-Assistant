@@ -201,7 +201,10 @@ class NfcCodeTouchSensorTests(unittest.IsolatedAsyncioTestCase):
             for entity in entities
             if hasattr(entity, "_state_name")
         }
-        self.assertEqual(set(by_state), set(control.states))
+        expected_states = set(control.states)
+        expected_states.remove("JLocked")
+        self.assertEqual(set(by_state), expected_states)
+        self.assertNotIn("JLocked", by_state)
         self.assertEqual(
             [entity for entity in entities if isinstance(entity, sensor_module.LoxoneDiagnosticSensor)],
             [],
@@ -229,7 +232,6 @@ class NfcCodeTouchSensorTests(unittest.IsolatedAsyncioTestCase):
             by_state["HistoryDate"].device_class,
             sensor_module.SensorDeviceClass.TIMESTAMP,
         )
-        self.assertIn('"locked":2', by_state["JLocked"].native_value)
 
     async def test_universal_events_state_is_added_for_supported_sensor_control(self) -> None:
         control = LoxoneControl(
