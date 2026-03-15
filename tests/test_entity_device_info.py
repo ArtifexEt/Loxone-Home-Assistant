@@ -90,6 +90,7 @@ class _FakeBridge:
     server_model = "Miniserver"
     software_version = "14.6.8.22"
     available = True
+    use_loxone_icons = True
 
     @staticmethod
     def resolve_http_url(value: str | None) -> str | None:
@@ -131,6 +132,10 @@ class _FakeBridgeB:
 
 class _FakeBridgeNoProxy(_FakeBridge):
     resolve_icon_proxy_url = None
+
+
+class _FakeBridgeIconsDisabled(_FakeBridge):
+    use_loxone_icons = False
 
 
 class EntityDeviceInfoTests(unittest.TestCase):
@@ -254,6 +259,22 @@ class EntityDeviceInfoTests(unittest.TestCase):
             "https://mini.local/IconsFilled/night-mode.svg",
         )
 
+    def test_entity_icon_is_disabled_when_option_is_off(self) -> None:
+        control = LoxoneControl(
+            uuid="icon-uuid",
+            uuid_action="icon-action",
+            name="Noc",
+            type="Switch",
+            icon="IconsFilled/night-mode.svg",
+        )
+
+        icon_entity = LoxoneEntity(_FakeBridgeIconsDisabled(), control)
+        attrs = icon_entity.extra_state_attributes
+
+        self.assertFalse(hasattr(icon_entity, "_attr_entity_picture"))
+        self.assertEqual(attrs["loxone_icon"], "IconsFilled/night-mode.svg")
+        self.assertNotIn("loxone_icon_url", attrs)
+
 
 class InferUnitTests(unittest.TestCase):
     """Verify unit inference from format strings and state names."""
@@ -318,6 +339,47 @@ class InferUnitTests(unittest.TestCase):
         )
 
         self.assertEqual(entity.infer_unit(control, "tempActual"), "°F")
+
+    def test_infer_unit_normalizes_plain_degree_temperature_states_to_celsius(self) -> None:
+        control = LoxoneControl(
+            uuid="climate-uuid",
+            uuid_action="climate-action",
+            name="Climate",
+            type="IRoomControllerV2",
+            states={"actual_outdoor_temp_7": "state-temp"},
+            details={"format": "%.1f°"},
+        )
+
+        self.assertEqual(entity.infer_unit(control, "actual_outdoor_temp_7"), "°C")
+
+    def test_infer_unit_normalizes_reversed_fahrenheit_symbol(self) -> None:
+        control = LoxoneControl(
+            uuid="climate-uuid",
+            uuid_action="climate-action",
+            name="Climate",
+            type="IRoomControllerV2",
+            states={"tempActual": "state-temp"},
+            details={"format": "%.1f f°"},
+        )
+
+        self.assertEqual(entity.infer_unit(control, "tempActual"), "°F")
+
+    def test_infer_unit_keeps_plain_degree_for_non_temperature_states(self) -> None:
+        control = self._control(details={"format": "%.1f°"})
+
+        self.assertEqual(entity.infer_unit(control, "value"), "°")
+
+    def test_infer_unit_does_not_treat_template_state_as_temperature(self) -> None:
+        control = LoxoneControl(
+            uuid="sensor-uuid",
+            uuid_action="sensor-action",
+            name="Sensor",
+            type="InfoOnlyAnalog",
+            states={"template": "state-template"},
+            details={"format": "%.1f°"},
+        )
+
+        self.assertEqual(entity.infer_unit(control, "template"), "°")
 
 
 if __name__ == "__main__":

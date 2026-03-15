@@ -7,7 +7,8 @@
         "data": {
           "enable_light_mood_select": "Expose LightController mood selector",
           "expose_controller_child_lights": "Expose individual lights inside LightController",
-          "auto_create_automations": "Automatically add suggested automations"
+          "auto_create_automations": "Automatically add suggested automations",
+          "use_loxone_icons": "Use Loxone icons as entity pictures"
         },
         "data_description": {
           "expose_controller_child_lights": "Warning: disabling this option removes those entities from Home Assistant (they may disappear from dashboards and automations)."
@@ -65,7 +66,8 @@
           "scan_timeout": "Discovery timeout (seconds)",
           "enable_light_mood_select": "Expose LightController mood selector",
           "expose_controller_child_lights": "Expose individual lights inside LightController",
-          "auto_create_automations": "Automatically add suggested automations"
+          "auto_create_automations": "Automatically add suggested automations",
+          "use_loxone_icons": "Use Loxone icons as entity pictures"
         },
         "data_description": {
           "expose_controller_child_lights": "Warning: disabling this option removes those entities from Home Assistant (they may disappear from dashboards and automations)."

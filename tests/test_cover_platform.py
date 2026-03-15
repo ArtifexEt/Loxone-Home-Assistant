@@ -271,6 +271,36 @@ class CoverPlatformTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
+    async def test_jalousie_icon_curtain_overrides_animation_based_blind_guess(self) -> None:
+        control = LoxoneControl(
+            uuid="curtain-icon-uuid",
+            uuid_action="curtain-icon-action",
+            name="Zacienienie",
+            type="Jalousie",
+            states={"position": "state-position"},
+            details={"animation": 0},
+            icon="IconsFilled/curtain-open.svg",
+        )
+        bridge = _FakeBridge([control], {"state-position": 50})
+        entity = cover_module.LoxoneCoverEntity(bridge, control)
+
+        self.assertEqual(entity.device_class, "curtain")
+
+    async def test_jalousie_icon_blind_detects_blind(self) -> None:
+        control = LoxoneControl(
+            uuid="blind-icon-uuid",
+            uuid_action="blind-icon-action",
+            name="Zacienienie",
+            type="Jalousie",
+            states={"position": "state-position"},
+            details={"animation": 1},
+            icon="IconsFilled/roller-shutter-1.svg",
+        )
+        bridge = _FakeBridge([control], {"state-position": 50})
+        entity = cover_module.LoxoneCoverEntity(bridge, control)
+
+        self.assertEqual(entity.device_class, "blind")
+
     async def test_jalousie_with_animation_zero_enables_tilt_commands(self) -> None:
         control = LoxoneControl(
             uuid="jalousie-details-uuid",
@@ -304,6 +334,20 @@ class CoverPlatformTests(unittest.IsolatedAsyncioTestCase):
             type="Jalousie",
             states={"position": "state-position"},
             details={"animation": 1},
+        )
+        bridge = _FakeBridge([control], {"state-position": 20})
+        entity = cover_module.LoxoneCoverEntity(bridge, control)
+
+        self.assertEqual(entity.device_class, "curtain")
+
+    async def test_jalousie_animation_zero_without_hints_defaults_to_curtain(self) -> None:
+        control = LoxoneControl(
+            uuid="animation-zero-uuid",
+            uuid_action="animation-zero-action",
+            name="Oslona",
+            type="Jalousie",
+            states={"position": "state-position"},
+            details={"animation": 0},
         )
         bridge = _FakeBridge([control], {"state-position": 20})
         entity = cover_module.LoxoneCoverEntity(bridge, control)

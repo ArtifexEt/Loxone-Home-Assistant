@@ -21,10 +21,13 @@ PRINTF_SPEC_RE = re.compile(
 HSV_RE = re.compile(r"hsv\(([-0-9.]+),([-0-9.]+),([-0-9.]+)\)", re.IGNORECASE)
 TEMP_RE = re.compile(r"(?:temp|lumitech)\(([-0-9.]+),([-0-9.]+)\)", re.IGNORECASE)
 NON_ALNUM_STATE_RE = re.compile(r"[^a-z0-9]+")
+STATE_NAME_CAMEL_BOUNDARY_RE = re.compile(r"([a-z0-9])([A-Z])")
+STATE_NAME_TOKEN_RE = re.compile(r"[A-Za-z0-9]+")
 NORMALIZED_STATE_NAME_UNITS = {
     NON_ALNUM_STATE_RE.sub("", state_name.casefold()): unit
     for state_name, unit in STATE_NAME_UNITS.items()
 }
+TEMPERATURE_STATE_NAME_HINTS = ("temp", "temperature", "setpoint")
 
 
 def miniserver_device_identifier(serial: str) -> tuple[str, str]:
@@ -157,6 +160,8 @@ def slugify_state_name(value: str) -> str:
 def control_icon_url(bridge: Any, control: LoxoneControl) -> str | None:
     if not control.icon:
         return None
+    if not bool(getattr(bridge, "use_loxone_icons", True)):
+        return None
     proxy_resolver = getattr(bridge, "resolve_icon_proxy_url", None)
     if callable(proxy_resolver):
         proxied = proxy_resolver(control.icon)
@@ -174,6 +179,32 @@ def control_icon_url(bridge: Any, control: LoxoneControl) -> str | None:
 def normalize_state_name(value: str) -> str:
     """Normalize one Loxone state key for tolerant matching."""
     return NON_ALNUM_STATE_RE.sub("", value.casefold())
+
+
+def _is_temperature_state_name(state_name: str | None) -> bool:
+    if state_name is None:
+        return False
+    tokenized = STATE_NAME_CAMEL_BOUNDARY_RE.sub(r"\1 \2", state_name)
+    tokens = {token.casefold() for token in STATE_NAME_TOKEN_RE.findall(tokenized)}
+    return any(fragment in tokens for fragment in TEMPERATURE_STATE_NAME_HINTS)
+
+
+def _canonical_inferred_unit(unit: str | None, state_name: str | None) -> str | None:
+    if unit is None:
+        return None
+
+    cleaned = unit.strip()
+    if not cleaned:
+        return None
+
+    collapsed = cleaned.replace(" ", "").casefold()
+    if collapsed in {"°f", "f°", "℉"}:
+        return "°F"
+    if collapsed in {"°c", "c°", "℃"}:
+        return "°C"
+    if collapsed == "°" and _is_temperature_state_name(state_name):
+        return "°C"
+    return cleaned
 
 
 NORMALIZED_BOOLEAN_STATE_NAMES = {
@@ -311,9 +342,9 @@ def infer_unit(control: LoxoneControl, state_name: str | None = None) -> str | N
                 continue
             match = FORMAT_UNIT_RE.search(cleaned)
             if match:
-                return match.group(1)
+                return _canonical_inferred_unit(match.group(1), state_name)
 
-    return mapped_unit
+    return _canonical_inferred_unit(mapped_unit, state_name)
 
 
 def brightness_from_percent(value: float | None) -> int | None:

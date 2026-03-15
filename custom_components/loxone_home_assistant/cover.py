@@ -44,6 +44,22 @@ BLIND_HINTS = {
     "shutter",
     "shutters",
 }
+CURTAIN_HINT_SUBSTRINGS = {
+    "curtain",
+    "drape",
+    "firan",
+    "zaslon",
+    "zacien",
+}
+BLIND_HINT_SUBSTRINGS = {
+    "blind",
+    "jalous",
+    "jaluz",
+    "rolet",
+    "roller",
+    "shutter",
+    "lamell",
+}
 
 
 async def async_setup_entry(
@@ -197,28 +213,38 @@ def _is_updownleftright_analog(control) -> bool:
 def _supports_jalousie_tilt(control) -> bool:
     if control.type != "Jalousie":
         return False
-    normalized_states = {state_name.strip().casefold() for state_name in control.states}
-    if any(
-        state_name in normalized_states
-        for state_name in ("shadeposition", "targetpositionlamelle")
-    ):
+    if _has_jalousie_tilt_states(control):
         return True
-    # In Loxone structure files animation=0 denotes venetian blinds with lamellas.
+    # In Loxone structure files animation=0 can denote venetian blinds with lamellas.
     return coerce_float(control.details.get("animation")) == 0.0
 
 
+def _has_jalousie_tilt_states(control) -> bool:
+    if control.type != "Jalousie":
+        return False
+    normalized_states = {state_name.strip().casefold() for state_name in control.states}
+    return any(
+        state_name in normalized_states
+        for state_name in ("shadeposition", "targetpositionlamelle")
+    )
+
+
 def _detect_jalousie_device_class(control):
-    if _supports_jalousie_tilt(control):
-        return _cover_device_class("BLIND")
+    # Loxone icon naming usually distinguishes textile curtains from blinds.
+    icon_based = _device_class_from_text(control.icon)
+    if icon_based is not None:
+        return icon_based
 
-    if _has_cover_hint(control, BLIND_HINTS):
-        return _cover_device_class("BLIND")
-
-    # For generic "shading" controls without lamellas we default to curtain-like
-    # semantics (open/close only) to better match textile shades.
-    if _has_cover_hint(control, CURTAIN_HINTS):
+    if _has_cover_hint(control, CURTAIN_HINTS, CURTAIN_HINT_SUBSTRINGS):
         return _cover_device_class("CURTAIN")
 
+    if _has_cover_hint(control, BLIND_HINTS, BLIND_HINT_SUBSTRINGS):
+        return _cover_device_class("BLIND")
+
+    if _has_jalousie_tilt_states(control):
+        return _cover_device_class("BLIND")
+
+    # For generic shading controls we default to curtain-like semantics.
     return _cover_device_class("CURTAIN")
 
 
@@ -239,25 +265,47 @@ def _normalize_cover_label(value: str | None) -> str:
     return " ".join(part for part in collapsed.split() if part)
 
 
-def _has_cover_hint(control, hints: set[str]) -> bool:
+def _device_class_from_text(value: str | None):
+    normalized = _normalize_cover_label(value)
+    if not normalized:
+        return None
+    compact = normalized.replace(" ", "")
+    curtain_match = _matches_hint(normalized, compact, CURTAIN_HINTS, CURTAIN_HINT_SUBSTRINGS)
+    blind_match = _matches_hint(normalized, compact, BLIND_HINTS, BLIND_HINT_SUBSTRINGS)
+    if curtain_match and not blind_match:
+        return _cover_device_class("CURTAIN")
+    if blind_match and not curtain_match:
+        return _cover_device_class("BLIND")
+    return None
+
+
+def _has_cover_hint(control, hints: set[str], substrings: set[str]) -> bool:
     candidates = (
         control.name,
         control.display_name,
         control.room_name,
         control.category_name,
-        control.icon,
     )
-    normalized_candidates = (
-        _normalize_cover_label(value)
-        for value in candidates
-    )
-    for normalized in normalized_candidates:
+    for value in candidates:
+        normalized = _normalize_cover_label(value)
         if not normalized:
             continue
-        words = set(normalized.split())
-        if words & hints:
+        compact = normalized.replace(" ", "")
+        if _matches_hint(normalized, compact, hints, substrings):
             return True
     return False
+
+
+def _matches_hint(
+    normalized_value: str,
+    compact_value: str,
+    hints: set[str],
+    substrings: set[str],
+) -> bool:
+    words = set(normalized_value.split())
+    if words & hints:
+        return True
+    return any(fragment in compact_value for fragment in substrings)
 
 
 def _clamp_percent(value: int | float) -> int:

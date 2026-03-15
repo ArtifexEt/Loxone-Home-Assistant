@@ -39,12 +39,14 @@ from .const import (
     CONF_SOFTWARE_VERSION,
     CONF_TOKEN,
     CONF_TOKEN_VALID_UNTIL,
+    CONF_USE_LOXONE_ICONS,
     CONF_USE_TLS,
     DATA_BRIDGES,
     DEFAULT_AUTO_CREATE_AUTOMATIONS,
     DEFAULT_PORT,
     DEFAULT_ENABLE_LIGHT_MOOD_SELECT,
     DEFAULT_EXPOSE_CONTROLLER_CHILD_LIGHTS,
+    DEFAULT_USE_LOXONE_ICONS,
     DEFAULT_SCAN_TIMEOUT,
     DEFAULT_VERIFY_SSL,
     DOMAIN,
@@ -71,6 +73,7 @@ class LoxoneCommunityConfigFlow(ConfigFlow, domain=DOMAIN):
             CONF_ENABLE_LIGHT_MOOD_SELECT: DEFAULT_ENABLE_LIGHT_MOOD_SELECT,
             CONF_EXPOSE_CONTROLLER_CHILD_LIGHTS: DEFAULT_EXPOSE_CONTROLLER_CHILD_LIGHTS,
             CONF_AUTO_CREATE_AUTOMATIONS: DEFAULT_AUTO_CREATE_AUTOMATIONS,
+            CONF_USE_LOXONE_ICONS: DEFAULT_USE_LOXONE_ICONS,
         }
 
     async def async_step_user(
@@ -92,6 +95,10 @@ class LoxoneCommunityConfigFlow(ConfigFlow, domain=DOMAIN):
                 CONF_AUTO_CREATE_AUTOMATIONS: _coerce_bool(
                     user_input.get(CONF_AUTO_CREATE_AUTOMATIONS),
                     DEFAULT_AUTO_CREATE_AUTOMATIONS,
+                ),
+                CONF_USE_LOXONE_ICONS: _coerce_bool(
+                    user_input.get(CONF_USE_LOXONE_ICONS),
+                    DEFAULT_USE_LOXONE_ICONS,
                 ),
             }
             return self._async_create_entry_from_pending()
@@ -204,6 +211,13 @@ class LoxoneCommunityConfigFlow(ConfigFlow, domain=DOMAIN):
                             DEFAULT_AUTO_CREATE_AUTOMATIONS,
                         ),
                     ): bool,
+                    vol.Required(
+                        CONF_USE_LOXONE_ICONS,
+                        default=self._setup_option_value(
+                            CONF_USE_LOXONE_ICONS,
+                            DEFAULT_USE_LOXONE_ICONS,
+                        ),
+                    ): bool,
                 }
             ),
         )
@@ -273,6 +287,10 @@ class LoxoneCommunityConfigFlow(ConfigFlow, domain=DOMAIN):
                 CONF_AUTO_CREATE_AUTOMATIONS: self._setup_option_value(
                     CONF_AUTO_CREATE_AUTOMATIONS,
                     DEFAULT_AUTO_CREATE_AUTOMATIONS,
+                ),
+                CONF_USE_LOXONE_ICONS: self._setup_option_value(
+                    CONF_USE_LOXONE_ICONS,
+                    DEFAULT_USE_LOXONE_ICONS,
                 ),
             },
         )
@@ -403,6 +421,10 @@ class LoxoneCommunityOptionsFlow(OptionsFlow):
             form_data.get(CONF_AUTO_CREATE_AUTOMATIONS),
             DEFAULT_AUTO_CREATE_AUTOMATIONS,
         )
+        use_loxone_icons_default = _coerce_bool(
+            form_data.get(CONF_USE_LOXONE_ICONS),
+            DEFAULT_USE_LOXONE_ICONS,
+        )
         serial = str(form_data.get(CONF_SERIAL) or "unknown")
         loxapp_version = str(form_data.get(CONF_LOXAPP_VERSION) or "unknown")
         current_api_version = _coerce_text(form_data.get(CONF_SOFTWARE_VERSION), "unknown")
@@ -441,6 +463,10 @@ class LoxoneCommunityOptionsFlow(OptionsFlow):
                     vol.Required(
                         CONF_AUTO_CREATE_AUTOMATIONS,
                         default=auto_create_automations_default,
+                    ): bool,
+                    vol.Required(
+                        CONF_USE_LOXONE_ICONS,
+                        default=use_loxone_icons_default,
                     ): bool,
                 }
             ),

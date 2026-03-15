@@ -170,6 +170,7 @@ After successful connection and validation, the final step asks for startup opti
 - mood selection entities for `LightControllerV2`
 - individual child light entities inside one `LightController`
 - optional automatic creation of suggested automations
+- optional Loxone icon pictures for entities
 
 ## Services
 

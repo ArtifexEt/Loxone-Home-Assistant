@@ -7,7 +7,8 @@
         "data": {
           "enable_light_mood_select": "Wystaw selektor nastroju LightController",
           "expose_controller_child_lights": "Wystaw indywidualne światła w LightController",
-          "auto_create_automations": "Automatycznie dodawaj sugerowane automatyzacje"
+          "auto_create_automations": "Automatycznie dodawaj sugerowane automatyzacje",
+          "use_loxone_icons": "Używaj ikon Loxone jako obrazków encji"
         },
         "data_description": {
           "expose_controller_child_lights": "Ostrzeżenie: wyłączenie tej opcji usuwa te encje z Home Assistant (mogą zniknąć z dashboardów i automatyzacji)."
@@ -65,7 +66,8 @@
           "scan_timeout": "Limit czasu wyszukiwania (sekundy)",
           "enable_light_mood_select": "Wystaw selektor nastroju LightController",
           "expose_controller_child_lights": "Wystaw indywidualne światła w LightController",
-          "auto_create_automations": "Automatycznie dodawaj sugerowane automatyzacje"
+          "auto_create_automations": "Automatycznie dodawaj sugerowane automatyzacje",
+          "use_loxone_icons": "Używaj ikon Loxone jako obrazków encji"
         },
         "data_description": {
           "expose_controller_child_lights": "Ostrzeżenie: wyłączenie tej opcji usuwa te encje z Home Assistant (mogą zniknąć z dashboardów i automatyzacji)."

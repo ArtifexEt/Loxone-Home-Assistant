@@ -186,7 +186,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     merged_data = {**entry.data, **entry.options}
     bridge = LoxoneBridge(hass, merged_data)
     await bridge.async_initialize()
-    hass.async_create_task(_async_prefetch_icons(hass, bridge))
+    if getattr(bridge, "use_loxone_icons", True):
+        hass.async_create_task(_async_prefetch_icons(hass, bridge))
 
     _async_register_miniserver_device(hass, entry, bridge)
 

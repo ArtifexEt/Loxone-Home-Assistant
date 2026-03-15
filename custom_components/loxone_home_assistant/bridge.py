@@ -36,10 +36,12 @@ from .const import (
     CONF_SOFTWARE_VERSION,
     CONF_TOKEN,
     CONF_TOKEN_VALID_UNTIL,
+    CONF_USE_LOXONE_ICONS,
     CONF_USE_TLS,
     DEFAULT_KEEPALIVE_SECONDS,
     DEFAULT_PORT,
     DEFAULT_SCAN_TIMEOUT,
+    DEFAULT_USE_LOXONE_ICONS,
     DEFAULT_VERIFY_SSL,
     EVENT_INTERCOM,
     WEB_PERMISSION,
@@ -165,6 +167,9 @@ class LoxoneBridge:
         self.password: str = data[CONF_PASSWORD]
         self.verify_ssl: bool = bool(data.get(CONF_VERIFY_SSL, DEFAULT_VERIFY_SSL))
         self.use_tls: bool = bool(data.get(CONF_USE_TLS, True))
+        self.use_loxone_icons: bool = bool(
+            data.get(CONF_USE_LOXONE_ICONS, DEFAULT_USE_LOXONE_ICONS)
+        )
         if not self.use_tls:
             raise LoxoneUnsupportedError(
                 "Legacy non-TLS Miniservers are intentionally not enabled in this integration."
@@ -291,6 +296,8 @@ class LoxoneBridge:
 
     def resolve_icon_proxy_url(self, value: str | None) -> str | None:
         """Resolve one Loxone icon path to a local Home Assistant proxy URL."""
+        if not self.use_loxone_icons:
+            return None
         return icon_proxy_url(self.serial, value)
 
     def state_value(self, state_uuid: str | None) -> Any:

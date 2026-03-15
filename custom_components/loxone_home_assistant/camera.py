@@ -22,12 +22,16 @@ except ImportError:  # pragma: no cover - fallback for lightweight test stubs
             self.password = password
 from homeassistant.components.camera import Camera
 try:
-    from homeassistant.components.camera import CameraEntityFeature
+    from homeassistant.components.camera import CameraEntityFeature as _CameraEntityFeature
+except ImportError:  # pragma: no cover - compatibility across HA versions
+    try:
+        from homeassistant.components.camera.const import CameraEntityFeature as _CameraEntityFeature
+    except ImportError:  # pragma: no cover - fallback for lightweight test stubs
+        _CameraEntityFeature = None
+try:
+    from homeassistant.components.camera import SUPPORT_STREAM as _SUPPORT_STREAM
 except ImportError:  # pragma: no cover - fallback for lightweight test stubs
-    class CameraEntityFeature:  # type: ignore[no-redef]
-        """Fallback camera features enum for test stubs."""
-
-        STREAM = 1
+    _SUPPORT_STREAM = 2
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -44,6 +48,8 @@ from .models import LoxoneControl
 from .runtime import entry_bridge
 
 _LOGGER = logging.getLogger(__name__)
+
+CAMERA_STREAM_FEATURE = getattr(_CameraEntityFeature, "STREAM", _SUPPORT_STREAM)
 
 STREAM_STATE_CANDIDATES = (
     "streamUrl",
@@ -146,6 +152,17 @@ INTERCOM_DYNAMIC_DETAIL_STATE_HINTS = (
 STREAM_KEY_HINTS = ("stream", "video", "mjpeg", "hls", "rtsp")
 SNAPSHOT_KEY_HINTS = ("image", "snapshot", "alert", "live", "photo", "thumb")
 HISTORY_KEY_HINTS = ("history", "event", "bell", "answer", "record")
+_TEXT_ERROR_HINTS = (
+    "internal server error",
+    "server error",
+    "bad gateway",
+    "gateway timeout",
+    "service unavailable",
+    "unauthorized",
+    "forbidden",
+    "not found",
+)
+_BINARY_IMAGE_CONTENT_TYPES = {"application/octet-stream", "binary/octet-stream"}
 
 
 async def async_setup_entry(
@@ -164,7 +181,7 @@ class LoxoneIntercomCameraEntity(LoxoneEntity, Camera):
     """Intercom camera entity exposing video stream and still image preview."""
 
     _attr_icon = "mdi:video-wireless"
-    _attr_supported_features = CameraEntityFeature.STREAM
+    _attr_supported_features = CAMERA_STREAM_FEATURE
 
     def __init__(self, bridge, control: LoxoneControl) -> None:
         Camera.__init__(self)
@@ -206,8 +223,10 @@ class LoxoneIntercomCameraEntity(LoxoneEntity, Camera):
         del width, height
 
         await self._ensure_secured_details_loaded()
-        image_url = self._snapshot_url() or self._stream_url()
-        if image_url is None:
+        snapshot_url = self._snapshot_url()
+        stream_url = self._stream_url()
+        image_urls = tuple(dict.fromkeys(url for url in (snapshot_url, stream_url) if url))
+        if not image_urls:
             return None
 
         session = getattr(self.bridge, "_session", None)
@@ -215,21 +234,41 @@ class LoxoneIntercomCameraEntity(LoxoneEntity, Camera):
             return None
 
         auth = BasicAuth(self.bridge.username, self.bridge.password)
-        for request_auth in (auth, None):
-            try:
-                async with session.get(image_url, auth=request_auth) as response:
-                    if response.status == 401 and request_auth is not None:
-                        continue
-                    response.raise_for_status()
-                    return await response.read()
-            except ClientError as err:
-                _LOGGER.debug(
-                    "Intercom preview request failed for %s (%s)",
-                    self.control.uuid_action,
-                    err,
-                )
-                if request_auth is None:
-                    return None
+        for image_url in image_urls:
+            for request_auth in (auth, None):
+                try:
+                    async with session.get(image_url, auth=request_auth) as response:
+                        if response.status == 401 and request_auth is not None:
+                            continue
+                        response.raise_for_status()
+                        payload = await response.read()
+                        if _is_image_payload(response, payload):
+                            return payload
+                        _LOGGER.debug(
+                            "Intercom preview returned non-image payload for %s from %s "
+                            "(status=%s, content_type=%s, preview=%r)",
+                            self.control.uuid_action,
+                            image_url,
+                            response.status,
+                            _response_content_type(response),
+                            _payload_preview(payload),
+                        )
+                except asyncio.CancelledError:
+                    raise
+                except ClientError as err:
+                    _LOGGER.debug(
+                        "Intercom preview request failed for %s from %s (%s)",
+                        self.control.uuid_action,
+                        image_url,
+                        err,
+                    )
+                except Exception as err:  # noqa: BLE001
+                    _LOGGER.debug(
+                        "Intercom preview request errored for %s from %s (%s)",
+                        self.control.uuid_action,
+                        image_url,
+                        err,
+                    )
         return None
 
     def _stream_url(self) -> str | None:
@@ -718,3 +757,65 @@ def _mapping_get_case_insensitive(mapping: Mapping[str, Any], key: str) -> Any:
         if isinstance(current_key, str) and normalize_state_name(current_key) == wanted:
             return value
     return None
+
+
+def _is_image_payload(response: Any, payload: bytes) -> bool:
+    if not payload:
+        return False
+    content_type = _response_content_type(response)
+    if content_type is None:
+        return _looks_like_image_bytes(payload)
+    if content_type.startswith("image/"):
+        return not _looks_like_text_error(payload)
+    if content_type in _BINARY_IMAGE_CONTENT_TYPES:
+        return _looks_like_image_bytes(payload)
+    return False
+
+
+def _response_content_type(response: Any) -> str | None:
+    headers = getattr(response, "headers", None)
+    if isinstance(headers, Mapping):
+        value = _mapping_get_case_insensitive(headers, "content-type")
+        if isinstance(value, str):
+            cleaned = value.split(";", 1)[0].strip().casefold()
+            if cleaned:
+                return cleaned
+
+    value = getattr(response, "content_type", None)
+    if isinstance(value, str):
+        cleaned = value.split(";", 1)[0].strip().casefold()
+        if cleaned:
+            return cleaned
+    return None
+
+
+def _looks_like_image_bytes(payload: bytes) -> bool:
+    if payload.startswith(b"\xff\xd8\xff"):  # JPEG
+        return True
+    if payload.startswith(b"\x89PNG\r\n\x1a\n"):  # PNG
+        return True
+    if payload.startswith((b"GIF87a", b"GIF89a")):  # GIF
+        return True
+    if payload.startswith(b"BM"):  # BMP
+        return True
+    if payload.startswith((b"II*\x00", b"MM\x00*")):  # TIFF
+        return True
+    if len(payload) >= 12 and payload[:4] == b"RIFF" and payload[8:12] == b"WEBP":
+        return True
+    return False
+
+
+def _looks_like_text_error(payload: bytes) -> bool:
+    sample = payload[:512]
+    try:
+        text = sample.decode("utf-8", errors="ignore").casefold()
+    except Exception:  # pragma: no cover - defensive fallback
+        return False
+    if not text:
+        return False
+    return any(hint in text for hint in _TEXT_ERROR_HINTS)
+
+
+def _payload_preview(payload: bytes) -> str:
+    sample = payload[:120]
+    return sample.decode("utf-8", errors="replace").replace("\n", " ").strip()

@@ -47,6 +47,7 @@ def _install_homeassistant_stubs() -> None:
             _ = self._webrtc_provider
 
     camera.Camera = Camera
+    camera.SUPPORT_STREAM = 2
 
     const = types.ModuleType("homeassistant.const")
 
@@ -107,9 +108,12 @@ def _install_homeassistant_stubs() -> None:
 
 
 class _FakeResponse:
-    def __init__(self, status: int, payload: bytes) -> None:
+    def __init__(self, status: int, payload: bytes, content_type: str | None = "image/jpeg") -> None:
         self.status = status
         self._payload = payload
+        self.headers = {}
+        if content_type is not None:
+            self.headers["Content-Type"] = content_type
 
     async def __aenter__(self):
         return self
@@ -126,15 +130,24 @@ class _FakeResponse:
 
 
 class _FakeSession:
-    def __init__(self, responses: dict[tuple[str, bool], tuple[int, bytes]] | None = None) -> None:
+    def __init__(
+        self,
+        responses: dict[tuple[str, bool], tuple[int, bytes] | tuple[int, bytes, str | None]]
+        | None = None,
+    ) -> None:
         self.responses = responses or {}
         self.calls: list[tuple[str, bool]] = []
 
     def get(self, url: str, auth=None):
         has_auth = auth is not None
         self.calls.append((url, has_auth))
-        status, payload = self.responses.get((url, has_auth), (200, b"default-image"))
-        return _FakeResponse(status, payload)
+        response_data = self.responses.get((url, has_auth), (200, b"default-image", "image/jpeg"))
+        if len(response_data) == 2:
+            status, payload = response_data
+            content_type = "image/jpeg"
+        else:
+            status, payload, content_type = response_data
+        return _FakeResponse(status, payload, content_type)
 
 
 class _FakeBridge:
@@ -219,6 +232,21 @@ LoxoneIntercomCameraEntity = camera_module.LoxoneIntercomCameraEntity
 
 class CameraPlatformTests(unittest.IsolatedAsyncioTestCase):
     """Verify Intercom camera preview mapping."""
+
+    async def test_camera_entity_sets_stream_supported_feature_flag(self) -> None:
+        control = LoxoneControl(
+            uuid="intercom-feature-uuid",
+            uuid_action="intercom-feature-action",
+            name="Intercom Feature",
+            type="Intercom",
+            states={},
+            details={"videoInfo": {"streamUrl": "/dev/stream.mjpg"}},
+        )
+        bridge = _FakeBridge([control], {}, _FakeSession())
+        entity = LoxoneIntercomCameraEntity(bridge, control)
+
+        self.assertEqual(camera_module.CAMERA_STREAM_FEATURE, 2)
+        self.assertEqual(entity._attr_supported_features, camera_module.CAMERA_STREAM_FEATURE)
 
     async def test_camera_entity_initializes_camera_base(self) -> None:
         control = LoxoneControl(
@@ -335,6 +363,77 @@ class CameraPlatformTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(image, b"alert-image")
         self.assertEqual(session.calls, [(expected_image_url, True)])
+
+    async def test_camera_retries_without_auth_when_snapshot_returns_text_error(self) -> None:
+        control = LoxoneControl(
+            uuid="intercom-v2-uuid",
+            uuid_action="intercom-v2-action",
+            name="Brama",
+            type="IntercomV2",
+            states={},
+            details={"videoInfo": {"liveImageUrl": "/dev/live.jpg"}},
+        )
+        expected_snapshot_url = "https://mini.local/dev/live.jpg"
+        session = _FakeSession(
+            {
+                (expected_snapshot_url, True): (200, b"Internal Server Error", "text/plain"),
+                (expected_snapshot_url, False): (200, b"snapshot-image", "image/jpeg"),
+            }
+        )
+        bridge = _FakeBridge([control], {}, session)
+        entity = LoxoneIntercomCameraEntity(bridge, control)
+
+        image = await entity.async_camera_image()
+
+        self.assertEqual(image, b"snapshot-image")
+        self.assertEqual(
+            session.calls,
+            [
+                (expected_snapshot_url, True),
+                (expected_snapshot_url, False),
+            ],
+        )
+
+    async def test_camera_falls_back_to_stream_when_snapshot_response_is_not_an_image(self) -> None:
+        control = LoxoneControl(
+            uuid="intercom-v2-uuid",
+            uuid_action="intercom-v2-action",
+            name="Brama",
+            type="IntercomV2",
+            states={},
+            details={
+                "videoInfo": {
+                    "streamUrl": "/dev/stream.mjpg",
+                    "liveImageUrl": "/dev/live.jpg",
+                }
+            },
+        )
+        expected_snapshot_url = "https://mini.local/dev/live.jpg"
+        expected_stream_url = "https://mini.local/dev/stream.mjpg"
+        session = _FakeSession(
+            {
+                (expected_snapshot_url, True): (200, b"Internal Server Error", "text/plain"),
+                (
+                    expected_snapshot_url,
+                    False,
+                ): (200, b'{"error":"Internal Server Error"}', "application/json"),
+                (expected_stream_url, True): (200, b"stream-image", "image/jpeg"),
+            }
+        )
+        bridge = _FakeBridge([control], {}, session)
+        entity = LoxoneIntercomCameraEntity(bridge, control)
+
+        image = await entity.async_camera_image()
+
+        self.assertEqual(image, b"stream-image")
+        self.assertEqual(
+            session.calls,
+            [
+                (expected_snapshot_url, True),
+                (expected_snapshot_url, False),
+                (expected_stream_url, True),
+            ],
+        )
 
     async def test_intercom_v2_video_settings_state_uses_intercom_address_host(self) -> None:
         control = LoxoneControl(
