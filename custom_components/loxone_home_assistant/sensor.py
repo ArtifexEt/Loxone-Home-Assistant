@@ -217,6 +217,9 @@ INTERCOM_EVENT_TIMESTAMP_KEY_CANDIDATES = (
     "ts",
     "time",
     "date",
+    "historyDate",
+    "historyTimestamp",
+    "eventDate",
     "datetime",
     "dateTime",
     "createdAt",
@@ -335,6 +338,7 @@ ACCESS_INFO_STATE_KEYS = {
 LOCK_STATE_KEYS = {
     normalize_state_name(value) for value in LOCK_STATE_CANDIDATES
 }
+J_LOCKED_STATE_KEY = normalize_state_name("jLocked")
 TIMESTAMP_STATE_KEYS = {
     normalize_state_name(value) for value in TIMESTAMP_STATE_CANDIDATES
 }
@@ -363,6 +367,10 @@ def _climate_state_key_candidates(state_name: str) -> tuple[str, ...]:
 
 def _state_name_matches_any_key(state_name: str, keys: set[str]) -> bool:
     return any(candidate in keys for candidate in _climate_state_key_candidates(state_name))
+
+
+def _is_j_locked_state_name(state_name: str) -> bool:
+    return normalize_state_name(state_name) == J_LOCKED_STATE_KEY
 
 
 def _is_humidity_state_name(state_name: str) -> bool:
@@ -401,7 +409,7 @@ def _select_climate_state_names(
     metrics_with_indexed_states: set[str] = set()
 
     for state_name in control.states:
-        if state_name in excluded_states:
+        if state_name in excluded_states or _is_j_locked_state_name(state_name):
             continue
         ordered_state_names.append(state_name)
 
@@ -709,7 +717,11 @@ def _pick_best_meter_state(
     best_state: str | None = None
     best_score = 0
     for state_name in control.states:
-        if state_name in excluded or state_is_boolean(control, state_name):
+        if (
+            state_name in excluded
+            or _is_j_locked_state_name(state_name)
+            or state_is_boolean(control, state_name)
+        ):
             continue
         score = score_fn(normalize_state_name(state_name))
         if score > best_score:
@@ -728,7 +740,7 @@ def _find_meter_total_state(control: LoxoneControl) -> str | None:
         return scored_state
 
     for candidate in control.states:
-        if state_is_boolean(control, candidate):
+        if _is_j_locked_state_name(candidate) or state_is_boolean(control, candidate):
             continue
         unit = infer_unit(control, candidate) or infer_unit(control, METER_STATE_KIND_TOTAL)
         if _is_energy_unit(unit):
@@ -772,6 +784,7 @@ def _find_presence_illuminance_state(
     for state_name in control.states:
         if (
             state_name in excluded
+            or _is_j_locked_state_name(state_name)
             or normalize_state_name(state_name) in PRESENCE_BINARY_STATE_KEYS
         ):
             continue
@@ -781,6 +794,7 @@ def _find_presence_illuminance_state(
     for state_name in control.states:
         if (
             state_name in excluded
+            or _is_j_locked_state_name(state_name)
             or normalize_state_name(state_name) in PRESENCE_BINARY_STATE_KEYS
         ):
             continue
@@ -806,6 +820,7 @@ def _find_presence_sound_state(
     for state_name in control.states:
         if (
             state_name in excluded
+            or _is_j_locked_state_name(state_name)
             or normalize_state_name(state_name) in PRESENCE_BINARY_STATE_KEYS
         ):
             continue
@@ -815,6 +830,7 @@ def _find_presence_sound_state(
     for state_name in control.states:
         if (
             state_name in excluded
+            or _is_j_locked_state_name(state_name)
             or normalize_state_name(state_name) in PRESENCE_BINARY_STATE_KEYS
         ):
             continue
@@ -869,7 +885,11 @@ def _find_meter_actual_state(control: LoxoneControl, excluded: set[str] | None =
         return scored_state
 
     for candidate in control.states:
-        if candidate in excluded or state_is_boolean(control, candidate):
+        if (
+            candidate in excluded
+            or _is_j_locked_state_name(candidate)
+            or state_is_boolean(control, candidate)
+        ):
             continue
         return candidate
     return None
@@ -904,7 +924,7 @@ def _build_meter_sensors(bridge, control: LoxoneControl) -> list["LoxoneMeterSen
         return entities
 
     for fallback_state in control.states:
-        if state_is_boolean(control, fallback_state):
+        if _is_j_locked_state_name(fallback_state) or state_is_boolean(control, fallback_state):
             continue
         fallback_kind = _meter_state_kind_from_name(fallback_state)
         if fallback_kind != METER_STATE_KIND_TOTAL:
@@ -920,7 +940,7 @@ def _build_meter_sensors(bridge, control: LoxoneControl) -> list["LoxoneMeterSen
 def _matching_universal_event_states(control: LoxoneControl) -> list[str]:
     event_states: list[str] = []
     for state_name in control.states:
-        if state_is_boolean(control, state_name):
+        if _is_j_locked_state_name(state_name) or state_is_boolean(control, state_name):
             continue
         if normalize_state_name(state_name) in UNIVERSAL_EVENT_STATE_KEYS:
             event_states.append(state_name)
@@ -947,7 +967,11 @@ def _build_tracker_sensors(
     excluded = excluded_state_names or set()
     entities: list[SensorEntity] = []
     for state_name in control.states:
-        if state_name in excluded or state_is_boolean(control, state_name):
+        if (
+            state_name in excluded
+            or _is_j_locked_state_name(state_name)
+            or state_is_boolean(control, state_name)
+        ):
             continue
         entities.append(LoxoneEventStateSensor(bridge, control, state_name))
 
@@ -955,7 +979,7 @@ def _build_tracker_sensors(
         return entities
 
     for state_name in control.states:
-        if state_name in excluded:
+        if state_name in excluded or _is_j_locked_state_name(state_name):
             continue
         return [LoxoneNamedStateSensor(bridge, control, state_name)]
 
@@ -991,7 +1015,11 @@ def _build_access_state_sensors(
     excluded = excluded_state_names or set()
     entities: list[LoxoneAccessStateSensor] = []
     for state_name in control.states:
-        if state_name in excluded or state_is_boolean(control, state_name):
+        if (
+            state_name in excluded
+            or _is_j_locked_state_name(state_name)
+            or state_is_boolean(control, state_name)
+        ):
             continue
         if normalize_state_name(state_name) in LOCK_STATE_KEYS:
             continue
@@ -1005,7 +1033,7 @@ def _first_non_boolean_state_name(
 ) -> str | None:
     excluded = excluded_state_names or set()
     for state_name in control.states:
-        if state_name in excluded:
+        if state_name in excluded or _is_j_locked_state_name(state_name):
             continue
         if state_is_boolean(control, state_name):
             continue
@@ -1083,7 +1111,11 @@ def _build_diagnostic_sensors(
     return [
         LoxoneDiagnosticSensor(bridge, control, state_name)
         for state_name in control.states
-        if state_name not in excluded and not state_is_boolean(control, state_name)
+        if (
+            state_name not in excluded
+            and not _is_j_locked_state_name(state_name)
+            and not state_is_boolean(control, state_name)
+        )
     ]
 
 
@@ -1762,6 +1794,11 @@ class LoxoneIntercomHistorySensor(LoxoneEntity, SensorEntity):
         super().__init__(bridge, control, "History")
         self._history_state_name = history_state_name
         self._dynamic_history_state_names = _dynamic_intercom_history_state_names(control)
+        self._timestamp_state_names = _intercom_history_timestamp_state_names(
+            control,
+            history_state_name,
+            self._dynamic_history_state_names,
+        )
         self._address_state_name = intercom_address_state_name(control)
         self._events_url: str | None = None
         self._latest_event_time: datetime | None = None
@@ -1778,6 +1815,7 @@ class LoxoneIntercomHistorySensor(LoxoneEntity, SensorEntity):
         for state_name in (
             self._history_state_name,
             self._address_state_name,
+            *self._timestamp_state_names,
             *self._dynamic_history_state_names,
         ):
             if state_name is None:
@@ -1820,6 +1858,8 @@ class LoxoneIntercomHistorySensor(LoxoneEntity, SensorEntity):
             if normalized_events:
                 self._events_url = None
                 self._apply_normalized_events(normalized_events)
+                if self._latest_event_time is None:
+                    self._latest_event_time = self._timestamp_fallback_value()
                 return
 
         for events_url in _intercom_history_url_candidates(
@@ -1847,10 +1887,12 @@ class LoxoneIntercomHistorySensor(LoxoneEntity, SensorEntity):
 
             self._events_url = events_url
             self._apply_normalized_events(normalized_events)
+            if self._latest_event_time is None:
+                self._latest_event_time = self._timestamp_fallback_value()
             return
 
         self._events_url = None
-        self._latest_event_time = None
+        self._latest_event_time = self._timestamp_fallback_value()
         self._latest_event_image_url = None
         self._event_count = 0
         self._recent_image_urls = []
@@ -1881,6 +1923,17 @@ class LoxoneIntercomHistorySensor(LoxoneEntity, SensorEntity):
             and isinstance(latest_event.get("image_url"), str)
             else None
         )
+
+    def _timestamp_fallback_value(self) -> datetime | None:
+        for state_name in self._timestamp_state_names:
+            raw_value = self.bridge.control_state(self.control, state_name)
+            timestamp = _timestamp_state_value(state_name, raw_value)
+            if timestamp is not None:
+                return timestamp
+            timestamp = _coerce_datetime(raw_value)
+            if timestamp is not None:
+                return timestamp
+        return None
 
     @property
     def native_value(self) -> datetime | None:
@@ -2101,6 +2154,29 @@ def _dynamic_intercom_history_state_names(control: LoxoneControl) -> tuple[str, 
             continue
         names.append(state_name)
         seen.add(state_name)
+
+    return tuple(names)
+
+
+def _intercom_history_timestamp_state_names(
+    control: LoxoneControl,
+    history_state_name: str | None,
+    dynamic_state_names: tuple[str, ...],
+) -> tuple[str, ...]:
+    names: list[str] = []
+    seen: set[str] = set()
+
+    for candidate in (
+        history_state_name,
+        *dynamic_state_names,
+        *control.states,
+    ):
+        if candidate is None or candidate in seen:
+            continue
+        normalized = normalize_state_name(candidate)
+        if normalized in TIMESTAMP_STATE_KEYS or normalized.endswith("timestamp"):
+            names.append(candidate)
+            seen.add(candidate)
 
     return tuple(names)
 

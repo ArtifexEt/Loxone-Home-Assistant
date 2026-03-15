@@ -374,6 +374,37 @@ class CameraPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(image, b"alert-image")
         self.assertEqual(session.calls, [(expected_image_url, True)])
 
+    async def test_stream_source_prefers_stream_url_over_static_video_state_image(self) -> None:
+        control = LoxoneControl(
+            uuid="intercom-v2-uuid",
+            uuid_action="intercom-v2-action",
+            name="Brama",
+            type="IntercomV2",
+            states={
+                "video": "state-video",
+                "address": "state-address",
+            },
+            details={
+                "videoInfo": {
+                    "streamUrl": "/rest/stream.mjpg",
+                }
+            },
+        )
+        bridge = _FakeBridge(
+            [control],
+            {
+                "state-video": "/rest/live.jpg",
+                "state-address": "198.51.100.70",
+            },
+            _FakeSession(),
+        )
+        entity = LoxoneIntercomCameraEntity(bridge, control)
+
+        self.assertEqual(
+            await entity.stream_source(),
+            "https://198.51.100.70/rest/stream.mjpg",
+        )
+
     async def test_camera_retries_without_auth_when_snapshot_returns_text_error(self) -> None:
         control = LoxoneControl(
             uuid="intercom-v2-uuid",

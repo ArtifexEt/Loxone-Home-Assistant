@@ -267,6 +267,34 @@ class TrackerSensorPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIsInstance(entity, sensor_module.LoxoneEventStateSensor)
         self.assertEqual(entity.native_value, 1.0)
 
+    async def test_tracker_skips_j_locked_state(self) -> None:
+        control = LoxoneControl(
+            uuid="tracker-uuid",
+            uuid_action="tracker-action",
+            name="Lock Tracker",
+            type="Tracker",
+            states={
+                "jLocked": "state-j-locked",
+            },
+        )
+        bridge = _FakeBridge(
+            [control],
+            {
+                "state-j-locked": {"locked": 2, "reason": "logic"},
+            },
+        )
+        entry = _FakeConfigEntry("entry-1")
+        hass = _FakeHass(entry.entry_id, bridge, const.DOMAIN)
+        entities: list = []
+
+        await sensor_module.async_setup_entry(
+            hass,
+            entry,
+            lambda new_entities: entities.extend(new_entities),
+        )
+
+        self.assertEqual(entities, [])
+
 
 if __name__ == "__main__":
     unittest.main()

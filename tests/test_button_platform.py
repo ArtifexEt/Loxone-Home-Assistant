@@ -187,6 +187,7 @@ _install_homeassistant_stubs()
 models = load_integration_module("custom_components.loxone_home_assistant.models")
 const = load_integration_module("custom_components.loxone_home_assistant.const")
 button_module = load_integration_module("custom_components.loxone_home_assistant.button")
+intercom_module = load_integration_module("custom_components.loxone_home_assistant.intercom")
 LoxoneControl = models.LoxoneControl
 
 
@@ -314,6 +315,48 @@ class ButtonPlatformTests(unittest.IsolatedAsyncioTestCase):
             if isinstance(entity, button_module.LoxoneIntercomCommandButton)
         ]
         self.assertEqual(intercom_buttons, [])
+
+    async def test_setup_adds_intercom_tts_button_and_sends_tts(self) -> None:
+        intercom = LoxoneControl(
+            uuid="intercom-uuid",
+            uuid_action="intercom-action",
+            name="Furtka",
+            type="IntercomV2",
+            states={
+                "bell": "state-bell",
+                "trustAddress": "state-trust",
+            },
+        )
+        bridge = _FakeBridge([intercom])
+        entry = _FakeConfigEntry("entry-1")
+        hass = _FakeHass(entry.entry_id, bridge, const.DOMAIN)
+        entities: list = []
+
+        await button_module.async_setup_entry(
+            hass,
+            entry,
+            lambda new_entities: entities.extend(new_entities),
+        )
+
+        tts_buttons = [
+            entity
+            for entity in entities
+            if isinstance(entity, button_module.LoxoneIntercomTtsButton)
+        ]
+        self.assertEqual(len(tts_buttons), 1)
+        tts_button = tts_buttons[0]
+
+        await tts_button.async_press()
+        self.assertEqual(bridge.commands, [])
+
+        intercom_module.set_intercom_tts_message(bridge, "intercom-action", "Test message")
+        intercom_module.set_intercom_tts_volume(bridge, "intercom-action", 75)
+
+        await tts_button.async_press()
+        self.assertEqual(
+            bridge.commands,
+            [("intercom-action", "tts/Test%20message/75")],
+        )
 
 
 if __name__ == "__main__":

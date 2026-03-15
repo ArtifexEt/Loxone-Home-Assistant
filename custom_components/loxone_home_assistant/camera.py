@@ -7,6 +7,7 @@ import json
 import logging
 from collections.abc import Mapping
 from typing import Any
+from urllib.parse import urlsplit
 
 try:
     from aiohttp import BasicAuth, ClientError
@@ -165,6 +166,29 @@ _TEXT_ERROR_HINTS = (
     "forbidden",
     "not found",
 )
+_STREAM_URL_HINTS = (
+    "stream",
+    "mjpg",
+    "mjpeg",
+    "hls",
+    "m3u8",
+    "rtsp",
+    "webrtc",
+    "h264",
+    "video",
+)
+_STREAM_MEDIA_EXTENSIONS = (".mjpg", ".mjpeg", ".m3u8", ".mp4", ".ts")
+_STILL_IMAGE_EXTENSIONS = (
+    ".jpg",
+    ".jpeg",
+    ".png",
+    ".gif",
+    ".bmp",
+    ".webp",
+    ".tif",
+    ".tiff",
+    ".ico",
+)
 _BINARY_IMAGE_CONTENT_TYPES = {"application/octet-stream", "binary/octet-stream"}
 _MJPEG_MAX_SCAN_BYTES = 4 * 1024 * 1024
 _MJPEG_CHUNK_SIZE = 16 * 1024
@@ -281,6 +305,18 @@ class LoxoneIntercomCameraEntity(LoxoneEntity, Camera):
         return None
 
     def _stream_url(self) -> str | None:
+        fallback_url: str | None = None
+
+        def _pick_stream_candidate(candidate: str | None) -> str | None:
+            nonlocal fallback_url
+            if candidate is None:
+                return None
+            if fallback_url is None:
+                fallback_url = candidate
+            if _looks_like_stream_url(candidate):
+                return candidate
+            return None
+
         address_value = (
             self.state_value(self._address_state_name)
             if self._address_state_name is not None
@@ -293,16 +329,18 @@ class LoxoneIntercomCameraEntity(LoxoneEntity, Camera):
             from_state,
             address_value=address_value,
         )
-        if resolved_state is not None:
-            return resolved_state
+        picked = _pick_stream_candidate(resolved_state)
+        if picked is not None:
+            return picked
         from_details = _resolve_control_detail_url(
             self.bridge,
             self.control,
             STREAM_DETAIL_PATHS,
             address_value=address_value,
         )
-        if from_details is not None:
-            return from_details
+        picked = _pick_stream_candidate(from_details)
+        if picked is not None:
+            return picked
         from_detail_payload = _resolve_url_from_payload_with_key_hints(
             self.bridge,
             self.control,
@@ -310,8 +348,9 @@ class LoxoneIntercomCameraEntity(LoxoneEntity, Camera):
             key_hints=STREAM_KEY_HINTS,
             address_value=address_value,
         )
-        if from_detail_payload is not None:
-            return from_detail_payload
+        picked = _pick_stream_candidate(from_detail_payload)
+        if picked is not None:
+            return picked
         from_dynamic_states = _resolve_url_from_intercom_state_payloads(
             self.bridge,
             self.control,
@@ -320,8 +359,9 @@ class LoxoneIntercomCameraEntity(LoxoneEntity, Camera):
             key_hints=STREAM_KEY_HINTS,
             address_value=address_value,
         )
-        if from_dynamic_states is not None:
-            return from_dynamic_states
+        picked = _pick_stream_candidate(from_dynamic_states)
+        if picked is not None:
+            return picked
         if self._secured_details is not None:
             from_secured_details = _resolve_detail_url(
                 self.bridge,
@@ -330,8 +370,9 @@ class LoxoneIntercomCameraEntity(LoxoneEntity, Camera):
                 control=self.control,
                 address_value=address_value,
             )
-            if from_secured_details is not None:
-                return from_secured_details
+            picked = _pick_stream_candidate(from_secured_details)
+            if picked is not None:
+                return picked
             from_secured_payload = _resolve_url_from_payload_with_key_hints(
                 self.bridge,
                 self.control,
@@ -339,15 +380,18 @@ class LoxoneIntercomCameraEntity(LoxoneEntity, Camera):
                 key_hints=STREAM_KEY_HINTS,
                 address_value=address_value,
             )
-            if from_secured_payload is not None:
-                return from_secured_payload
+            picked = _pick_stream_candidate(from_secured_payload)
+            if picked is not None:
+                return picked
         for synthetic_url in intercom_synthetic_stream_urls(
             self.bridge,
             self.control,
             address_value=address_value,
         ):
-            return synthetic_url
-        return None
+            picked = _pick_stream_candidate(synthetic_url)
+            if picked is not None:
+                return picked
+        return fallback_url
 
     def _snapshot_url(self) -> str | None:
         address_value = (
@@ -839,6 +883,26 @@ def _looks_like_image_bytes(payload: bytes) -> bool:
     if len(payload) >= 12 and payload[:4] == b"RIFF" and payload[8:12] == b"WEBP":
         return True
     return False
+
+
+def _looks_like_stream_url(url: str) -> bool:
+    raw = url.strip()
+    if not raw:
+        return False
+
+    parsed = urlsplit(raw)
+    path = parsed.path.casefold()
+    query = parsed.query.casefold()
+    combined = f"{path}?{query}" if query else path
+
+    if path.endswith(_STREAM_MEDIA_EXTENSIONS):
+        return True
+
+    has_stream_hint = any(hint in combined for hint in _STREAM_URL_HINTS)
+    if path.endswith(_STILL_IMAGE_EXTENSIONS):
+        return has_stream_hint
+
+    return has_stream_hint
 
 
 def _looks_like_text_error(payload: bytes) -> bool:

@@ -424,6 +424,45 @@ class IntercomSensorTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(session.calls, [events_url])
 
+    async def test_history_sensor_falls_back_to_history_date_state_when_events_missing(self) -> None:
+        control = LoxoneControl(
+            uuid="intercom-uuid",
+            uuid_action="intercom-action",
+            name="Furtka",
+            type="IntercomV2",
+            states={
+                "historyDate": "state-history-date",
+            },
+        )
+        bridge = _FakeBridge(
+            [control],
+            {
+                "state-history-date": "20260314123045",
+            },
+            session=_FakeSession({}),
+        )
+        entry = _FakeConfigEntry("entry-1")
+        hass = _FakeHass(entry.entry_id, bridge, const.DOMAIN)
+        entities: list = []
+
+        await sensor_module.async_setup_entry(
+            hass,
+            entry,
+            lambda new_entities: entities.extend(new_entities),
+        )
+
+        self.assertEqual(len(entities), 1)
+        history_entity = entities[0]
+        await history_entity.async_update()
+
+        attrs = history_entity.extra_state_attributes
+        self.assertEqual(attrs["event_count"], 0)
+        self.assertIsNotNone(history_entity.native_value)
+        self.assertEqual(
+            history_entity.native_value.isoformat(),
+            "2026-03-14T12:30:45+00:00",
+        )
+
     async def test_intercom_system_schema_webpage_is_disabled_by_default(self) -> None:
         intercom = LoxoneControl(
             uuid="intercom-uuid",

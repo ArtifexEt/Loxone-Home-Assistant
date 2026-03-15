@@ -87,6 +87,8 @@ _INTERCOM_COMMAND_ALIASES.update(
 _INTERCOM_COMMAND_ALIAS_DEFAULT_ARGUMENTS: dict[str, tuple[str, ...]] = {
     "unmute": ("0",),
 }
+INTERCOM_DEFAULT_TTS_MESSAGE = ""
+INTERCOM_DEFAULT_TTS_VOLUME = 60
 INTERCOM_SYNTHETIC_STREAM_PATHS = (
     "/mjpg/video.mjpg",
     "/mjpg/stream.mjpg",
@@ -685,3 +687,72 @@ def _coerce_text(value: Any) -> str | None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def intercom_tts_message(bridge, uuid_action: str) -> str:
+    store = _intercom_tts_message_store(bridge)
+    value = store.get(uuid_action, INTERCOM_DEFAULT_TTS_MESSAGE)
+    return str(value)
+
+
+def set_intercom_tts_message(bridge, uuid_action: str, value: Any) -> str:
+    text = str(value or "")
+    _intercom_tts_message_store(bridge)[uuid_action] = text
+    return text
+
+
+def intercom_tts_volume(bridge, uuid_action: str) -> int:
+    store = _intercom_tts_volume_store(bridge)
+    raw = store.get(uuid_action, INTERCOM_DEFAULT_TTS_VOLUME)
+    try:
+        volume = int(raw)
+    except (TypeError, ValueError):
+        volume = INTERCOM_DEFAULT_TTS_VOLUME
+    clamped = max(0, min(100, volume))
+    store[uuid_action] = clamped
+    return clamped
+
+
+def set_intercom_tts_volume(bridge, uuid_action: str, value: Any) -> int:
+    try:
+        volume = int(float(value))
+    except (TypeError, ValueError):
+        volume = INTERCOM_DEFAULT_TTS_VOLUME
+    clamped = max(0, min(100, volume))
+    _intercom_tts_volume_store(bridge)[uuid_action] = clamped
+    return clamped
+
+
+def build_intercom_tts_command(message: Any, volume: Any = None) -> str | None:
+    text = str(message or "").strip()
+    if not text:
+        return None
+
+    encoded_message = quote(text, safe="")
+    if volume is None:
+        return f"tts/{encoded_message}"
+
+    try:
+        normalized_volume = int(float(volume))
+    except (TypeError, ValueError):
+        normalized_volume = INTERCOM_DEFAULT_TTS_VOLUME
+    normalized_volume = max(0, min(100, normalized_volume))
+    return f"tts/{encoded_message}/{normalized_volume}"
+
+
+def _intercom_tts_message_store(bridge) -> dict[str, str]:
+    store = getattr(bridge, "_intercom_tts_messages", None)
+    if isinstance(store, dict):
+        return store
+    created: dict[str, str] = {}
+    setattr(bridge, "_intercom_tts_messages", created)
+    return created
+
+
+def _intercom_tts_volume_store(bridge) -> dict[str, int]:
+    store = getattr(bridge, "_intercom_tts_volumes", None)
+    if isinstance(store, dict):
+        return store
+    created: dict[str, int] = {}
+    setattr(bridge, "_intercom_tts_volumes", created)
+    return created

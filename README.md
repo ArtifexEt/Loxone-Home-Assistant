@@ -263,6 +263,48 @@ data:
   arguments: "Leave package at box/Call owner"
 ```
 
+## Intercom UI in Home Assistant (live video + TTS)
+
+Use parent Intercom `uuid_action` (you can copy it from any Intercom entity attributes, for example `camera.<name>_video`).
+
+The integration now creates native Intercom TTS controls automatically (per Intercom):
+
+- `text.<intercom>_tts_message`
+- `number.<intercom>_tts_volume`
+- `button.<intercom>_send_tts`
+
+Pressing `Send TTS` sends message + volume to the parent Intercom `uuid_action`.
+
+You can still call service directly if needed:
+
+```yaml
+service: loxone_home_assistant.send_tts
+data:
+  uuid_action: intercom-v2-uuid-action
+  message: "Kurier jest pod drzwiami"
+  volume: 60
+```
+
+Lovelace card example (`camera_view: live` is important for video stream):
+
+```yaml
+type: vertical-stack
+cards:
+  - type: picture-entity
+    entity: camera.furtka_video
+    camera_view: live
+    show_state: false
+    show_name: true
+  - type: entities
+    entities:
+      - binary_sensor.furtka_doorbell
+      - sensor.furtka_history
+      - select.furtka_history_photo
+      - text.furtka_tts_message
+      - number.furtka_tts_volume
+      - button.furtka_send_tts
+```
+
 ## Logging and troubleshooting
 
 - integration logger namespace: `custom_components.loxone_home_assistant`
