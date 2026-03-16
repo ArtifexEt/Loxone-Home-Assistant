@@ -305,6 +305,20 @@ cards:
       - button.furtka_send_tts
 ```
 
+### Optional MJPEG -> HLS wrapper
+
+If a client/player has trouble with MJPEG, you can wrap MJPEG to HLS locally:
+
+```bash
+python3 scripts/mjpeg_hls_wrapper.py \
+  --input-url "http://intercom.local/mjpg/video.mjpg" \
+  --bind 127.0.0.1 \
+  --port 8899
+```
+
+The script prints an HLS URL (for example `http://127.0.0.1:8899/stream.m3u8`).
+You can use this URL as a browser-friendly stream endpoint.
+
 ## Logging and troubleshooting
 
 - integration logger namespace: `custom_components.loxone_home_assistant`

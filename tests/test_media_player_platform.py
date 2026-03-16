@@ -439,6 +439,26 @@ class MediaPlayerPlatformTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(bridge.commands, [("audio-action", "tts/Hall%2FEntry")])
 
+    async def test_audio_zone_tts_routes_to_matched_audio_server(self) -> None:
+        control = self._audio_zone_v2()
+        control.details["audioServerHost"] = "audioserver.lan:7091"
+        media_server = LoxoneMediaServer(
+            uuid_action="media-server-action",
+            name="AudioServer",
+            host="audioserver.lan:7091",
+            states={},
+        )
+        bridge = _FakeBridge(
+            [control],
+            {},
+            media_servers={media_server.uuid_action: media_server},
+        )
+        entity = LoxoneAudioZoneEntity(bridge, control)
+
+        await entity.async_play_media("tts", "Alarm test", extra={"volume": 35})
+
+        self.assertEqual(bridge.commands, [("media-server-action", "tts/Alarm test/35")])
+
     def test_media_position_updated_at_changes_only_on_updates(self) -> None:
         control = self._audio_zone_v2()
         bridge = _FakeBridge(

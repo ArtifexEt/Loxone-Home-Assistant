@@ -3,6 +3,7 @@
 ## Commit Message Rule
 
 Always write Git commit messages in English.
+Commit messages must clearly describe what was changed.
 
 ## Test Workflow Note
 

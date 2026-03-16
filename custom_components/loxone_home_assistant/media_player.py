@@ -193,6 +193,18 @@ class LoxoneAudioZoneEntity(LoxoneEntity, MediaPlayerEntity):
     async def _async_send_action(self, command: str) -> None:
         await self.bridge.async_send_action(self.control.uuid_action, command)
 
+    async def _async_send_tts_action(self, command: str) -> None:
+        await self.bridge.async_send_action(self._tts_target_uuid_action(), command)
+
+    def _tts_target_uuid_action(self) -> str:
+        if self._media_server is not None:
+            media_server_uuid_action = _coerce_text(
+                getattr(self._media_server, "uuid_action", None)
+            )
+            if media_server_uuid_action is not None:
+                return media_server_uuid_action
+        return self.control.uuid_action
+
     @property
     def state(self) -> MediaPlayerState | None:
         power = coerce_bool(self._state_raw(self._power_state_name))
@@ -427,11 +439,6 @@ class LoxoneAudioZoneEntity(LoxoneEntity, MediaPlayerEntity):
     ) -> bool:
         if kind not in {"tts", "announce", "announcement"}:
             return False
-        if self.control.type not in {
-            AUDIO_ZONE_V2_CONTROL_TYPE,
-            CENTRAL_AUDIO_ZONE_CONTROL_TYPE,
-        }:
-            return True
 
         text = _coerce_text(media_id)
         if not text:
@@ -441,7 +448,7 @@ class LoxoneAudioZoneEntity(LoxoneEntity, MediaPlayerEntity):
         command = (
             f"tts/{encoded_text}" if volume is None else f"tts/{encoded_text}/{volume}"
         )
-        await self._async_send_action(command)
+        await self._async_send_tts_action(command)
         return True
 
     async def _async_handle_command_media(self, kind: str, media_id: str) -> bool:

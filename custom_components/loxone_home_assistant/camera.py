@@ -7,7 +7,7 @@ import json
 import logging
 from collections.abc import Mapping
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit, urlunsplit
 
 try:
     from aiohttp import BasicAuth, ClientError
@@ -236,7 +236,11 @@ class LoxoneIntercomCameraEntity(LoxoneEntity, Camera):
 
     async def stream_source(self) -> str | None:
         await self._ensure_secured_details_loaded()
-        return self._stream_url()
+        return _stream_source_with_basic_auth(
+            self._stream_url(),
+            username=getattr(self.bridge, "username", None),
+            password=getattr(self.bridge, "password", None),
+        )
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
@@ -913,6 +917,43 @@ def _looks_like_stream_url(url: str) -> bool:
         return any(hint in combined for hint in _STREAM_HINTS_FOR_IMAGE_PATHS)
 
     return has_stream_hint
+
+
+def _stream_source_with_basic_auth(
+    stream_url: str | None,
+    *,
+    username: Any,
+    password: Any,
+) -> str | None:
+    if stream_url is None:
+        return None
+
+    parsed = urlsplit(stream_url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return stream_url
+    if parsed.username:
+        return stream_url
+
+    auth_user = _coerce_text(username)
+    if auth_user is None:
+        return stream_url
+    auth_password = "" if password is None else str(password)
+
+    host = parsed.hostname
+    if host is None:
+        return stream_url
+
+    encoded_user = quote(auth_user, safe="")
+    encoded_password = quote(auth_password, safe="")
+    userinfo = (
+        encoded_user if not auth_password else f"{encoded_user}:{encoded_password}"
+    )
+
+    host_part = f"[{host}]" if ":" in host and not host.startswith("[") else host
+    port_part = f":{parsed.port}" if parsed.port is not None else ""
+    netloc = f"{userinfo}@{host_part}{port_part}"
+
+    return urlunsplit((parsed.scheme, netloc, parsed.path, parsed.query, parsed.fragment))
 
 
 def _looks_like_text_error(payload: bytes) -> bool:
