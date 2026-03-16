@@ -148,10 +148,12 @@ class _FakeSession:
     ) -> None:
         self.responses = responses or {}
         self.calls: list[tuple[str, bool]] = []
+        self.auth_logins: list[str | None] = []
 
     def get(self, url: str, auth=None):
         has_auth = auth is not None
         self.calls.append((url, has_auth))
+        self.auth_logins.append(getattr(auth, "login", None) if has_auth else None)
         response_data = self.responses.get((url, has_auth), (200, b"default-image", "image/jpeg"))
         if len(response_data) == 2:
             status, payload = response_data
@@ -166,6 +168,8 @@ class _FakeBridge:
     available = True
     username = "user"
     password = "pass"
+    intercom_username = None
+    intercom_password = None
 
     def __init__(
         self,
@@ -915,6 +919,36 @@ class CameraPlatformTests(unittest.IsolatedAsyncioTestCase):
             await entity.stream_source(),
             "http://user%40name:pa%3Ass%2Fword@192.0.2.10/mjpg/video.mjpg",
         )
+
+    async def test_stream_source_and_preview_use_dedicated_intercom_credentials(self) -> None:
+        control = LoxoneControl(
+            uuid="intercom-uuid",
+            uuid_action="intercom-action",
+            name="Furtka",
+            type="Intercom",
+            states={},
+            details={
+                "videoInfo": {
+                    "streamUrl": "http://192.0.2.10/mjpg/video.mjpg",
+                }
+            },
+        )
+        expected_stream_url = "http://camuser:campass@192.0.2.10/mjpg/video.mjpg"
+        session = _FakeSession(
+            {
+                ("http://192.0.2.10/mjpg/video.mjpg", True): (200, b"frame"),
+            }
+        )
+        bridge = _FakeBridge([control], {}, session)
+        bridge.intercom_username = "camuser"
+        bridge.intercom_password = "campass"
+        entity = LoxoneIntercomCameraEntity(bridge, control)
+
+        self.assertEqual(await entity.stream_source(), expected_stream_url)
+        image = await entity.async_camera_image()
+
+        self.assertEqual(image, b"frame")
+        self.assertEqual(session.auth_logins, ["camuser"])
 
 
 if __name__ == "__main__":

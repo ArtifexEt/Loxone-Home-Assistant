@@ -19,7 +19,9 @@
         "description": "Geben Sie Ihren Loxone-Benutzernamen und Ihr Passwort ein. Die Integration durchsucht das lokale Netzwerk nach einem Loxone-Server (Miniserver, Miniserver Go, Miniserver Compact).",
         "data": {
           "username": "Benutzername",
-          "password": "Passwort"
+          "password": "Passwort",
+          "intercom_username": "Intercom-Video-Benutzername (optional)",
+          "intercom_password": "Intercom-Video-Passwort (optional)"
         }
       },
       "select": {
@@ -37,6 +39,8 @@
           "port": "Port",
           "username": "Benutzername",
           "password": "Passwort",
+          "intercom_username": "Intercom-Video-Benutzername (optional)",
+          "intercom_password": "Intercom-Video-Passwort (optional)",
           "verify_ssl": "TLS-Zertifikat verifizieren"
         }
       }
@@ -62,6 +66,8 @@
           "port": "Port",
           "username": "Benutzername",
           "password": "Passwort (leer lassen, um den aktuellen Wert beizubehalten)",
+          "intercom_username": "Intercom-Video-Benutzername (optional)",
+          "intercom_password": "Intercom-Video-Passwort (optional, leer lassen, um den aktuellen Wert beizubehalten)",
           "verify_ssl": "TLS-Zertifikat verifizieren",
           "scan_timeout": "Erkennungs-Timeout (Sekunden)",
           "enable_light_mood_select": "Stimmungsauswahl des LightController bereitstellen",

@@ -161,10 +161,14 @@ The integration first asks for:
 
 - Loxone username
 - Loxone password
+- optional Intercom video username
+- optional Intercom video password
 
 It then scans the local network for one or more Loxone servers. If more than one is found, you choose the correct device.
 
 If automatic discovery does not complete, a manual host fallback is offered where you provide host, port, credentials, and TLS verification directly.
+
+If your Intercom camera stream returns `401 Unauthorized`, open integration `Options` and set dedicated Intercom video credentials (some Intercom models use separate video-module login data).
 
 After successful connection and validation, the final step asks for startup options:
 

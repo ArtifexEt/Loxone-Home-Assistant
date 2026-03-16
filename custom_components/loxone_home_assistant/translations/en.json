@@ -19,7 +19,9 @@
         "description": "Enter your Loxone username and password. The integration will scan the local network for a Loxone server (Miniserver, Miniserver Go, Miniserver Compact).",
         "data": {
           "username": "Username",
-          "password": "Password"
+          "password": "Password",
+          "intercom_username": "Intercom video username (optional)",
+          "intercom_password": "Intercom video password (optional)"
         }
       },
       "select": {
@@ -37,6 +39,8 @@
           "port": "Port",
           "username": "Username",
           "password": "Password",
+          "intercom_username": "Intercom video username (optional)",
+          "intercom_password": "Intercom video password (optional)",
           "verify_ssl": "Verify TLS certificate"
         }
       }
@@ -62,6 +66,8 @@
           "port": "Port",
           "username": "Username",
           "password": "Password (leave empty to keep current)",
+          "intercom_username": "Intercom video username (optional)",
+          "intercom_password": "Intercom video password (optional, leave empty to keep current)",
           "verify_ssl": "Verify TLS certificate",
           "scan_timeout": "Discovery timeout (seconds)",
           "enable_light_mood_select": "Expose LightController mood selector",

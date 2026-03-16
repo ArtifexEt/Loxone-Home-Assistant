@@ -32,6 +32,8 @@ from .const import (
     CONF_CLIENT_UUID,
     CONF_ENABLE_LIGHT_MOOD_SELECT,
     CONF_EXPOSE_CONTROLLER_CHILD_LIGHTS,
+    CONF_INTERCOM_PASSWORD,
+    CONF_INTERCOM_USERNAME,
     CONF_LOXAPP_VERSION,
     CONF_SCAN_TIMEOUT,
     CONF_SERVER_MODEL,
@@ -117,6 +119,7 @@ class LoxoneCommunityConfigFlow(ConfigFlow, domain=DOMAIN):
                 CONF_PASSWORD: user_input[CONF_PASSWORD],
                 CONF_VERIFY_SSL: DEFAULT_VERIFY_SSL,
             }
+            _merge_optional_intercom_credentials(self._auth_data, user_input)
             _LOGGER.debug("Loxone flow: starting discovery")
 
             discovery = await async_discover_miniservers(
@@ -175,6 +178,7 @@ class LoxoneCommunityConfigFlow(ConfigFlow, domain=DOMAIN):
                 CONF_PASSWORD: user_input[CONF_PASSWORD],
                 CONF_VERIFY_SSL: bool(user_input.get(CONF_VERIFY_SSL, DEFAULT_VERIFY_SSL)),
             }
+            _merge_optional_intercom_credentials(self._auth_data, user_input)
             device = DiscoveryResult(
                 host=user_input[CONF_HOST],
                 port=int(user_input[CONF_PORT]),
@@ -229,6 +233,11 @@ class LoxoneCommunityConfigFlow(ConfigFlow, domain=DOMAIN):
                 {
                     vol.Required(CONF_USERNAME, default=self._auth_data.get(CONF_USERNAME, "")): str,
                     vol.Required(CONF_PASSWORD): str,
+                    vol.Optional(
+                        CONF_INTERCOM_USERNAME,
+                        default=_coerce_text(self._auth_data.get(CONF_INTERCOM_USERNAME), ""),
+                    ): str,
+                    vol.Optional(CONF_INTERCOM_PASSWORD, default=""): str,
                 }
             ),
             errors=errors,
@@ -250,6 +259,11 @@ class LoxoneCommunityConfigFlow(ConfigFlow, domain=DOMAIN):
                     vol.Required(CONF_PORT, default=port): int,
                     vol.Required(CONF_USERNAME, default=self._auth_data.get(CONF_USERNAME, "")): str,
                     vol.Required(CONF_PASSWORD): str,
+                    vol.Optional(
+                        CONF_INTERCOM_USERNAME,
+                        default=_coerce_text(self._auth_data.get(CONF_INTERCOM_USERNAME), ""),
+                    ): str,
+                    vol.Optional(CONF_INTERCOM_PASSWORD, default=""): str,
                     vol.Required(
                         CONF_VERIFY_SSL,
                         default=(
@@ -386,6 +400,9 @@ class LoxoneCommunityOptionsFlow(OptionsFlow):
             # Keep currently stored password when options password is left empty.
             if not options.get(CONF_PASSWORD):
                 options.pop(CONF_PASSWORD, None)
+            # Keep currently stored Intercom password when left empty.
+            if not options.get(CONF_INTERCOM_PASSWORD):
+                options.pop(CONF_INTERCOM_PASSWORD, None)
             merged = {**entry_data, **entry_options, **options}
             try:
                 await _async_validate_input(self.hass, merged)
@@ -405,6 +422,7 @@ class LoxoneCommunityOptionsFlow(OptionsFlow):
         host_default = _coerce_text(form_data.get(CONF_HOST), "")
         port_default = _coerce_int(form_data.get(CONF_PORT), DEFAULT_PORT)
         username_default = _coerce_text(form_data.get(CONF_USERNAME), "")
+        intercom_username_default = _coerce_text(form_data.get(CONF_INTERCOM_USERNAME), "")
         verify_ssl_default = _coerce_bool(form_data.get(CONF_VERIFY_SSL), DEFAULT_VERIFY_SSL)
         scan_timeout_default = _coerce_int(
             form_data.get(CONF_SCAN_TIMEOUT), DEFAULT_SCAN_TIMEOUT
@@ -450,6 +468,11 @@ class LoxoneCommunityOptionsFlow(OptionsFlow):
                     vol.Required(CONF_PORT, default=port_default): int,
                     vol.Required(CONF_USERNAME, default=username_default): str,
                     vol.Optional(CONF_PASSWORD, default=""): str,
+                    vol.Optional(
+                        CONF_INTERCOM_USERNAME,
+                        default=intercom_username_default,
+                    ): str,
+                    vol.Optional(CONF_INTERCOM_PASSWORD, default=""): str,
                     vol.Required(CONF_VERIFY_SSL, default=verify_ssl_default): bool,
                     vol.Required(CONF_SCAN_TIMEOUT, default=scan_timeout_default): int,
                     vol.Required(
@@ -539,6 +562,21 @@ def _coerce_mapping(value: Any) -> dict[str, Any]:
     if isinstance(value, Mapping):
         return dict(value)
     return {}
+
+
+def _merge_optional_intercom_credentials(target: dict[str, Any], source: Mapping[str, Any]) -> None:
+    username = _coerce_text(source.get(CONF_INTERCOM_USERNAME), "")
+    password = source.get(CONF_INTERCOM_PASSWORD)
+
+    if username:
+        target[CONF_INTERCOM_USERNAME] = username
+    else:
+        target.pop(CONF_INTERCOM_USERNAME, None)
+
+    if password:
+        target[CONF_INTERCOM_PASSWORD] = str(password)
+    else:
+        target.pop(CONF_INTERCOM_PASSWORD, None)
 
 
 def _resolve_options_config_entry(flow: LoxoneCommunityOptionsFlow):

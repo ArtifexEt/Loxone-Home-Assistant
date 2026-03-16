@@ -2380,8 +2380,11 @@ async def _async_fetch_json(bridge, url: str) -> Any | None:
     if session is None:
         return None
 
-    auth = BasicAuth(bridge.username, bridge.password)
-    for request_auth in (auth, None):
+    auth_username, auth_password = _intercom_auth_credentials(bridge)
+    auth_candidates = [None]
+    if auth_username is not None:
+        auth_candidates = [BasicAuth(auth_username, auth_password), None]
+    for request_auth in auth_candidates:
         try:
             async with session.get(url, auth=request_auth) as response:
                 if response.status == 401 and request_auth is not None:
@@ -2396,6 +2399,21 @@ async def _async_fetch_json(bridge, url: str) -> Any | None:
             if request_auth is None:
                 return None
     return None
+
+
+def _intercom_auth_credentials(bridge) -> tuple[str | None, str]:
+    configured_username = _coerce_text(getattr(bridge, "intercom_username", None))
+    configured_password = getattr(bridge, "intercom_password", None)
+    default_username = _coerce_text(getattr(bridge, "username", None))
+    default_password = getattr(bridge, "password", None)
+
+    username = configured_username or default_username
+    if username is None:
+        return None, ""
+
+    password_source = configured_password if configured_password is not None else default_password
+    password = "" if password_source is None else str(password_source)
+    return username, password
 
 
 def _extract_intercom_events(

@@ -32,6 +32,8 @@ from .const import (
     APP_PERMISSION,
     CLIENT_INFO,
     CONF_CLIENT_UUID,
+    CONF_INTERCOM_PASSWORD,
+    CONF_INTERCOM_USERNAME,
     CONF_LOXAPP_VERSION,
     CONF_SCAN_TIMEOUT,
     CONF_SERVER_MODEL,
@@ -232,6 +234,16 @@ class LoxoneBridge:
         self.port: int = int(data.get(CONF_PORT, DEFAULT_PORT))
         self.username: str = data[CONF_USERNAME]
         self.password: str = data[CONF_PASSWORD]
+        raw_intercom_username = data.get(CONF_INTERCOM_USERNAME)
+        self.intercom_username: str | None = (
+            str(raw_intercom_username).strip() if raw_intercom_username is not None else None
+        ) or None
+        raw_intercom_password = data.get(CONF_INTERCOM_PASSWORD)
+        self.intercom_password: str | None = (
+            str(raw_intercom_password) if raw_intercom_password is not None else None
+        )
+        if self.intercom_password == "":
+            self.intercom_password = None
         self.verify_ssl: bool = bool(data.get(CONF_VERIFY_SSL, DEFAULT_VERIFY_SSL))
         self.use_tls: bool = bool(data.get(CONF_USE_TLS, True))
         self.use_loxone_icons: bool = bool(

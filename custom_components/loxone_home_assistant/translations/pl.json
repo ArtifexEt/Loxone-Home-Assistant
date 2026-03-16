@@ -19,7 +19,9 @@
         "description": "Podaj login i hasło Loxone. Integracja przeskanuje lokalną sieć i spróbuje znaleźć serwer Loxone (Miniserver, Miniserver Go, Miniserver Compact).",
         "data": {
           "username": "Login",
-          "password": "Hasło"
+          "password": "Hasło",
+          "intercom_username": "Login wideo interkomu (opcjonalnie)",
+          "intercom_password": "Hasło wideo interkomu (opcjonalnie)"
         }
       },
       "select": {
@@ -37,6 +39,8 @@
           "port": "Port",
           "username": "Login",
           "password": "Hasło",
+          "intercom_username": "Login wideo interkomu (opcjonalnie)",
+          "intercom_password": "Hasło wideo interkomu (opcjonalnie)",
           "verify_ssl": "Weryfikuj certyfikat TLS"
         }
       }
@@ -62,6 +66,8 @@
           "port": "Port",
           "username": "Login",
           "password": "Hasło (zostaw puste, aby zachować obecne)",
+          "intercom_username": "Login wideo interkomu (opcjonalnie)",
+          "intercom_password": "Hasło wideo interkomu (opcjonalnie, zostaw puste, aby zachować obecne)",
           "verify_ssl": "Weryfikuj certyfikat TLS",
           "scan_timeout": "Limit czasu wyszukiwania (sekundy)",
           "enable_light_mood_select": "Wystaw selektor nastroju LightController",

@@ -136,12 +136,21 @@ class _FakeSession:
     def __init__(self, responses: dict[str, object]) -> None:
         self.responses = responses
         self.calls: list[str] = []
+        self.auth_logins: list[str | None] = []
 
     def get(self, url: str, auth=None):
-        del auth
         self.calls.append(url)
-        payload = self.responses.get(url, [])
-        return _FakeResponse(200, payload)
+        self.auth_logins.append(getattr(auth, "login", None) if auth is not None else None)
+        response_data = self.responses.get(url, [])
+        if (
+            isinstance(response_data, tuple)
+            and len(response_data) == 2
+            and isinstance(response_data[0], int)
+        ):
+            status, payload = response_data
+        else:
+            status, payload = 200, response_data
+        return _FakeResponse(status, payload)
 
 
 class _FakeBridge:
@@ -149,6 +158,8 @@ class _FakeBridge:
     available = True
     username = "user"
     password = "pass"
+    intercom_username = None
+    intercom_password = None
     host = "mini.local"
     port = 443
     use_tls = True
@@ -462,6 +473,46 @@ class IntercomSensorTests(unittest.IsolatedAsyncioTestCase):
             history_entity.native_value.isoformat(),
             "2026-03-14T12:30:45+00:00",
         )
+
+    async def test_history_sensor_uses_dedicated_intercom_credentials_for_events_fetch(self) -> None:
+        control = LoxoneControl(
+            uuid="intercom-uuid",
+            uuid_action="intercom-action",
+            name="Furtka",
+            type="IntercomV2",
+            states={"lastBellEvents": "state-events"},
+        )
+        events_url = "https://mini.local/dev/events.json"
+        session = _FakeSession(
+            {
+                events_url: [
+                    {
+                        "timestamp": "2026-03-14T11:20:00Z",
+                        "imageUrl": "/dev/history/latest.jpg",
+                    }
+                ]
+            }
+        )
+        bridge = _FakeBridge([control], {"state-events": "/dev/events.json"}, session=session)
+        bridge.intercom_username = "camuser"
+        bridge.intercom_password = "campass"
+        entry = _FakeConfigEntry("entry-1")
+        hass = _FakeHass(entry.entry_id, bridge, const.DOMAIN)
+        entities: list = []
+
+        await sensor_module.async_setup_entry(
+            hass,
+            entry,
+            lambda new_entities: entities.extend(new_entities),
+        )
+
+        self.assertEqual(len(entities), 1)
+        history_entity = entities[0]
+        await history_entity.async_update()
+
+        attrs = history_entity.extra_state_attributes
+        self.assertEqual(attrs["history_events_url"], events_url)
+        self.assertEqual(session.auth_logins, ["camuser"])
 
     async def test_intercom_system_schema_webpage_is_disabled_by_default(self) -> None:
         intercom = LoxoneControl(

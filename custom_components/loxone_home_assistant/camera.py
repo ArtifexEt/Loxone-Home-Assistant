@@ -236,10 +236,11 @@ class LoxoneIntercomCameraEntity(LoxoneEntity, Camera):
 
     async def stream_source(self) -> str | None:
         await self._ensure_secured_details_loaded()
+        auth_username, auth_password = _intercom_auth_credentials(self.bridge)
         return _stream_source_with_basic_auth(
             self._stream_url(),
-            username=getattr(self.bridge, "username", None),
-            password=getattr(self.bridge, "password", None),
+            username=auth_username,
+            password=auth_password,
         )
 
     @property
@@ -276,9 +277,12 @@ class LoxoneIntercomCameraEntity(LoxoneEntity, Camera):
         if session is None:
             return None
 
-        auth = BasicAuth(self.bridge.username, self.bridge.password)
+        auth_username, auth_password = _intercom_auth_credentials(self.bridge)
+        auth_candidates = [None]
+        if auth_username is not None:
+            auth_candidates = [BasicAuth(auth_username, auth_password), None]
         for image_url in image_urls:
-            for request_auth in (auth, None):
+            for request_auth in auth_candidates:
                 try:
                     async with session.get(image_url, auth=request_auth) as response:
                         if response.status == 401 and request_auth is not None:
@@ -917,6 +921,21 @@ def _looks_like_stream_url(url: str) -> bool:
         return any(hint in combined for hint in _STREAM_HINTS_FOR_IMAGE_PATHS)
 
     return has_stream_hint
+
+
+def _intercom_auth_credentials(bridge) -> tuple[str | None, str]:
+    configured_username = _coerce_text(getattr(bridge, "intercom_username", None))
+    configured_password = getattr(bridge, "intercom_password", None)
+    default_username = _coerce_text(getattr(bridge, "username", None))
+    default_password = getattr(bridge, "password", None)
+
+    username = configured_username or default_username
+    if username is None:
+        return None, ""
+
+    password_source = configured_password if configured_password is not None else default_password
+    password = "" if password_source is None else str(password_source)
+    return username, password
 
 
 def _stream_source_with_basic_auth(
