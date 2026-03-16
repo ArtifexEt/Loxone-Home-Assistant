@@ -309,6 +309,10 @@ cards:
       - button.furtka_send_tts
 ```
 
+Live Intercom MJPEG is proxied through Home Assistant endpoint
+`/api/loxone_home_assistant/intercom_stream/{serial}/{uuid_action}` using configured
+Intercom credentials.
+
 ### Optional MJPEG -> HLS wrapper
 
 If a client/player has trouble with MJPEG, you can wrap MJPEG to HLS locally:

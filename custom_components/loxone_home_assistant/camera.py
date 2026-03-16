@@ -7,7 +7,7 @@ import json
 import logging
 from collections.abc import Mapping
 from typing import Any
-from urllib.parse import quote, urlsplit, urlunsplit
+from urllib.parse import urlsplit
 
 try:
     from aiohttp import BasicAuth, ClientError
@@ -47,6 +47,11 @@ from .intercom import (
     intercom_synthetic_stream_urls,
     is_intercom_control,
     resolve_intercom_http_url,
+)
+from .intercom_stream_proxy import (
+    intercom_stream_proxy_path,
+    intercom_stream_proxy_url,
+    set_intercom_stream_target,
 )
 from .models import LoxoneControl
 from .runtime import entry_bridge
@@ -236,12 +241,24 @@ class LoxoneIntercomCameraEntity(LoxoneEntity, Camera):
 
     async def stream_source(self) -> str | None:
         await self._ensure_secured_details_loaded()
+        stream_url = self._stream_url()
+        if stream_url is None:
+            return None
         auth_username, auth_password = _intercom_auth_credentials(self.bridge)
-        return _stream_source_with_basic_auth(
-            self._stream_url(),
+        set_intercom_stream_target(
+            self.bridge,
+            self.control.uuid_action,
+            target_url=stream_url,
             username=auth_username,
             password=auth_password,
         )
+        proxy_url = intercom_stream_proxy_url(self.bridge, self.control.uuid_action)
+        if proxy_url is None:
+            return intercom_stream_proxy_path(
+                str(getattr(self.bridge, "serial", "")),
+                self.control.uuid_action,
+            )
+        return proxy_url
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
@@ -278,59 +295,49 @@ class LoxoneIntercomCameraEntity(LoxoneEntity, Camera):
             return None
 
         auth_username, auth_password = _intercom_auth_credentials(self.bridge)
-        auth_candidates = [None]
-        if auth_username is not None:
-            auth_candidates = [BasicAuth(auth_username, auth_password), None]
+        request_auth = BasicAuth(auth_username, auth_password) if auth_username is not None else None
         for image_url in image_urls:
-            for request_auth in auth_candidates:
-                try:
-                    async with session.get(image_url, auth=request_auth) as response:
-                        if response.status == 401 and request_auth is not None:
-                            continue
-                        response.raise_for_status()
-                        content_type = _response_content_type(response)
-                        if content_type == "multipart/x-mixed-replace":
-                            payload = await _extract_first_mjpeg_frame(response)
-                        else:
-                            payload = await response.read()
-                        if _is_image_payload(response, payload):
-                            return payload
-                        _LOGGER.debug(
-                            "Intercom preview returned non-image payload for %s from %s "
-                            "(status=%s, content_type=%s, preview=%r)",
-                            self.control.uuid_action,
-                            image_url,
-                            response.status,
-                            _response_content_type(response),
-                            _payload_preview(payload),
-                        )
-                except asyncio.CancelledError:
-                    raise
-                except ClientError as err:
+            try:
+                async with session.get(image_url, auth=request_auth) as response:
+                    response.raise_for_status()
+                    content_type = _response_content_type(response)
+                    if content_type == "multipart/x-mixed-replace":
+                        payload = await _extract_first_mjpeg_frame(response)
+                    else:
+                        payload = await response.read()
+                    if _is_image_payload(response, payload):
+                        return payload
                     _LOGGER.debug(
-                        "Intercom preview request failed for %s from %s (%s)",
+                        "Intercom preview returned non-image payload for %s from %s "
+                        "(status=%s, content_type=%s, preview=%r)",
                         self.control.uuid_action,
                         image_url,
-                        err,
+                        response.status,
+                        _response_content_type(response),
+                        _payload_preview(payload),
                     )
-                except Exception as err:  # noqa: BLE001
-                    _LOGGER.debug(
-                        "Intercom preview request errored for %s from %s (%s)",
-                        self.control.uuid_action,
-                        image_url,
-                        err,
-                    )
+            except asyncio.CancelledError:
+                raise
+            except ClientError as err:
+                _LOGGER.debug(
+                    "Intercom preview request failed for %s from %s (%s)",
+                    self.control.uuid_action,
+                    image_url,
+                    err,
+                )
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.debug(
+                    "Intercom preview request errored for %s from %s (%s)",
+                    self.control.uuid_action,
+                    image_url,
+                    err,
+                )
         return None
 
     def _stream_url(self) -> str | None:
-        fallback_url: str | None = None
-
         def _pick_stream_candidate(candidate: str | None) -> str | None:
-            nonlocal fallback_url
             if candidate is None:
                 return None
-            if fallback_url is None:
-                fallback_url = candidate
             if _looks_like_stream_url(candidate):
                 return candidate
             return None
@@ -409,7 +416,7 @@ class LoxoneIntercomCameraEntity(LoxoneEntity, Camera):
             picked = _pick_stream_candidate(synthetic_url)
             if picked is not None:
                 return picked
-        return fallback_url
+        return None
 
     def _snapshot_url(self) -> str | None:
         address_value = (
@@ -581,7 +588,6 @@ class LoxoneIntercomCameraEntity(LoxoneEntity, Camera):
             if isinstance(value, Mapping):
                 self._secured_details = dict(value)
             self._secured_details_loaded = True
-
 
 def _resolve_control_detail_url(
     bridge,
@@ -936,43 +942,6 @@ def _intercom_auth_credentials(bridge) -> tuple[str | None, str]:
     password_source = configured_password if configured_password is not None else default_password
     password = "" if password_source is None else str(password_source)
     return username, password
-
-
-def _stream_source_with_basic_auth(
-    stream_url: str | None,
-    *,
-    username: Any,
-    password: Any,
-) -> str | None:
-    if stream_url is None:
-        return None
-
-    parsed = urlsplit(stream_url)
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        return stream_url
-    if parsed.username:
-        return stream_url
-
-    auth_user = _coerce_text(username)
-    if auth_user is None:
-        return stream_url
-    auth_password = "" if password is None else str(password)
-
-    host = parsed.hostname
-    if host is None:
-        return stream_url
-
-    encoded_user = quote(auth_user, safe="")
-    encoded_password = quote(auth_password, safe="")
-    userinfo = (
-        encoded_user if not auth_password else f"{encoded_user}:{encoded_password}"
-    )
-
-    host_part = f"[{host}]" if ":" in host and not host.startswith("[") else host
-    port_part = f":{parsed.port}" if parsed.port is not None else ""
-    netloc = f"{userinfo}@{host_part}{port_part}"
-
-    return urlunsplit((parsed.scheme, netloc, parsed.path, parsed.query, parsed.fragment))
 
 
 def _looks_like_text_error(payload: bytes) -> bool:

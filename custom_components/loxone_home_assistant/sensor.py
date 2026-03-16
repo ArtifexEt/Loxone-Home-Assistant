@@ -2381,24 +2381,17 @@ async def _async_fetch_json(bridge, url: str) -> Any | None:
         return None
 
     auth_username, auth_password = _intercom_auth_credentials(bridge)
-    auth_candidates = [None]
-    if auth_username is not None:
-        auth_candidates = [BasicAuth(auth_username, auth_password), None]
-    for request_auth in auth_candidates:
-        try:
-            async with session.get(url, auth=request_auth) as response:
-                if response.status == 401 and request_auth is not None:
-                    continue
-                response.raise_for_status()
-                try:
-                    return await response.json(content_type=None)
-                except (TypeError, ValueError):
-                    raw = await response.text()
-                    return json.loads(raw)
-        except (ClientError, TimeoutError, ValueError, json.JSONDecodeError):
-            if request_auth is None:
-                return None
-    return None
+    request_auth = BasicAuth(auth_username, auth_password) if auth_username is not None else None
+    try:
+        async with session.get(url, auth=request_auth) as response:
+            response.raise_for_status()
+            try:
+                return await response.json(content_type=None)
+            except (TypeError, ValueError):
+                raw = await response.text()
+                return json.loads(raw)
+    except (ClientError, TimeoutError, ValueError, json.JSONDecodeError):
+        return None
 
 
 def _intercom_auth_credentials(bridge) -> tuple[str | None, str]:

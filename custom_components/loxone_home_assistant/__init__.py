@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from typing import Any
@@ -48,6 +49,11 @@ from .intercom import (
     build_intercom_tts_command,
     is_intercom_control,
     resolve_intercom_command,
+)
+from .intercom_stream_proxy import (
+    INTERCOM_STREAM_PROXY_URL,
+    clear_intercom_stream_targets,
+    intercom_stream_target,
 )
 from .models import LoxoneControl
 from .runtime import bridges_by_entry_id, remove_entry_bridge, set_entry_bridge
@@ -98,6 +104,7 @@ CALL_INTERCOM_COMMAND_SCHEMA = vol.Schema(
 NON_ALNUM_RE = re.compile(r"[^a-z0-9]+")
 DATA_ICON_CACHE = "icon_cache"
 DATA_ICON_VIEW_REGISTERED = "icon_view_registered"
+DATA_INTERCOM_STREAM_VIEW_REGISTERED = "intercom_stream_view_registered"
 
 
 def _command_service_register_kwargs() -> dict[str, Any]:
@@ -151,15 +158,95 @@ class LoxoneIconProxyView(HomeAssistantView):
         return _icon_web_response(payload)
 
 
+class LoxoneIntercomStreamProxyView(HomeAssistantView):
+    """Proxy one Intercom MJPEG stream through Home Assistant."""
+
+    url = INTERCOM_STREAM_PROXY_URL
+    name = f"api:{DOMAIN}:intercom_stream"
+    requires_auth = False
+
+    async def get(self, request: web.Request, serial: str, uuid_action: str) -> web.StreamResponse:
+        hass = getattr(self, "hass", None) or request.app.get("hass")
+        if hass is None:
+            _LOGGER.error("Intercom stream proxy request received without Home Assistant context.")
+            return web.Response(status=500)
+
+        bridge = _resolve_bridge_for_serial(hass, serial)
+        if bridge is None:
+            return web.Response(status=404)
+
+        control = bridge.control_for_uuid_action(uuid_action)
+        if control is None or not is_intercom_control(control):
+            return web.Response(status=404)
+
+        target = intercom_stream_target(bridge, uuid_action)
+        if target is None:
+            return web.Response(status=404)
+
+        session = getattr(bridge, "_session", None)
+        if session is None:
+            return web.Response(status=503)
+
+        username = target["username"]
+        password = target["password"]
+        request_auth = BasicAuth(username, password) if username is not None else None
+        target_url = target["target_url"]
+
+        try:
+            async with session.get(target_url, auth=request_auth) as upstream:
+                if upstream.status != 200:
+                    return web.Response(status=upstream.status)
+
+                content_type = upstream.headers.get("Content-Type", "multipart/x-mixed-replace")
+                if ";" in content_type:
+                    content_type = content_type.split(";", 1)[0].strip()
+                response = web.StreamResponse(
+                    status=200,
+                    headers={
+                        "Content-Type": content_type or "multipart/x-mixed-replace",
+                        "Cache-Control": "no-store",
+                    },
+                )
+                await response.prepare(request)
+                async for chunk in upstream.content.iter_chunked(16 * 1024):
+                    if not chunk:
+                        continue
+                    await response.write(chunk)
+                await response.write_eof()
+                return response
+        except asyncio.CancelledError:
+            raise
+        except ClientError as err:
+            _LOGGER.debug(
+                "Intercom stream proxy request failed for serial=%s uuid_action=%s (%s)",
+                bridge.serial,
+                uuid_action,
+                err,
+            )
+            return web.Response(status=502)
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug(
+                "Intercom stream proxy request errored for serial=%s uuid_action=%s (%s)",
+                bridge.serial,
+                uuid_action,
+                err,
+            )
+            return web.Response(status=500)
+
+
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:
     """Set up the integration namespace."""
     del config
     hass.data.setdefault(DOMAIN, {})
     hass.data[DOMAIN].setdefault(DATA_BRIDGES, {})
     hass.data[DOMAIN].setdefault(DATA_ICON_CACHE, {})
+    hass.data[DOMAIN].setdefault(DATA_INTERCOM_STREAM_VIEW_REGISTERED, False)
     if not hass.data[DOMAIN].get(DATA_ICON_VIEW_REGISTERED):
         hass.http.register_view(LoxoneIconProxyView())
         hass.data[DOMAIN][DATA_ICON_VIEW_REGISTERED] = True
+    if not hass.data[DOMAIN].get(DATA_INTERCOM_STREAM_VIEW_REGISTERED):
+        hass.http.register_view(LoxoneIntercomStreamProxyView())
+        hass.data[DOMAIN][DATA_INTERCOM_STREAM_VIEW_REGISTERED] = True
 
     if not hass.services.has_service(DOMAIN, SERVICE_SEND_COMMAND):
         hass.services.async_register(
@@ -243,6 +330,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     bridge = remove_entry_bridge(hass, entry)
     if bridge is not None:
+        clear_intercom_stream_targets(bridge)
         _clear_cached_bridge_icons(hass, bridge.serial)
         await bridge.async_shutdown()
 

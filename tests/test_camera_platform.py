@@ -5,7 +5,6 @@ from __future__ import annotations
 import sys
 import types
 import unittest
-from urllib.parse import quote, urlsplit, urlunsplit
 
 from tests._loader import load_integration_module
 
@@ -237,16 +236,11 @@ class _FakeHass:
         self.data = {domain: {"bridges": {entry_id: bridge}}}
 
 
-def _stream_source_with_auth(url: str, username: str = "user", password: str = "pass") -> str:
-    parsed = urlsplit(url)
-    host = parsed.hostname or ""
-    host_part = f"[{host}]" if ":" in host and not host.startswith("[") else host
-    port_part = f":{parsed.port}" if parsed.port is not None else ""
-    encoded_user = quote(username, safe="")
-    encoded_password = quote(password, safe="")
-    userinfo = encoded_user if not password else f"{encoded_user}:{encoded_password}"
-    netloc = f"{userinfo}@{host_part}{port_part}"
-    return urlunsplit((parsed.scheme, netloc, parsed.path, parsed.query, parsed.fragment))
+def _proxy_stream_source(uuid_action: str, *, base_url: str | None = None) -> str:
+    path = f"/api/loxone_home_assistant/intercom_stream/1234567890/{uuid_action}"
+    if base_url is None:
+        return path
+    return f"{base_url}{path}"
 
 
 _install_homeassistant_stubs()
@@ -354,7 +348,7 @@ class CameraPlatformTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             await entity.stream_source(),
-            _stream_source_with_auth(expected_stream_url),
+            _proxy_stream_source("intercom-action"),
         )
         self.assertEqual(entity.extra_state_attributes["stream_url"], expected_stream_url)
         self.assertEqual(entity.extra_state_attributes["snapshot_url"], expected_snapshot_url)
@@ -423,10 +417,10 @@ class CameraPlatformTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             await entity.stream_source(),
-            _stream_source_with_auth("https://198.51.100.70/rest/stream.mjpg"),
+            _proxy_stream_source("intercom-v2-action"),
         )
 
-    async def test_camera_retries_without_auth_when_snapshot_returns_text_error(self) -> None:
+    async def test_camera_does_not_retry_without_auth_when_snapshot_returns_text_error(self) -> None:
         control = LoxoneControl(
             uuid="intercom-v2-uuid",
             uuid_action="intercom-v2-action",
@@ -447,12 +441,11 @@ class CameraPlatformTests(unittest.IsolatedAsyncioTestCase):
 
         image = await entity.async_camera_image()
 
-        self.assertEqual(image, b"snapshot-image")
+        self.assertIsNone(image)
         self.assertEqual(
             session.calls,
             [
                 (expected_snapshot_url, True),
-                (expected_snapshot_url, False),
             ],
         )
 
@@ -492,7 +485,6 @@ class CameraPlatformTests(unittest.IsolatedAsyncioTestCase):
             session.calls,
             [
                 (expected_snapshot_url, True),
-                (expected_snapshot_url, False),
                 (expected_stream_url, True),
             ],
         )
@@ -575,7 +567,7 @@ class CameraPlatformTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             await entity.stream_source(),
-            _stream_source_with_auth(expected_stream_url),
+            _proxy_stream_source("intercom-v2-action"),
         )
         self.assertEqual(entity.extra_state_attributes["snapshot_url"], expected_snapshot_url)
         self.assertEqual(
@@ -621,7 +613,7 @@ class CameraPlatformTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             await entity.stream_source(),
-            _stream_source_with_auth(expected_stream_url),
+            _proxy_stream_source("intercom-v2-action"),
         )
         self.assertEqual(entity.extra_state_attributes["snapshot_url"], expected_snapshot_url)
         self.assertEqual(
@@ -669,7 +661,7 @@ class CameraPlatformTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             await entity.stream_source(),
-            _stream_source_with_auth(expected_stream_url),
+            _proxy_stream_source("intercom-v2-action"),
         )
         self.assertEqual(
             entity.extra_state_attributes["selected_history_image_url"],
@@ -715,7 +707,7 @@ class CameraPlatformTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             await entity.stream_source(),
-            _stream_source_with_auth(expected_stream_url),
+            _proxy_stream_source("intercom-v2-action"),
         )
         self.assertEqual(entity.extra_state_attributes["snapshot_url"], expected_snapshot_url)
         self.assertEqual(
@@ -753,7 +745,7 @@ class CameraPlatformTests(unittest.IsolatedAsyncioTestCase):
         entity = entities[0]
         self.assertEqual(
             await entity.stream_source(),
-            _stream_source_with_auth("https://mini.local/dev/variant-stream.mjpg"),
+            _proxy_stream_source("door-station-action"),
         )
         self.assertEqual(
             entity.extra_state_attributes["snapshot_url"],
@@ -809,7 +801,7 @@ class CameraPlatformTests(unittest.IsolatedAsyncioTestCase):
         entity = entities[0]
         self.assertEqual(
             await entity.stream_source(),
-            _stream_source_with_auth(expected_stream_url),
+            _proxy_stream_source("door-controller-action"),
         )
         self.assertEqual(entity.extra_state_attributes["snapshot_url"], expected_snapshot_url)
         image = await entity.async_camera_image()
@@ -845,7 +837,7 @@ class CameraPlatformTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             await entity.stream_source(),
-            _stream_source_with_auth("http://ice0a19d/mjpg/video.mjpg"),
+            _proxy_stream_source("intercom-action"),
         )
 
     async def test_intercom_ignores_static_video_jpg_when_resolving_stream_source(self) -> None:
@@ -873,7 +865,7 @@ class CameraPlatformTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             await entity.stream_source(),
-            _stream_source_with_auth("http://ice0a19d/mjpg/video.mjpg"),
+            _proxy_stream_source("intercom-action"),
         )
 
     async def test_stream_source_keeps_existing_url_credentials(self) -> None:
@@ -894,7 +886,7 @@ class CameraPlatformTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             await entity.stream_source(),
-            "http://viewer:token@192.0.2.10/mjpg/video.mjpg",
+            _proxy_stream_source("intercom-action"),
         )
 
     async def test_stream_source_encodes_special_characters_in_auth(self) -> None:
@@ -917,7 +909,7 @@ class CameraPlatformTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             await entity.stream_source(),
-            "http://user%40name:pa%3Ass%2Fword@192.0.2.10/mjpg/video.mjpg",
+            _proxy_stream_source("intercom-action"),
         )
 
     async def test_stream_source_and_preview_use_dedicated_intercom_credentials(self) -> None:
@@ -933,7 +925,6 @@ class CameraPlatformTests(unittest.IsolatedAsyncioTestCase):
                 }
             },
         )
-        expected_stream_url = "http://camuser:campass@192.0.2.10/mjpg/video.mjpg"
         session = _FakeSession(
             {
                 ("http://192.0.2.10/mjpg/video.mjpg", True): (200, b"frame"),
@@ -944,11 +935,45 @@ class CameraPlatformTests(unittest.IsolatedAsyncioTestCase):
         bridge.intercom_password = "campass"
         entity = LoxoneIntercomCameraEntity(bridge, control)
 
-        self.assertEqual(await entity.stream_source(), expected_stream_url)
+        self.assertEqual(await entity.stream_source(), _proxy_stream_source("intercom-action"))
         image = await entity.async_camera_image()
 
         self.assertEqual(image, b"frame")
         self.assertEqual(session.auth_logins, ["camuser"])
+
+    async def test_stream_source_uses_local_intercom_proxy_url_when_hass_base_url_is_available(
+        self,
+    ) -> None:
+        control = LoxoneControl(
+            uuid="intercom-uuid",
+            uuid_action="intercom-action",
+            name="Furtka",
+            type="Intercom",
+            states={},
+            details={"videoInfo": {"streamUrl": "/dev/stream.mjpg"}},
+        )
+        bridge = _FakeBridge([control], {}, _FakeSession())
+        bridge.hass = types.SimpleNamespace(
+            config=types.SimpleNamespace(
+                internal_url="http://ha.local:8123",
+                external_url=None,
+                api=None,
+            )
+        )
+        entity = LoxoneIntercomCameraEntity(bridge, control)
+
+        self.assertEqual(
+            await entity.stream_source(),
+            _proxy_stream_source("intercom-action", base_url="http://ha.local:8123"),
+        )
+        self.assertEqual(
+            bridge._intercom_stream_proxy_targets["intercom-action"],  # noqa: SLF001
+            {
+                "target_url": "https://mini.local/dev/stream.mjpg",
+                "username": "user",
+                "password": "pass",
+            },
+        )
 
 
 if __name__ == "__main__":
