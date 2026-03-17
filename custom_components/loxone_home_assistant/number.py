@@ -7,15 +7,22 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import INTERCOM_CONTROL_TYPES, NUMBER_CONTROL_TYPES
+from .const import INTERCOM_CONTROL_TYPES, MEDIA_PLAYER_CONTROL_TYPES, NUMBER_CONTROL_TYPES
 from .entity import LoxoneEntity, coerce_float, first_numeric_state_name, normalize_state_name
 from .intercom import (
     intercom_tts_volume,
     set_intercom_tts_volume,
 )
+from .media_player import (
+    audio_tts_volume,
+    set_audio_tts_volume,
+)
 from .runtime import entry_bridge
 INTERCOM_TTS_CONTROL_TYPES_NORMALIZED = {
     normalize_state_name(value) for value in INTERCOM_CONTROL_TYPES
+}
+AUDIO_TTS_CONTROL_TYPES_NORMALIZED = {
+    normalize_state_name(value) for value in MEDIA_PLAYER_CONTROL_TYPES
 }
 
 
@@ -33,6 +40,11 @@ async def async_setup_entry(
         LoxoneIntercomTtsVolumeEntity(bridge, control)
         for control in bridge.controls
         if _supports_intercom_tts_controls(control)
+    )
+    entities.extend(
+        LoxoneAudioTtsVolumeEntity(bridge, control)
+        for control in bridge.controls
+        if _supports_audio_tts_controls(control)
     )
     async_add_entities(entities)
 
@@ -81,6 +93,26 @@ class LoxoneIntercomTtsVolumeEntity(LoxoneEntity, NumberEntity):
         self.async_write_ha_state()
 
 
+class LoxoneAudioTtsVolumeEntity(LoxoneEntity, NumberEntity):
+    """Number helper storing AudioZone TTS volume."""
+
+    _attr_icon = "mdi:volume-high"
+    _attr_native_min_value = 0.0
+    _attr_native_max_value = 100.0
+    _attr_native_step = 1.0
+
+    def __init__(self, bridge, control) -> None:
+        super().__init__(bridge, control, "TTS Volume")
+
+    @property
+    def native_value(self) -> float:
+        return float(audio_tts_volume(self.bridge, self.control))
+
+    async def async_set_native_value(self, value: float) -> None:
+        set_audio_tts_volume(self.bridge, self.control, value)
+        self.async_write_ha_state()
+
+
 def _supports_number_control(control) -> bool:
     if control.type == "UpDownLeftRight":
         normalized_states = {state_name.strip().casefold() for state_name in control.states}
@@ -90,3 +122,7 @@ def _supports_number_control(control) -> bool:
 
 def _supports_intercom_tts_controls(control) -> bool:
     return normalize_state_name(control.type) in INTERCOM_TTS_CONTROL_TYPES_NORMALIZED
+
+
+def _supports_audio_tts_controls(control) -> bool:
+    return normalize_state_name(control.type) in AUDIO_TTS_CONTROL_TYPES_NORMALIZED

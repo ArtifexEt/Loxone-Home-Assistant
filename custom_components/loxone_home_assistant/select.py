@@ -176,6 +176,7 @@ class LoxoneIntercomHistorySelectEntity(LoxoneEntity, SelectEntity):
     """Select old Intercom snapshots and expose them for camera preview."""
 
     _attr_icon = "mdi:image-multiple"
+    _attr_entity_registry_enabled_default = False
 
     def __init__(self, bridge, control: LoxoneControl) -> None:
         super().__init__(bridge, control, "History Photo")

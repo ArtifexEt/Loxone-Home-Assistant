@@ -11,15 +11,22 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import INTERCOM_CONTROL_TYPES, TEXT_CONTROL_TYPES
+from .const import INTERCOM_CONTROL_TYPES, MEDIA_PLAYER_CONTROL_TYPES, TEXT_CONTROL_TYPES
 from .entity import LoxoneEntity, normalize_state_name
 from .intercom import (
     intercom_tts_message,
     set_intercom_tts_message,
 )
+from .media_player import (
+    audio_tts_message,
+    set_audio_tts_message,
+)
 from .runtime import entry_bridge
 INTERCOM_TTS_CONTROL_TYPES_NORMALIZED = {
     normalize_state_name(value) for value in INTERCOM_CONTROL_TYPES
+}
+AUDIO_TTS_CONTROL_TYPES_NORMALIZED = {
+    normalize_state_name(value) for value in MEDIA_PLAYER_CONTROL_TYPES
 }
 
 
@@ -36,6 +43,11 @@ async def async_setup_entry(
         LoxoneIntercomTtsMessageEntity(bridge, control)
         for control in bridge.controls
         if _supports_intercom_tts_controls(control)
+    )
+    entities.extend(
+        LoxoneAudioTtsMessageEntity(bridge, control)
+        for control in bridge.controls
+        if _supports_audio_tts_controls(control)
     )
     async_add_entities(entities)
 
@@ -72,5 +84,29 @@ class LoxoneIntercomTtsMessageEntity(LoxoneEntity, TextEntity):
         self.async_write_ha_state()
 
 
+class LoxoneAudioTtsMessageEntity(LoxoneEntity, TextEntity):
+    """Text helper storing AudioZone TTS message."""
+
+    _attr_icon = "mdi:message-text"
+    _attr_native_max = 120
+    if TextMode is not None:
+        _attr_mode = TextMode.TEXT
+
+    def __init__(self, bridge, control) -> None:
+        super().__init__(bridge, control, "TTS Message")
+
+    @property
+    def native_value(self) -> str:
+        return audio_tts_message(self.bridge, self.control)
+
+    async def async_set_value(self, value: str) -> None:
+        set_audio_tts_message(self.bridge, self.control, value)
+        self.async_write_ha_state()
+
+
 def _supports_intercom_tts_controls(control) -> bool:
     return normalize_state_name(control.type) in INTERCOM_TTS_CONTROL_TYPES_NORMALIZED
+
+
+def _supports_audio_tts_controls(control) -> bool:
+    return normalize_state_name(control.type) in AUDIO_TTS_CONTROL_TYPES_NORMALIZED

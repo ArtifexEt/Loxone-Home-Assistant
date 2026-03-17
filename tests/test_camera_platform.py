@@ -557,6 +557,31 @@ class CameraPlatformTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(session.auth_logins, ["camuser"])
 
+    async def test_live_stream_falls_back_to_current_user_credentials(self) -> None:
+        control = LoxoneControl(
+            uuid="intercom-uuid",
+            uuid_action="intercom-action",
+            name="Furtka",
+            type="Intercom",
+            states={},
+            details={"videoInfo": {"streamUrl": "http://192.0.2.10/mjpg/video.mjpg"}},
+        )
+        session = _FakeSession(
+            {
+                ("http://192.0.2.10/mjpg/video.mjpg", True): (
+                    200,
+                    b"\xff\xd8\xff\xe0frame\xff\xd9",
+                    "multipart/x-mixed-replace",
+                ),
+            }
+        )
+        bridge = _FakeBridge([control], {}, session)
+        entity = LoxoneIntercomCameraEntity(bridge, control)
+
+        await entity.async_camera_image()
+
+        self.assertEqual(session.auth_logins, ["user"])
+
 
 if __name__ == "__main__":
     unittest.main()

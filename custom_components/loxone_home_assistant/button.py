@@ -12,7 +12,7 @@ from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .bridge import LoxoneConnectionError
-from .const import BUTTON_CONTROL_TYPES, INTERCOM_CONTROL_TYPES
+from .const import BUTTON_CONTROL_TYPES, INTERCOM_CONTROL_TYPES, MEDIA_PLAYER_CONTROL_TYPES
 from .entity import LoxoneEntity, miniserver_device_info, normalize_state_name
 from .intercom import (
     build_intercom_tts_command,
@@ -20,6 +20,12 @@ from .intercom import (
     is_intercom_control,
     intercom_tts_volume,
     resolve_intercom_command,
+)
+from .media_player import (
+    audio_tts_message,
+    audio_tts_volume,
+    build_audio_tts_command,
+    resolve_audio_tts_target_uuid_action,
 )
 from .models import LoxoneControl
 from .runtime import entry_bridge
@@ -31,6 +37,9 @@ INTERCOM_GEN2_BUTTON_SPECS = (
 )
 INTERCOM_TTS_CONTROL_TYPES_NORMALIZED = {
     normalize_state_name(value) for value in INTERCOM_CONTROL_TYPES
+}
+AUDIO_TTS_CONTROL_TYPES_NORMALIZED = {
+    normalize_state_name(value) for value in MEDIA_PLAYER_CONTROL_TYPES
 }
 
 
@@ -69,6 +78,14 @@ def _build_intercom_tts_buttons(bridge) -> list[ButtonEntity]:
     ]
 
 
+def _build_audio_tts_buttons(bridge) -> list[ButtonEntity]:
+    return [
+        LoxoneAudioTtsButton(bridge, control)
+        for control in bridge.controls
+        if _supports_audio_tts_controls(control)
+    ]
+
+
 def _build_hub_action_buttons(bridge) -> list[ButtonEntity]:
     entities: list[ButtonEntity] = [LoxoneHubRestartButton(bridge)]
     if callable(getattr(bridge, "async_refresh_system_stats", None)):
@@ -84,6 +101,7 @@ async def async_setup_entry(
     entities.extend(_build_control_buttons(bridge))
     entities.extend(_build_intercom_command_buttons(bridge))
     entities.extend(_build_intercom_tts_buttons(bridge))
+    entities.extend(_build_audio_tts_buttons(bridge))
     entities.extend(_build_hub_action_buttons(bridge))
     async_add_entities(entities)
 
@@ -146,6 +164,44 @@ class LoxoneIntercomTtsButton(LoxoneEntity, ButtonEntity):
         attrs["intercom_tts_volume"] = intercom_tts_volume(
             self.bridge,
             self.control.uuid_action,
+        )
+        return attrs
+
+
+class LoxoneAudioTtsButton(LoxoneEntity, ButtonEntity):
+    """Action button sending configured TTS message to AudioZone targets."""
+
+    _attr_icon = "mdi:bullhorn"
+
+    def __init__(self, bridge, control: LoxoneControl) -> None:
+        super().__init__(bridge, control, "Send TTS")
+
+    async def async_press(self) -> None:
+        message = audio_tts_message(self.bridge, self.control)
+        volume = audio_tts_volume(self.bridge, self.control)
+        command = build_audio_tts_command(message, volume)
+        if command is None:
+            return
+        target_uuid_action = resolve_audio_tts_target_uuid_action(
+            self.bridge,
+            self.control,
+        )
+        await self.bridge.async_send_action(target_uuid_action, command)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        attrs = super().extra_state_attributes
+        attrs["audio_tts_message"] = audio_tts_message(
+            self.bridge,
+            self.control,
+        )
+        attrs["audio_tts_volume"] = audio_tts_volume(
+            self.bridge,
+            self.control,
+        )
+        attrs["audio_tts_target_uuid_action"] = resolve_audio_tts_target_uuid_action(
+            self.bridge,
+            self.control,
         )
         return attrs
 
@@ -215,3 +271,7 @@ def _is_intercom_gen2_control(control: LoxoneControl) -> bool:
 
 def _supports_intercom_tts_controls(control: LoxoneControl) -> bool:
     return normalize_state_name(control.type) in INTERCOM_TTS_CONTROL_TYPES_NORMALIZED
+
+
+def _supports_audio_tts_controls(control: LoxoneControl) -> bool:
+    return normalize_state_name(control.type) in AUDIO_TTS_CONTROL_TYPES_NORMALIZED

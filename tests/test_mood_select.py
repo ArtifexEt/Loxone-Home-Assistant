@@ -299,6 +299,8 @@ class MoodSelectTests(unittest.IsolatedAsyncioTestCase):
         )
         entity = LoxoneIntercomHistorySelectEntity(bridge, intercom)
 
+        self.assertFalse(entity._attr_entity_registry_enabled_default)  # noqa: SLF001
+
         await entity.async_update()
 
         self.assertEqual(entity._attr_options[0], "Live")

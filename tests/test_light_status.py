@@ -373,6 +373,20 @@ class LightMoodEffectsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(entity.effect_list, ["Reading", "Evening"])
         self.assertEqual(entity.effect, "Evening")
 
+    def test_controller_without_moods_returns_flag_typed_supported_features(self) -> None:
+        controller = LoxoneControl(
+            uuid="ctrl-uuid",
+            uuid_action="ctrl-action",
+            name="Salon",
+            type="LightControllerV2",
+            states={"activeMoods": "state-moods"},
+        )
+        bridge = _FakeBridge([controller], {"state-moods": "0"})
+        entity = LoxoneLightEntity(bridge, controller)
+
+        self.assertEqual(entity.effect_list, None)
+        self.assertEqual(entity.supported_features, light_module.LightEntityFeature(0))
+
     async def test_turn_on_with_effect_sends_change_to_command(self) -> None:
         controller = self._controller()
         bridge = _FakeBridge([controller], {"state-moods": "0"})

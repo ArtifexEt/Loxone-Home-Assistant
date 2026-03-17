@@ -233,11 +233,6 @@ class LoxoneCommunityConfigFlow(ConfigFlow, domain=DOMAIN):
                 {
                     vol.Required(CONF_USERNAME, default=self._auth_data.get(CONF_USERNAME, "")): str,
                     vol.Required(CONF_PASSWORD): str,
-                    vol.Optional(
-                        CONF_INTERCOM_USERNAME,
-                        default=_coerce_text(self._auth_data.get(CONF_INTERCOM_USERNAME), ""),
-                    ): str,
-                    vol.Optional(CONF_INTERCOM_PASSWORD, default=""): str,
                 }
             ),
             errors=errors,
@@ -259,11 +254,6 @@ class LoxoneCommunityConfigFlow(ConfigFlow, domain=DOMAIN):
                     vol.Required(CONF_PORT, default=port): int,
                     vol.Required(CONF_USERNAME, default=self._auth_data.get(CONF_USERNAME, "")): str,
                     vol.Required(CONF_PASSWORD): str,
-                    vol.Optional(
-                        CONF_INTERCOM_USERNAME,
-                        default=_coerce_text(self._auth_data.get(CONF_INTERCOM_USERNAME), ""),
-                    ): str,
-                    vol.Optional(CONF_INTERCOM_PASSWORD, default=""): str,
                     vol.Required(
                         CONF_VERIFY_SSL,
                         default=(

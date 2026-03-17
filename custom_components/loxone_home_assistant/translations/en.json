@@ -11,17 +11,16 @@
           "use_loxone_icons": "Use Loxone icons as entity pictures"
         },
         "data_description": {
+          "enable_light_mood_select": "Adds a separate select entity for scenes and moods. It does not expose the individual child lights from a LightController.",
           "expose_controller_child_lights": "Warning: disabling this option removes those entities from Home Assistant (they may disappear from dashboards and automations)."
         }
       },
       "auto": {
         "title": "Automatic Loxone discovery",
-        "description": "Enter your Loxone username and password. The integration will scan the local network for a Loxone server (Miniserver, Miniserver Go, Miniserver Compact).",
+        "description": "Enter your Loxone username and password. The integration will scan the local network for a Loxone server (Miniserver, Miniserver Go, Miniserver Compact). Intercom video uses the same account by default; only set dedicated Intercom video credentials later in Options if your device requires it.",
         "data": {
           "username": "Username",
-          "password": "Password",
-          "intercom_username": "Intercom video username (optional)",
-          "intercom_password": "Intercom video password (optional)"
+          "password": "Password"
         }
       },
       "select": {
@@ -33,14 +32,12 @@
       },
       "manual": {
         "title": "Manual Loxone server setup",
-        "description": "Automatic discovery did not complete. Enter the local Loxone server host manually.",
+        "description": "Automatic discovery did not complete. Enter the local Loxone server host manually. Intercom video uses the same account by default; only set dedicated Intercom video credentials later in Options if your device requires it.",
         "data": {
           "host": "Host",
           "port": "Port",
           "username": "Username",
           "password": "Password",
-          "intercom_username": "Intercom video username (optional)",
-          "intercom_password": "Intercom video password (optional)",
           "verify_ssl": "Verify TLS certificate"
         }
       }
@@ -76,6 +73,7 @@
           "use_loxone_icons": "Use Loxone icons as entity pictures"
         },
         "data_description": {
+          "enable_light_mood_select": "Adds a separate select entity for scenes and moods. It does not expose the individual child lights from a LightController.",
           "expose_controller_child_lights": "Warning: disabling this option removes those entities from Home Assistant (they may disappear from dashboards and automations)."
         }
       }

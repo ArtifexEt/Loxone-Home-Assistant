@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Mapping
+from enum import IntFlag
 from typing import Any
 
 from homeassistant.components.light import (
@@ -17,7 +18,7 @@ from homeassistant.components.light import (
 try:
     from homeassistant.components.light import LightEntityFeature
 except ImportError:  # pragma: no cover - fallback for lightweight test stubs
-    class LightEntityFeature:  # type: ignore[no-redef]
+    class LightEntityFeature(IntFlag):  # type: ignore[no-redef]
         EFFECT = 4
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
@@ -254,8 +255,8 @@ class LoxoneLightEntity(LoxoneEntity, LightEntity):
         return {ColorMode.ONOFF}
 
     @property
-    def supported_features(self) -> int:
-        features = 0
+    def supported_features(self) -> LightEntityFeature:
+        features = LightEntityFeature(0)
         if self.control.type in CONTROLLER_TYPES and self._effect_list:
             features |= LIGHT_EFFECT_FEATURE
         return features

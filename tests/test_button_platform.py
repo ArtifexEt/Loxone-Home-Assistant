@@ -24,6 +24,7 @@ def _install_homeassistant_stubs() -> None:
         "climate": "climate",
         "cover": "cover",
         "light": "light",
+        "media_player": "media_player",
         "number": "number",
         "select": "select",
         "sensor": "sensor",
@@ -48,6 +49,45 @@ def _install_homeassistant_stubs() -> None:
         pass
 
     button.ButtonEntity = ButtonEntity
+
+    media_player = sys.modules["homeassistant.components.media_player"]
+
+    class MediaPlayerEntity:
+        pass
+
+    class MediaPlayerDeviceClass:
+        SPEAKER = "speaker"
+
+    class MediaPlayerState:
+        OFF = "off"
+        IDLE = "idle"
+        PAUSED = "paused"
+        PLAYING = "playing"
+
+    class MediaPlayerEntityFeature:
+        PAUSE = 1 << 0
+        PLAY = 1 << 1
+        STOP = 1 << 2
+        NEXT_TRACK = 1 << 3
+        PREVIOUS_TRACK = 1 << 4
+        VOLUME_SET = 1 << 5
+        VOLUME_STEP = 1 << 6
+        TURN_ON = 1 << 7
+        TURN_OFF = 1 << 8
+        SELECT_SOURCE = 1 << 9
+        PLAY_MEDIA = 1 << 10
+        SHUFFLE_SET = 1 << 11
+        REPEAT_SET = 1 << 12
+        SEEK = 1 << 13
+
+    class MediaType:
+        MUSIC = "music"
+
+    media_player.MediaPlayerEntity = MediaPlayerEntity
+    media_player.MediaPlayerDeviceClass = MediaPlayerDeviceClass
+    media_player.MediaPlayerState = MediaPlayerState
+    media_player.MediaPlayerEntityFeature = MediaPlayerEntityFeature
+    media_player.MediaType = MediaType
 
     const = types.ModuleType("homeassistant.const")
 
@@ -158,13 +198,22 @@ class _FakeBridge:
     miniserver_name = "Loxone Miniserver"
     software_version = "16.1.11.6"
 
-    def __init__(self, controls):
+    def __init__(self, controls, values=None, media_servers=None):
         self.controls = controls
+        self._controls_by_action = {control.uuid_action: control for control in controls}
+        self._values = values or {}
+        self.media_servers_by_uuid_action = media_servers or {}
         self.commands: list[tuple[str, str]] = []
         self.raw_commands: list[str] = []
 
     def add_listener(self, _callback_fn, _watched_uuids):
         return lambda: None
+
+    def control_state(self, control, state_name):
+        return self._values.get(control.state_uuid(state_name))
+
+    def control_for_uuid_action(self, uuid_action):
+        return self._controls_by_action.get(uuid_action)
 
     async def async_send_action(self, uuid_action, command):
         self.commands.append((uuid_action, command))
@@ -188,7 +237,9 @@ models = load_integration_module("custom_components.loxone_home_assistant.models
 const = load_integration_module("custom_components.loxone_home_assistant.const")
 button_module = load_integration_module("custom_components.loxone_home_assistant.button")
 intercom_module = load_integration_module("custom_components.loxone_home_assistant.intercom")
+media_player_module = load_integration_module("custom_components.loxone_home_assistant.media_player")
 LoxoneControl = models.LoxoneControl
+LoxoneMediaServer = models.LoxoneMediaServer
 
 
 class ButtonPlatformTests(unittest.IsolatedAsyncioTestCase):
@@ -356,6 +407,54 @@ class ButtonPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             bridge.commands,
             [("intercom-action", "tts/Test%20message")],
+        )
+
+    async def test_setup_adds_audio_tts_button_and_sends_tts(self) -> None:
+        audio_zone = LoxoneControl(
+            uuid="audio-uuid",
+            uuid_action="audio-action",
+            name="Korytarz",
+            type="AudioZoneV2",
+            states={
+                "volume": "state-volume",
+            },
+        )
+        media_server = LoxoneMediaServer(
+            uuid_action="media-server-action",
+            name="Music Server",
+        )
+        bridge = _FakeBridge(
+            [audio_zone],
+            values={"state-volume": 35},
+            media_servers={"audio-action": media_server},
+        )
+        entry = _FakeConfigEntry("entry-1")
+        hass = _FakeHass(entry.entry_id, bridge, const.DOMAIN)
+        entities: list = []
+
+        await button_module.async_setup_entry(
+            hass,
+            entry,
+            lambda new_entities: entities.extend(new_entities),
+        )
+
+        tts_buttons = [
+            entity
+            for entity in entities
+            if isinstance(entity, button_module.LoxoneAudioTtsButton)
+        ]
+        self.assertEqual(len(tts_buttons), 1)
+        tts_button = tts_buttons[0]
+
+        await tts_button.async_press()
+        self.assertEqual(bridge.commands, [])
+
+        media_player_module.set_audio_tts_message(bridge, audio_zone, "Alarm test")
+
+        await tts_button.async_press()
+        self.assertEqual(
+            bridge.commands,
+            [("media-server-action", "tts/Alarm test/35")],
         )
 
 

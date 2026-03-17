@@ -59,6 +59,10 @@ TTS_STATE_CANDIDATES = ("tts",)
 MEDIA_SERVER_CONN_STATE_CANDIDATES = ("connState", "connectionState")
 MEDIA_SERVER_CERTIFICATE_STATE_CANDIDATES = ("certificateValid", "certValid")
 MEDIA_SERVER_HOST_STATE_CANDIDATES = ("host",)
+DEFAULT_AUDIO_TTS_MESSAGE = ""
+DEFAULT_AUDIO_TTS_VOLUME = 60
+_AUDIO_TTS_MESSAGES_ATTR = "_audio_tts_messages"
+_AUDIO_TTS_VOLUMES_ATTR = "_audio_tts_volumes"
 
 REPEAT_OFF = "off"
 REPEAT_ONE = "one"
@@ -1028,6 +1032,97 @@ def _coerce_tts_volume(kwargs: Mapping[str, Any]) -> int | None:
         if isinstance(extra, Mapping):
             raw_value = extra.get("volume")
     volume = _coerce_int(raw_value)
+    if volume is None:
+        return None
+    return max(0, min(100, volume))
+
+
+def audio_tts_message(bridge: Any, control_or_uuid_action: Any) -> str:
+    store = _audio_tts_message_store(bridge)
+    key = _audio_tts_store_key(control_or_uuid_action)
+    value = store.get(key, DEFAULT_AUDIO_TTS_MESSAGE)
+    return str(value).strip()
+
+
+def set_audio_tts_message(bridge: Any, control_or_uuid_action: Any, value: Any) -> str:
+    text = _coerce_text(value) or DEFAULT_AUDIO_TTS_MESSAGE
+    _audio_tts_message_store(bridge)[_audio_tts_store_key(control_or_uuid_action)] = text
+    return text
+
+
+def audio_tts_volume(bridge: Any, control_or_uuid_action: Any) -> int:
+    store = _audio_tts_volume_store(bridge)
+    key = _audio_tts_store_key(control_or_uuid_action)
+    raw = store.get(key)
+    volume = _coerce_audio_tts_volume(raw)
+    if volume is not None:
+        return volume
+
+    fallback = _default_audio_tts_volume(bridge, control_or_uuid_action)
+    if fallback is not None:
+        return fallback
+    return DEFAULT_AUDIO_TTS_VOLUME
+
+
+def set_audio_tts_volume(bridge: Any, control_or_uuid_action: Any, value: Any) -> int:
+    volume = _coerce_audio_tts_volume(value)
+    if volume is None:
+        volume = DEFAULT_AUDIO_TTS_VOLUME
+    _audio_tts_volume_store(bridge)[_audio_tts_store_key(control_or_uuid_action)] = volume
+    return volume
+
+
+def _default_audio_tts_volume(bridge: Any, control_or_uuid_action: Any) -> int | None:
+    control = _audio_tts_control(bridge, control_or_uuid_action)
+    if control is None:
+        return None
+    state_name = first_matching_state_name(control, VOLUME_STATE_CANDIDATES)
+    numeric = coerce_float(_control_state_raw(bridge, control, state_name))
+    if numeric is None:
+        return None
+    if 0.0 <= numeric <= 1.0:
+        percent = round(numeric * 100)
+    else:
+        percent = round(numeric)
+    if percent <= 0:
+        return None
+    return max(0, min(100, percent))
+
+
+def _audio_tts_store_key(control_or_uuid_action: Any) -> str:
+    uuid_action = _coerce_text(getattr(control_or_uuid_action, "uuid_action", control_or_uuid_action))
+    return uuid_action or ""
+
+
+def _audio_tts_control(bridge: Any, control_or_uuid_action: Any) -> Any | None:
+    if hasattr(control_or_uuid_action, "uuid_action"):
+        return control_or_uuid_action
+    resolver = getattr(bridge, "control_for_uuid_action", None)
+    if callable(resolver):
+        return resolver(control_or_uuid_action)
+    return None
+
+
+def _audio_tts_message_store(bridge: Any) -> dict[str, str]:
+    store = getattr(bridge, _AUDIO_TTS_MESSAGES_ATTR, None)
+    if isinstance(store, dict):
+        return store
+    created: dict[str, str] = {}
+    setattr(bridge, _AUDIO_TTS_MESSAGES_ATTR, created)
+    return created
+
+
+def _audio_tts_volume_store(bridge: Any) -> dict[str, int]:
+    store = getattr(bridge, _AUDIO_TTS_VOLUMES_ATTR, None)
+    if isinstance(store, dict):
+        return store
+    created: dict[str, int] = {}
+    setattr(bridge, _AUDIO_TTS_VOLUMES_ATTR, created)
+    return created
+
+
+def _coerce_audio_tts_volume(value: Any) -> int | None:
+    volume = _coerce_int(value)
     if volume is None:
         return None
     return max(0, min(100, volume))

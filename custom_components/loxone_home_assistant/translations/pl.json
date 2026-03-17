@@ -11,17 +11,16 @@
           "use_loxone_icons": "Używaj ikon Loxone jako obrazków encji"
         },
         "data_description": {
+          "enable_light_mood_select": "Dodaje osobną encję typu select dla scen i nastrojów. Nie wystawia indywidualnych świateł z LightController.",
           "expose_controller_child_lights": "Ostrzeżenie: wyłączenie tej opcji usuwa te encje z Home Assistant (mogą zniknąć z dashboardów i automatyzacji)."
         }
       },
       "auto": {
         "title": "Automatyczne wyszukiwanie Loxone",
-        "description": "Podaj login i hasło Loxone. Integracja przeskanuje lokalną sieć i spróbuje znaleźć serwer Loxone (Miniserver, Miniserver Go, Miniserver Compact).",
+        "description": "Podaj login i hasło Loxone. Integracja przeskanuje lokalną sieć i spróbuje znaleźć serwer Loxone (Miniserver, Miniserver Go, Miniserver Compact). Wideo interkomu domyślnie używa tego samego konta; osobne dane ustaw później w Opcjach tylko wtedy, gdy urządzenie tego wymaga.",
         "data": {
           "username": "Login",
-          "password": "Hasło",
-          "intercom_username": "Login wideo interkomu (opcjonalnie)",
-          "intercom_password": "Hasło wideo interkomu (opcjonalnie)"
+          "password": "Hasło"
         }
       },
       "select": {
@@ -33,14 +32,12 @@
       },
       "manual": {
         "title": "Ręczna konfiguracja serwera Loxone",
-        "description": "Automatyczne wyszukiwanie nie zakończyło się powodzeniem. Wpisz lokalny adres serwera Loxone ręcznie.",
+        "description": "Automatyczne wyszukiwanie nie zakończyło się powodzeniem. Wpisz lokalny adres serwera Loxone ręcznie. Wideo interkomu domyślnie używa tego samego konta; osobne dane ustaw później w Opcjach tylko wtedy, gdy urządzenie tego wymaga.",
         "data": {
           "host": "Host",
           "port": "Port",
           "username": "Login",
           "password": "Hasło",
-          "intercom_username": "Login wideo interkomu (opcjonalnie)",
-          "intercom_password": "Hasło wideo interkomu (opcjonalnie)",
           "verify_ssl": "Weryfikuj certyfikat TLS"
         }
       }
@@ -76,6 +73,7 @@
           "use_loxone_icons": "Używaj ikon Loxone jako obrazków encji"
         },
         "data_description": {
+          "enable_light_mood_select": "Dodaje osobną encję typu select dla scen i nastrojów. Nie wystawia indywidualnych świateł z LightController.",
           "expose_controller_child_lights": "Ostrzeżenie: wyłączenie tej opcji usuwa te encje z Home Assistant (mogą zniknąć z dashboardów i automatyzacji)."
         }
       }

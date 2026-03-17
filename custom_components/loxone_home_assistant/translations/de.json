@@ -11,17 +11,16 @@
           "use_loxone_icons": "Loxone-Symbole als Entitätsbilder verwenden"
         },
         "data_description": {
+          "enable_light_mood_select": "Fügt eine separate Select-Entität für Szenen und Stimmungen hinzu. Einzelne Kind-Lichter eines LightController werden dadurch nicht bereitgestellt.",
           "expose_controller_child_lights": "Warnung: Das Deaktivieren dieser Option entfernt diese Entitäten aus Home Assistant (sie können aus Dashboards und Automatisierungen verschwinden)."
         }
       },
       "auto": {
         "title": "Automatische Loxone-Erkennung",
-        "description": "Geben Sie Ihren Loxone-Benutzernamen und Ihr Passwort ein. Die Integration durchsucht das lokale Netzwerk nach einem Loxone-Server (Miniserver, Miniserver Go, Miniserver Compact).",
+        "description": "Geben Sie Ihren Loxone-Benutzernamen und Ihr Passwort ein. Die Integration durchsucht das lokale Netzwerk nach einem Loxone-Server (Miniserver, Miniserver Go, Miniserver Compact). Intercom-Video verwendet standardmäßig dasselbe Konto; getrennte Intercom-Video-Anmeldedaten sollten Sie erst später in den Optionen setzen, wenn Ihr Gerät das verlangt.",
         "data": {
           "username": "Benutzername",
-          "password": "Passwort",
-          "intercom_username": "Intercom-Video-Benutzername (optional)",
-          "intercom_password": "Intercom-Video-Passwort (optional)"
+          "password": "Passwort"
         }
       },
       "select": {
@@ -33,14 +32,12 @@
       },
       "manual": {
         "title": "Manuelle Loxone-Server-Einrichtung",
-        "description": "Die automatische Erkennung wurde nicht abgeschlossen. Geben Sie den lokalen Host des Loxone-Servers manuell ein.",
+        "description": "Die automatische Erkennung wurde nicht abgeschlossen. Geben Sie den lokalen Host des Loxone-Servers manuell ein. Intercom-Video verwendet standardmäßig dasselbe Konto; getrennte Intercom-Video-Anmeldedaten sollten Sie erst später in den Optionen setzen, wenn Ihr Gerät das verlangt.",
         "data": {
           "host": "Host",
           "port": "Port",
           "username": "Benutzername",
           "password": "Passwort",
-          "intercom_username": "Intercom-Video-Benutzername (optional)",
-          "intercom_password": "Intercom-Video-Passwort (optional)",
           "verify_ssl": "TLS-Zertifikat verifizieren"
         }
       }
@@ -76,6 +73,7 @@
           "use_loxone_icons": "Loxone-Symbole als Entitätsbilder verwenden"
         },
         "data_description": {
+          "enable_light_mood_select": "Fügt eine separate Select-Entität für Szenen und Stimmungen hinzu. Einzelne Kind-Lichter eines LightController werden dadurch nicht bereitgestellt.",
           "expose_controller_child_lights": "Warnung: Das Deaktivieren dieser Option entfernt diese Entitäten aus Home Assistant (sie können aus Dashboards und Automatisierungen verschwinden)."
         }
       }

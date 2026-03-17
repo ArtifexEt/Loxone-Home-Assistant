@@ -35,6 +35,7 @@ If the button does not open the flow directly, use `Settings -> Devices & Servic
   - Home Assistant bus events (`loxone_home_assistant_intercom_event`) for automation triggers
 - exposes access/keypad-style activity events as Home Assistant bus events (`loxone_home_assistant_access_event`) so automations can react to granted/denied attempts (for example wrong PIN)
 - exposes `AudioZone`/`AudioZoneV2`/`CentralAudioZone` as `media_player` with source selection, seek/progress, shuffle/repeat, TTS and event/command passthrough via `play_media`
+  - adds optional native audio TTS helpers per zone: `text.<audio>_tts_message`, `number.<audio>_tts_volume`, `button.<audio>_send_tts`
 - exposes `PresenceDetector` as:
   - `binary_sensor` for presence/motion
   - `sensor` for illuminance (`lx`) and sound level (`dB`)
@@ -161,10 +162,10 @@ The integration first asks for:
 
 - Loxone username
 - Loxone password
-- optional Intercom video username
-- optional Intercom video password
 
 It then scans the local network for one or more Loxone servers. If more than one is found, you choose the correct device.
+
+Intercom video uses the same credentials as the configured Loxone user by default.
 
 If automatic discovery does not complete, a manual host fallback is offered where you provide host, port, credentials, and TLS verification directly.
 
@@ -172,10 +173,10 @@ If your Intercom camera stream returns `401 Unauthorized`, open integration `Opt
 
 After successful connection and validation, the final step asks for startup options:
 
-- mood selection entities for `LightControllerV2`
-- individual child light entities inside one `LightController`
+- mood selection entities for `LightControllerV2` as a separate `select` helper
+- individual child light entities inside one `LightController` (enabled by default)
 - optional automatic creation of suggested automations
-- optional Loxone icon pictures for entities
+- optional Loxone icon pictures for entities (disabled by default)
 
 ## Services
 
@@ -303,7 +304,6 @@ cards:
     entities:
       - binary_sensor.furtka_doorbell
       - sensor.furtka_history
-      - select.furtka_history_photo
       - text.furtka_tts_message
       - number.furtka_tts_volume
       - button.furtka_send_tts
@@ -311,6 +311,19 @@ cards:
 
 Live Intercom video is exposed as a native camera MJPEG stream. History images are built
 from `lastBellEvents` and fetched from Miniserver `camimage/{uuidAction}/{timestamp}`.
+The optional `select.<name>_history_photo` entity is disabled by default and can be enabled
+manually if you want to switch the camera preview between `Live` and historical snapshots.
+
+## Audio TTS UI in Home Assistant
+
+For `AudioZone`, `AudioZoneV2` and `CentralAudioZone`, the integration creates native helpers:
+
+- `text.<audio>_tts_message`
+- `number.<audio>_tts_volume`
+- `button.<audio>_send_tts`
+
+Pressing `Send TTS` uses the same routing as `media_player.play_media(..., media_content_type: tts)`,
+including routing through the matched Loxone media server when applicable.
 
 ### Optional MJPEG -> HLS wrapper
 
