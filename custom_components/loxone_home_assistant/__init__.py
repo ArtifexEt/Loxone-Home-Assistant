@@ -5,7 +5,6 @@ from __future__ import annotations
 import logging
 import re
 from typing import Any
-from urllib.parse import quote
 
 from aiohttp import BasicAuth, ClientError, web
 import voluptuous as vol
@@ -49,6 +48,7 @@ from .intercom import (
     is_intercom_control,
     resolve_intercom_command,
 )
+from .media_player import build_audio_tts_command, resolve_audio_tts_target_uuid_action
 from .models import LoxoneControl
 from .runtime import bridges_by_entry_id, remove_entry_bridge, set_entry_bridge
 from .server_model import DEFAULT_SERVER_MODEL
@@ -275,22 +275,20 @@ async def _async_handle_send_tts(hass: HomeAssistant, call: ServiceCall) -> dict
         raise _service_validation_exception("TTS message cannot be empty.")
 
     volume = call.data.get(SERVICE_ATTR_VOLUME)
-    encoded_message = quote(message, safe="")
     target_control = bridge.control_for_uuid_action(uuid_action)
+    target_uuid_action = uuid_action
 
     if target_control is not None and is_intercom_control(target_control):
         command = build_intercom_tts_command(message)
     else:
-        command = (
-            f"tts/{encoded_message}"
-            if volume is None
-            else f"tts/{encoded_message}/{int(volume)}"
-        )
+        command = build_audio_tts_command(message, volume)
+        if target_control is not None:
+            target_uuid_action = resolve_audio_tts_target_uuid_action(bridge, target_control)
 
     if command is None:
         raise _service_validation_exception("TTS message cannot be empty.")
 
-    return await bridge.async_send_action(uuid_action, command)
+    return await bridge.async_send_action(target_uuid_action, command)
 
 
 async def _async_handle_call_intercom_function(

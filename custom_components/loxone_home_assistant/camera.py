@@ -57,10 +57,13 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import INTERCOM_CAMERA_CONTROL_TYPES
 from .entity import LoxoneEntity, normalize_state_name
 from .intercom import is_intercom_control
 from .intercom_media import (
+    INTERCOM_DYNAMIC_PAYLOAD_STATE_NAMES,
+    LAST_BELL_EVENTS_DETAIL_PATHS,
+    SNAPSHOT_DETAIL_PATHS,
+    STREAM_DETAIL_PATHS,
     intercom_auth_credentials,
     intercom_history_image_url,
     intercom_last_bell_events,
@@ -76,6 +79,20 @@ _LOGGER = logging.getLogger(__name__)
 
 _MJPEG_CHUNK_SIZE = 16 * 1024
 _MJPEG_MAX_SCAN_BYTES = 4 * 1024 * 1024
+INTERCOM_CAMERA_DETAIL_PATHS = (
+    *STREAM_DETAIL_PATHS,
+    *SNAPSHOT_DETAIL_PATHS,
+    *LAST_BELL_EVENTS_DETAIL_PATHS,
+)
+INTERCOM_CAMERA_STATE_HINTS = frozenset(
+    {
+        *(
+            normalize_state_name(detail_path.rsplit(".", 1)[-1])
+            for detail_path in INTERCOM_CAMERA_DETAIL_PATHS
+        ),
+        *(normalize_state_name(state_name) for state_name in INTERCOM_DYNAMIC_PAYLOAD_STATE_NAMES),
+    }
+)
 
 
 async def async_setup_entry(
@@ -338,49 +355,50 @@ class LoxoneIntercomCameraEntity(LoxoneEntity, Camera):
 
 
 def _is_intercom_camera_control(control: LoxoneControl) -> bool:
-    normalized_type = normalize_state_name(control.type)
-    if normalized_type in {normalize_state_name(value) for value in INTERCOM_CAMERA_CONTROL_TYPES}:
-        return True
-
     if not is_intercom_control(control):
         return False
 
-    if _control_has_media_details(control.details):
+    if _control_has_camera_details(control.details):
         return True
 
     secured_details = (
         control.details.get("securedDetails") if isinstance(control.details, Mapping) else None
     )
-    if _control_has_media_details(secured_details):
+    if _control_has_camera_details(secured_details):
         return True
 
     return any(
-        normalize_state_name(state_name)
-        in {
-            "streamurl",
-            "videostream",
-            "videourl",
-            "alertimage",
-            "liveimageurl",
-            "liveimage",
-        }
+        normalize_state_name(state_name) in INTERCOM_CAMERA_STATE_HINTS
         for state_name in control.states
     )
 
 
-def _control_has_media_details(details: Any) -> bool:
+def _control_has_camera_details(details: Any) -> bool:
     if not isinstance(details, Mapping):
         return False
-    for key in ("videoInfo", "streamUrl", "alertImage", "liveImageUrl", "liveImage"):
-        if key in details:
-            return True
-        normalized_key = normalize_state_name(key)
-        if any(
-            isinstance(current_key, str) and normalize_state_name(current_key) == normalized_key
-            for current_key in details
-        ):
-            return True
-    return False
+    return any(_mapping_has_detail_path(details, detail_path) for detail_path in INTERCOM_CAMERA_DETAIL_PATHS)
+
+
+def _mapping_has_detail_path(details: Mapping[str, Any], detail_path: str) -> bool:
+    current: Any = details
+    for segment in detail_path.split("."):
+        if not isinstance(current, Mapping):
+            return False
+        current = _case_insensitive_mapping_value(current, segment)
+        if current is None:
+            return False
+    return True
+
+
+def _case_insensitive_mapping_value(details: Mapping[str, Any], key: str) -> Any:
+    if key in details:
+        return details[key]
+
+    normalized_key = normalize_state_name(key)
+    for current_key, current_value in details.items():
+        if isinstance(current_key, str) and normalize_state_name(current_key) == normalized_key:
+            return current_value
+    return None
 
 
 def _response_content_type(response: Any) -> str | None:

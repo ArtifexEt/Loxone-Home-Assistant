@@ -348,9 +348,9 @@ class LightMoodEffectsTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(entity.effect_list, ["Reading", "Evening"])
         self.assertEqual(entity.effect, "Evening")
-        self.assertIn(
-            light_module.LightEntityFeature.EFFECT,
-            entity.supported_features,
+        self.assertTrue(
+            entity.supported_features
+            & light_module.LightEntityFeature.EFFECT,
         )
 
     def test_controller_accepts_mapping_mood_list_for_effects(self) -> None:

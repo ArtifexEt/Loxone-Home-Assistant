@@ -141,6 +141,8 @@ media_player_module = load_integration_module(
 LoxoneControl = models.LoxoneControl
 LoxoneMediaServer = models.LoxoneMediaServer
 LoxoneAudioZoneEntity = media_player_module.LoxoneAudioZoneEntity
+build_audio_tts_command = media_player_module.build_audio_tts_command
+resolve_audio_tts_target_uuid_action = media_player_module.resolve_audio_tts_target_uuid_action
 
 
 class _FakeBridge:
@@ -521,6 +523,30 @@ class MediaPlayerPlatformTests(unittest.IsolatedAsyncioTestCase):
         await entity.async_play_media("tts", "Alarm test", extra={"volume": 35})
 
         self.assertEqual(bridge.commands, [("media-server-action", "tts/Alarm test/35")])
+
+    def test_build_audio_tts_command_keeps_entity_encoding_rules(self) -> None:
+        self.assertEqual(build_audio_tts_command("Hall/Entry", 35), "tts/Hall%2FEntry/35")
+        self.assertEqual(build_audio_tts_command("Alarm test"), "tts/Alarm test")
+
+    def test_resolve_audio_tts_target_uuid_action_prefers_matched_media_server(self) -> None:
+        control = self._audio_zone_v2()
+        control.details["audioServerHost"] = "audioserver.lan:7091"
+        media_server = LoxoneMediaServer(
+            uuid_action="media-server-action",
+            name="AudioServer",
+            host="audioserver.lan:7091",
+            states={},
+        )
+        bridge = _FakeBridge(
+            [control],
+            {},
+            media_servers={media_server.uuid_action: media_server},
+        )
+
+        self.assertEqual(
+            resolve_audio_tts_target_uuid_action(bridge, control),
+            "media-server-action",
+        )
 
     def test_media_position_updated_at_changes_only_on_updates(self) -> None:
         control = self._audio_zone_v2()

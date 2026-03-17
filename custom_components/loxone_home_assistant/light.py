@@ -254,10 +254,10 @@ class LoxoneLightEntity(LoxoneEntity, LightEntity):
         return {ColorMode.ONOFF}
 
     @property
-    def supported_features(self) -> set[Any]:
-        features: set[Any] = set()
+    def supported_features(self) -> int:
+        features = 0
         if self.control.type in CONTROLLER_TYPES and self._effect_list:
-            features.add(LIGHT_EFFECT_FEATURE)
+            features |= LIGHT_EFFECT_FEATURE
         return features
 
     @property

@@ -140,7 +140,7 @@ class LoxoneAudioZoneEntity(LoxoneEntity, MediaPlayerEntity):
         self._server_state_name = first_matching_state_name(control, SERVER_STATE_CANDIDATES)
         self._client_state_name = first_matching_state_name(control, CLIENT_STATE_CANDIDATES)
         self._tts_state_name = first_matching_state_name(control, TTS_STATE_CANDIDATES)
-        self._media_server = _resolve_media_server(bridge, control)
+        self._media_server = resolve_media_server(bridge, control)
         media_server_states = (
             self._media_server.states
             if self._media_server is not None
@@ -209,13 +209,11 @@ class LoxoneAudioZoneEntity(LoxoneEntity, MediaPlayerEntity):
         await self.bridge.async_send_action(self._tts_target_uuid_action(), command)
 
     def _tts_target_uuid_action(self) -> str:
-        if self._media_server is not None:
-            media_server_uuid_action = _coerce_text(
-                getattr(self._media_server, "uuid_action", None)
-            )
-            if media_server_uuid_action is not None:
-                return media_server_uuid_action
-        return self.control.uuid_action
+        return resolve_audio_tts_target_uuid_action(
+            self.bridge,
+            self.control,
+            media_server=self._media_server,
+        )
 
     @property
     def state(self) -> MediaPlayerState | None:
@@ -445,10 +443,9 @@ class LoxoneAudioZoneEntity(LoxoneEntity, MediaPlayerEntity):
         if not text:
             return True
         volume = _coerce_tts_volume(kwargs)
-        encoded_text = _encode_tts_text(text)
-        command = (
-            f"tts/{encoded_text}" if volume is None else f"tts/{encoded_text}/{volume}"
-        )
+        command = build_audio_tts_command(text, volume)
+        if command is None:
+            return True
         await self._async_send_tts_action(command)
         return True
 
@@ -630,7 +627,7 @@ class LoxoneAudioZoneEntity(LoxoneEntity, MediaPlayerEntity):
             attrs["active_audio_zones"] = active_zone_names
 
 
-def _resolve_media_server(bridge: Any, control: Any) -> Any | None:
+def resolve_media_server(bridge: Any, control: Any) -> Any | None:
     raw_servers = getattr(bridge, "media_servers_by_uuid_action", None)
     if not isinstance(raw_servers, Mapping) or not raw_servers:
         return None
@@ -678,6 +675,20 @@ def _resolve_media_server(bridge: Any, control: Any) -> Any | None:
     if len(media_servers) == 1:
         return media_servers[0]
     return None
+
+
+def resolve_audio_tts_target_uuid_action(
+    bridge: Any,
+    control: Any,
+    *,
+    media_server: Any | None = None,
+) -> str:
+    matched_media_server = media_server if media_server is not None else resolve_media_server(bridge, control)
+    if matched_media_server is not None:
+        media_server_uuid_action = _coerce_text(getattr(matched_media_server, "uuid_action", None))
+        if media_server_uuid_action is not None:
+            return media_server_uuid_action
+    return str(getattr(control, "uuid_action", ""))
 
 
 def _resolve_linked_audio_zone_refs(
@@ -1022,9 +1033,21 @@ def _coerce_tts_volume(kwargs: Mapping[str, Any]) -> int | None:
     return max(0, min(100, volume))
 
 
-def _encode_tts_text(value: str) -> str:
+def encode_audio_tts_text(value: str) -> str:
     # Keep `/` literal inside a single TTS segment to avoid path splits.
     return value.replace("/", "%2F")
+
+
+def build_audio_tts_command(message: Any, volume: Any = None) -> str | None:
+    text = _coerce_text(message)
+    if text is None:
+        return None
+
+    encoded_text = encode_audio_tts_text(text)
+    clamped_volume = _coerce_int(volume)
+    if clamped_volume is None:
+        return f"tts/{encoded_text}"
+    return f"tts/{encoded_text}/{max(0, min(100, clamped_volume))}"
 
 
 def _deserialize_source_list(value: Any) -> Any | None:

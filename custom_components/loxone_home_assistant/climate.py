@@ -260,12 +260,12 @@ class LoxoneClimateEntity(LoxoneEntity, ClimateEntity):
         return coerce_float(self.first_state_value(*state_names))
 
     @property
-    def supported_features(self) -> set[Any]:
-        features: set[Any] = set()
+    def supported_features(self) -> ClimateEntityFeature:
+        features = 0
         if TARGET_TEMPERATURE_FEATURE:
-            features.add(TARGET_TEMPERATURE_FEATURE)
+            features |= TARGET_TEMPERATURE_FEATURE
         if PRESET_MODE_FEATURE and self.preset_modes:
-            features.add(PRESET_MODE_FEATURE)
+            features |= PRESET_MODE_FEATURE
         return features
 
     @property

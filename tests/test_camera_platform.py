@@ -278,7 +278,15 @@ class CameraPlatformTests(unittest.IsolatedAsyncioTestCase):
             type="Switch",
             states={"active": "state-switch"},
         )
-        bridge = _FakeBridge([intercom, switch], {}, _FakeSession())
+        empty_intercom = LoxoneControl(
+            uuid="empty-intercom-uuid",
+            uuid_action="empty-intercom-action",
+            name="Pusty interkom",
+            type="Intercom",
+            states={},
+            details={},
+        )
+        bridge = _FakeBridge([intercom, empty_intercom, switch], {}, _FakeSession())
         entry = _FakeConfigEntry("entry-1")
         hass = _FakeHass(entry.entry_id, bridge, const.DOMAIN)
         entities: list = []
@@ -290,6 +298,28 @@ class CameraPlatformTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual([entity.control.uuid_action for entity in entities], ["intercom-action"])
+
+    async def test_setup_keeps_history_only_intercom_camera(self) -> None:
+        history_only = LoxoneControl(
+            uuid="door-controller-uuid",
+            uuid_action="door-controller-action",
+            name="Front Door",
+            type="DoorController",
+            states={"lastBellEvents": "state-events"},
+            details={},
+        )
+        bridge = _FakeBridge([history_only], {"state-events": "20260314123045"}, _FakeSession())
+        entry = _FakeConfigEntry("entry-1")
+        hass = _FakeHass(entry.entry_id, bridge, const.DOMAIN)
+        entities: list = []
+
+        await camera_module.async_setup_entry(
+            hass,
+            entry,
+            lambda new_entities: entities.extend(new_entities),
+        )
+
+        self.assertEqual([entity.control.uuid_action for entity in entities], ["door-controller-action"])
 
     async def test_camera_resolves_miniserver_relative_urls(self) -> None:
         control = LoxoneControl(
