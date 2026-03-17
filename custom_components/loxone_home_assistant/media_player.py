@@ -6,6 +6,7 @@ import json
 import ipaddress
 import re
 from collections.abc import Iterable, Mapping
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urlsplit
@@ -63,6 +64,7 @@ DEFAULT_AUDIO_TTS_MESSAGE = ""
 DEFAULT_AUDIO_TTS_VOLUME = 60
 _AUDIO_TTS_MESSAGES_ATTR = "_audio_tts_messages"
 _AUDIO_TTS_VOLUMES_ATTR = "_audio_tts_volumes"
+_MEDIA_PLAYER_ENTITIES_ATTR = "_loxone_media_player_entities"
 
 REPEAT_OFF = "off"
 REPEAT_ONE = "one"
@@ -74,6 +76,7 @@ FEATURE_SHUFFLE_SET = getattr(MediaPlayerEntityFeature, "SHUFFLE_SET", 0)
 FEATURE_REPEAT_SET = getattr(MediaPlayerEntityFeature, "REPEAT_SET", 0)
 FEATURE_SEEK = getattr(MediaPlayerEntityFeature, "SEEK", 0)
 FEATURE_VOLUME_MUTE = getattr(MediaPlayerEntityFeature, "VOLUME_MUTE", 0)
+FEATURE_BROWSE_MEDIA = getattr(MediaPlayerEntityFeature, "BROWSE_MEDIA", 0)
 
 AUDIO_ZONE_V2_CONTROL_TYPE = "AudioZoneV2"
 CENTRAL_AUDIO_ZONE_CONTROL_TYPE = "CentralAudioZone"
@@ -103,6 +106,43 @@ SUPPORTED_FEATURES = (
     | FEATURE_PLAY_MEDIA
 )
 
+BROWSE_CONTENT_TYPE_ROOT = "loxone_library"
+BROWSE_CONTENT_TYPE_DIRECTORY = "directory"
+BROWSE_CONTENT_TYPE_SOURCE = "source"
+BROWSE_CONTENT_TYPE_AUDIO_ZONE = "audio_zone"
+BROWSE_MEDIA_CLASS_DIRECTORY = "directory"
+BROWSE_MEDIA_CLASS_MUSIC = "music"
+BROWSE_MEDIA_CLASS_APP = "app"
+BROWSE_MEDIA_CLASS_SPEAKER = "speaker"
+
+
+@dataclass
+class LoxoneBrowseMedia:
+    """Minimal BrowseMedia-compatible payload for Home Assistant media browsing."""
+
+    title: str
+    media_class: str | None
+    media_content_id: str
+    media_content_type: str
+    can_play: bool
+    can_expand: bool
+    children: list["LoxoneBrowseMedia"] = field(default_factory=list)
+    children_media_class: str | None = None
+    thumbnail: str | None = None
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "title": self.title,
+            "media_class": self.media_class,
+            "media_content_id": self.media_content_id,
+            "media_content_type": self.media_content_type,
+            "can_play": self.can_play,
+            "can_expand": self.can_expand,
+            "children": [child.as_dict() for child in self.children],
+            "children_media_class": self.children_media_class,
+            "thumbnail": self.thumbnail,
+        }
+
 
 async def async_setup_entry(
     hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
@@ -113,6 +153,7 @@ async def async_setup_entry(
         for control in bridge.controls
         if control.type in MEDIA_PLAYER_CONTROL_TYPES
     ]
+    _register_media_player_entities(bridge, entities)
     async_add_entities(entities)
 
 
@@ -311,6 +352,11 @@ class LoxoneAudioZoneEntity(LoxoneEntity, MediaPlayerEntity):
         return None
 
     @property
+    def group_members(self) -> list[str] | None:
+        member_entity_ids = self._group_member_entity_ids()
+        return member_entity_ids or None
+
+    @property
     def supported_features(self) -> MediaPlayerEntityFeature:
         features = SUPPORTED_FEATURES
         if self._source_options() or self._source_state_name is not None:
@@ -323,6 +369,8 @@ class LoxoneAudioZoneEntity(LoxoneEntity, MediaPlayerEntity):
             features |= FEATURE_REPEAT_SET
         if self._progress_state_name is not None:
             features |= FEATURE_SEEK
+        if self._browse_children_available():
+            features |= FEATURE_BROWSE_MEDIA
         return features
 
     @property
@@ -343,7 +391,30 @@ class LoxoneAudioZoneEntity(LoxoneEntity, MediaPlayerEntity):
         _set_if_not_none(attrs, "genre", self._state_text(self._genre_state_name))
         self._append_audio_server_attributes(attrs)
         self._append_linked_audio_zone_attributes(attrs)
+        self._append_group_attributes(attrs)
         return attrs
+
+    async def async_browse_media(
+        self,
+        media_content_type: str | None = None,
+        media_content_id: str | None = None,
+    ) -> LoxoneBrowseMedia:
+        normalized_type = (media_content_type or BROWSE_CONTENT_TYPE_ROOT).strip().casefold()
+        normalized_id = _coerce_text(media_content_id)
+
+        if (
+            normalized_type in {BROWSE_CONTENT_TYPE_ROOT, BROWSE_CONTENT_TYPE_DIRECTORY, ""}
+            and normalized_id == self._browse_sources_directory_id()
+        ):
+            return self._browse_sources_directory()
+
+        if (
+            normalized_type in {BROWSE_CONTENT_TYPE_ROOT, BROWSE_CONTENT_TYPE_DIRECTORY, ""}
+            and normalized_id == self._browse_linked_zones_directory_id()
+        ):
+            return self._browse_linked_zones_directory()
+
+        return self._browse_root()
 
     def _append_audio_server_attributes(self, attrs: dict[str, Any]) -> None:
         if self._media_server is None:
@@ -373,6 +444,229 @@ class LoxoneAudioZoneEntity(LoxoneEntity, MediaPlayerEntity):
             "audio_server_certificate_valid",
             coerce_bool(self.bridge.state_value(self._media_server_certificate_state_uuid)),
         )
+
+    def _append_group_attributes(self, attrs: dict[str, Any]) -> None:
+        group_controls = self._group_member_controls()
+        if len(group_controls) <= 1:
+            return
+
+        attrs["group_member_uuid_actions"] = [
+            str(getattr(control, "uuid_action", ""))
+            for control in group_controls
+            if _coerce_text(getattr(control, "uuid_action", None)) is not None
+        ]
+
+        group_names = self._group_member_names()
+        if group_names:
+            attrs["group_member_names"] = group_names
+
+        group_entity_ids = self._group_member_entity_ids()
+        if group_entity_ids:
+            attrs["group_member_entity_ids"] = group_entity_ids
+
+        leader_control = self._group_leader_control()
+        if leader_control is None:
+            return
+
+        leader_uuid_action = _coerce_text(getattr(leader_control, "uuid_action", None))
+        if leader_uuid_action is not None:
+            attrs["group_leader_uuid_action"] = leader_uuid_action
+
+        leader_name = _coerce_text(getattr(leader_control, "display_name", None)) or _coerce_text(
+            getattr(leader_control, "name", None)
+        )
+        if leader_name is not None:
+            attrs["group_leader_name"] = leader_name
+
+        leader_entity_id = _entity_id_for_control_uuid_action(self.bridge, leader_uuid_action)
+        if leader_entity_id is not None:
+            attrs["group_leader_entity_id"] = leader_entity_id
+
+    def _browse_children_available(self) -> bool:
+        return bool(self._source_options() or self._linked_audio_zone_refs)
+
+    def _browse_root(self) -> LoxoneBrowseMedia:
+        children: list[LoxoneBrowseMedia] = []
+
+        source_children = self._browse_source_children()
+        if source_children:
+            children.append(
+                LoxoneBrowseMedia(
+                    title="Sources",
+                    media_class=BROWSE_MEDIA_CLASS_DIRECTORY,
+                    media_content_id=self._browse_sources_directory_id(),
+                    media_content_type=BROWSE_CONTENT_TYPE_DIRECTORY,
+                    can_play=False,
+                    can_expand=True,
+                    children=source_children,
+                    children_media_class=BROWSE_MEDIA_CLASS_MUSIC,
+                )
+            )
+
+        linked_zone_children = self._browse_linked_zone_children()
+        if linked_zone_children:
+            children.append(
+                LoxoneBrowseMedia(
+                    title="Linked Zones",
+                    media_class=BROWSE_MEDIA_CLASS_DIRECTORY,
+                    media_content_id=self._browse_linked_zones_directory_id(),
+                    media_content_type=BROWSE_CONTENT_TYPE_DIRECTORY,
+                    can_play=False,
+                    can_expand=True,
+                    children=linked_zone_children,
+                    children_media_class=BROWSE_MEDIA_CLASS_SPEAKER,
+                )
+            )
+
+        return LoxoneBrowseMedia(
+            title=self.control.display_name,
+            media_class=BROWSE_MEDIA_CLASS_APP,
+            media_content_id=self._browse_root_id(),
+            media_content_type=BROWSE_CONTENT_TYPE_ROOT,
+            can_play=False,
+            can_expand=bool(children),
+            children=children,
+        )
+
+    def _browse_sources_directory(self) -> LoxoneBrowseMedia:
+        children = self._browse_source_children()
+        return LoxoneBrowseMedia(
+            title="Sources",
+            media_class=BROWSE_MEDIA_CLASS_DIRECTORY,
+            media_content_id=self._browse_sources_directory_id(),
+            media_content_type=BROWSE_CONTENT_TYPE_DIRECTORY,
+            can_play=False,
+            can_expand=bool(children),
+            children=children,
+            children_media_class=BROWSE_MEDIA_CLASS_MUSIC,
+        )
+
+    def _browse_linked_zones_directory(self) -> LoxoneBrowseMedia:
+        children = self._browse_linked_zone_children()
+        return LoxoneBrowseMedia(
+            title="Linked Zones",
+            media_class=BROWSE_MEDIA_CLASS_DIRECTORY,
+            media_content_id=self._browse_linked_zones_directory_id(),
+            media_content_type=BROWSE_CONTENT_TYPE_DIRECTORY,
+            can_play=False,
+            can_expand=bool(children),
+            children=children,
+            children_media_class=BROWSE_MEDIA_CLASS_SPEAKER,
+        )
+
+    def _browse_source_children(self) -> list[LoxoneBrowseMedia]:
+        children: list[LoxoneBrowseMedia] = []
+        for slot, label in self._source_options().items():
+            children.append(
+                LoxoneBrowseMedia(
+                    title=label,
+                    media_class=BROWSE_MEDIA_CLASS_MUSIC,
+                    media_content_id=str(slot),
+                    media_content_type=BROWSE_CONTENT_TYPE_SOURCE,
+                    can_play=True,
+                    can_expand=False,
+                )
+            )
+        return children
+
+    def _browse_linked_zone_children(self) -> list[LoxoneBrowseMedia]:
+        children: list[LoxoneBrowseMedia] = []
+        for linked_control, _play_state_name, _power_state_name in self._linked_audio_zone_refs:
+            title = _coerce_text(getattr(linked_control, "display_name", None)) or _coerce_text(
+                getattr(linked_control, "name", None)
+            )
+            if title is None:
+                continue
+            children.append(
+                LoxoneBrowseMedia(
+                    title=title,
+                    media_class=BROWSE_MEDIA_CLASS_SPEAKER,
+                    media_content_id=str(getattr(linked_control, "uuid_action", title)),
+                    media_content_type=BROWSE_CONTENT_TYPE_AUDIO_ZONE,
+                    can_play=False,
+                    can_expand=False,
+                )
+            )
+        return children
+
+    def _browse_root_id(self) -> str:
+        return str(self.control.uuid_action)
+
+    def _browse_sources_directory_id(self) -> str:
+        return f"{self.control.uuid_action}:sources"
+
+    def _browse_linked_zones_directory_id(self) -> str:
+        return f"{self.control.uuid_action}:linked_zones"
+
+    def _group_leader_control(self) -> Any | None:
+        if self._is_central_audio_zone():
+            return self.control
+        return self._central_audio_parent_control()
+
+    def _group_member_controls(self) -> tuple[Any, ...]:
+        if self._is_central_audio_zone():
+            return _dedupe_controls_by_uuid_action(
+                (
+                    self.control,
+                    *(linked_control for linked_control, _play_state, _power_state in self._linked_audio_zone_refs),
+                )
+            )
+
+        parent_control = self._central_audio_parent_control()
+        if parent_control is None:
+            return ()
+
+        parent_entity = _media_player_entity_for_uuid_action(
+            self.bridge,
+            getattr(parent_control, "uuid_action", None),
+        )
+        if isinstance(parent_entity, LoxoneAudioZoneEntity):
+            return parent_entity._group_member_controls()
+
+        parent_refs = _resolve_linked_audio_zone_refs(self.bridge, parent_control)
+        return _dedupe_controls_by_uuid_action(
+            (
+                parent_control,
+                *(linked_control for linked_control, _play_state, _power_state in parent_refs),
+            )
+        )
+
+    def _group_member_entity_ids(self) -> list[str]:
+        entity_ids: list[str] = []
+        for control in self._group_member_controls():
+            control_uuid_action = _coerce_text(getattr(control, "uuid_action", None))
+            if control_uuid_action is None:
+                continue
+            entity_id = _entity_id_for_control_uuid_action(self.bridge, control_uuid_action)
+            if entity_id is not None:
+                entity_ids.append(entity_id)
+        return entity_ids
+
+    def _group_member_names(self) -> list[str]:
+        names: list[str] = []
+        for control in self._group_member_controls():
+            title = _coerce_text(getattr(control, "display_name", None)) or _coerce_text(
+                getattr(control, "name", None)
+            )
+            if title is not None:
+                names.append(title)
+        return names
+
+    def _central_audio_parent_control(self) -> Any | None:
+        parent_uuid_action = _coerce_text(getattr(self.control, "parent_uuid_action", None))
+        if parent_uuid_action is None:
+            return None
+
+        resolver = getattr(self.bridge, "control_for_uuid_action", None)
+        parent_control = resolver(parent_uuid_action) if callable(resolver) else None
+        if parent_control is None:
+            for candidate in getattr(self.bridge, "controls", ()) or ():
+                if _coerce_text(getattr(candidate, "uuid_action", None)) == parent_uuid_action:
+                    parent_control = candidate
+                    break
+        if getattr(parent_control, "type", None) != CENTRAL_AUDIO_ZONE_CONTROL_TYPE:
+            return None
+        return parent_control
 
     async def async_turn_on(self) -> None:
         await self._async_send_action("on")
@@ -679,6 +973,43 @@ def resolve_media_server(bridge: Any, control: Any) -> Any | None:
     if len(media_servers) == 1:
         return media_servers[0]
     return None
+
+
+def _register_media_player_entities(bridge: Any, entities: Iterable[Any]) -> None:
+    registry: dict[str, Any] = {}
+    for entity in entities:
+        control = getattr(entity, "control", None)
+        uuid_action = _coerce_text(getattr(control, "uuid_action", None))
+        if uuid_action is not None:
+            registry[uuid_action] = entity
+    setattr(bridge, _MEDIA_PLAYER_ENTITIES_ATTR, registry)
+
+
+def _media_player_entity_for_uuid_action(bridge: Any, uuid_action: Any) -> Any | None:
+    normalized_uuid_action = _coerce_text(uuid_action)
+    if normalized_uuid_action is None:
+        return None
+    registry = getattr(bridge, _MEDIA_PLAYER_ENTITIES_ATTR, None)
+    if not isinstance(registry, Mapping):
+        return None
+    return registry.get(normalized_uuid_action)
+
+
+def _entity_id_for_control_uuid_action(bridge: Any, uuid_action: Any) -> str | None:
+    entity = _media_player_entity_for_uuid_action(bridge, uuid_action)
+    return _coerce_text(getattr(entity, "entity_id", None))
+
+
+def _dedupe_controls_by_uuid_action(controls: Iterable[Any]) -> tuple[Any, ...]:
+    seen_uuid_actions: set[str] = set()
+    deduped: list[Any] = []
+    for control in controls:
+        uuid_action = _coerce_text(getattr(control, "uuid_action", None))
+        if uuid_action is None or uuid_action in seen_uuid_actions:
+            continue
+        seen_uuid_actions.add(uuid_action)
+        deduped.append(control)
+    return tuple(deduped)
 
 
 def resolve_audio_tts_target_uuid_action(

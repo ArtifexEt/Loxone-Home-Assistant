@@ -115,6 +115,14 @@ class IntercomCommandResolutionTests(unittest.TestCase):
         command = resolve_intercom_command("unmute")
         self.assertEqual(command, "mute/0")
 
+    def test_accept_alias_uses_answer_command(self) -> None:
+        command = resolve_intercom_command("accept")
+        self.assertEqual(command, "answer")
+
+    def test_mute_mic_aliases_map_to_mute_defaults(self) -> None:
+        self.assertEqual(resolve_intercom_command("muteMic"), "mute/1")
+        self.assertEqual(resolve_intercom_command("unmuteMic"), "mute/0")
+
     def test_rejects_unknown_command(self) -> None:
         with self.assertRaisesRegex(ValueError, "Unsupported intercom command"):
             resolve_intercom_command("unknown")

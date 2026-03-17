@@ -77,15 +77,26 @@ for _canonical in _INTERCOM_COMMAND_SPECS:
     _INTERCOM_COMMAND_ALIASES[_NON_ALNUM_RE.sub("", _canonical.casefold())] = _canonical
 _INTERCOM_COMMAND_ALIASES.update(
     {
+        "accept": "answer",
+        "answercall": "answer",
+        "pickup": "answer",
         "tts": "playTts",
         "playtts": "playTts",
+        "mutemic": "mute",
+        "microphonemute": "mute",
         "unmute": "mute",
+        "unmutemic": "mute",
+        "microphoneunmute": "mute",
         "setanswer": "setAnswers",
         "setallanswer": "setAnswers",
     }
 )
 _INTERCOM_COMMAND_ALIAS_DEFAULT_ARGUMENTS: dict[str, tuple[str, ...]] = {
+    "mutemic": ("1",),
+    "microphonemute": ("1",),
     "unmute": ("0",),
+    "unmutemic": ("0",),
+    "microphoneunmute": ("0",),
 }
 INTERCOM_DEFAULT_TTS_MESSAGE = ""
 INTERCOM_DEFAULT_TTS_VOLUME = 60

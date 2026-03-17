@@ -34,7 +34,8 @@ If the button does not open the flow directly, use `Settings -> Devices & Servic
   - intercom history sensor based on `lastBellEvents` (latest event timestamp + recent image URLs)
   - Home Assistant bus events (`loxone_home_assistant_intercom_event`) for automation triggers
 - exposes access/keypad-style activity events as Home Assistant bus events (`loxone_home_assistant_access_event`) so automations can react to granted/denied attempts (for example wrong PIN)
-- exposes `AudioZone`/`AudioZoneV2`/`CentralAudioZone` as `media_player` with source selection, seek/progress, shuffle/repeat, TTS and event/command passthrough via `play_media`
+- exposes `AudioZone`/`AudioZoneV2`/`CentralAudioZone` as `media_player` with source selection, browseable source library, seek/progress, shuffle/repeat, TTS and event/command passthrough via `play_media`
+- exposes Central Audio group metadata on `media_player` (linked zone names, UUIDs, entity ids when available)
   - adds optional native audio TTS helpers per zone: `text.<audio>_tts_message`, `number.<audio>_tts_volume`, `button.<audio>_send_tts`
 - exposes `PresenceDetector` as:
   - `binary_sensor` for presence/motion
@@ -232,9 +233,9 @@ Fields:
 - `entry_id` optional when only one Loxone entry exists
 - `uuid_action` parent Intercom UUID action
 - `command` supported command name:
-  - `answer`
+  - `answer` (aliases: `accept`, `answercall`, `pickup`)
   - `playTts` (alias `tts`)
-  - `mute` (`0` unmute, `1` mute)
+  - `mute` (`0` unmute, `1` mute; aliases: `muteMic`, `unmute`, `unmuteMic`)
   - `setAnswers` (aliases: `setanswer`, `setallanswer`)
   - `setvideosettings`, `setallvideosettings`
   - `setframerate`, `setresolution`

@@ -64,6 +64,7 @@ def _install_homeassistant_stubs() -> None:
         SHUFFLE_SET = 1 << 11
         REPEAT_SET = 1 << 12
         SEEK = 1 << 13
+        BROWSE_MEDIA = 1 << 14
 
     class MediaType:
         MUSIC = "music"
@@ -163,6 +164,12 @@ class _FakeBridge:
 
     def control_state(self, control, state_name):
         return self._values.get(control.state_uuid(state_name))
+
+    def control_for_uuid_action(self, uuid_action):
+        return next(
+            (control for control in self.controls if control.uuid_action == uuid_action),
+            None,
+        )
 
     async def async_send_action(self, uuid_action, command):
         self.commands.append((uuid_action, command))
@@ -462,6 +469,34 @@ class MediaPlayerPlatformTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
+    async def test_audio_zone_v2_browse_media_exposes_sources_directory(self) -> None:
+        control = self._audio_zone_v2()
+        control.states["source"] = "state-source"
+        control.states["sourceList"] = "state-source-list"
+        bridge = _FakeBridge(
+            [control],
+            {
+                "state-source": 1,
+                "state-source-list": (
+                    "{'items':[{'slot':1,'name':'Radio'},{'slot':2,'name':'News'}]}"
+                ),
+            },
+        )
+        entity = LoxoneAudioZoneEntity(bridge, control)
+
+        root = await entity.async_browse_media()
+        sources = await entity.async_browse_media("directory", "audio-action:sources")
+
+        self.assertTrue(entity.supported_features & media_player_module.FEATURE_BROWSE_MEDIA)
+        self.assertEqual(root.title, "Salon Audio")
+        self.assertEqual([child.title for child in root.children], ["Sources"])
+        self.assertEqual([child.title for child in sources.children], ["Radio", "News"])
+        self.assertTrue(all(child.can_play for child in sources.children))
+        self.assertEqual(
+            [child.media_content_type for child in sources.children],
+            ["source", "source"],
+        )
+
     def test_audio_zone_v2_event_style_states_are_supported(self) -> None:
         control = self._audio_zone_v2_event_style()
         bridge = _FakeBridge(
@@ -632,6 +667,71 @@ class MediaPlayerPlatformTests(unittest.IsolatedAsyncioTestCase):
             ["Kuchnia Audio"],
         )
         self.assertIn("state-play", set(entity.relevant_state_uuids()))
+
+    async def test_central_audio_zone_browse_media_and_group_members_follow_linked_zones(self) -> None:
+        central = self._central_audio_zone()
+        central.states = {
+            "source": "state-central-source",
+            "sourceList": "state-central-source-list",
+        }
+        child = self._audio_zone_v2()
+        child.uuid = "child-audio-uuid"
+        child.uuid_action = "child-audio-action"
+        child.name = "Kuchnia Audio"
+        child.parent_uuid_action = central.uuid_action
+
+        bridge = _FakeBridge(
+            [child, central],
+            {
+                "state-central-source": 1,
+                "state-central-source-list": "{'items':[{'slot':1,'name':'Radio'}]}",
+                "state-play": 2,
+                "state-power": 1,
+            },
+        )
+        entry = _FakeConfigEntry("entry-central")
+        hass = _FakeHass(entry.entry_id, bridge, const.DOMAIN)
+        entities: list = []
+
+        await media_player_module.async_setup_entry(
+            hass,
+            entry,
+            lambda new_entities: entities.extend(new_entities),
+        )
+
+        entities_by_uuid_action = {entity.control.uuid_action: entity for entity in entities}
+        central_entity = entities_by_uuid_action["central-audio-action"]
+        child_entity = entities_by_uuid_action["child-audio-action"]
+        central_entity.entity_id = "media_player.central_audio"
+        child_entity.entity_id = "media_player.kuchnia_audio"
+
+        root = await central_entity.async_browse_media()
+        linked = await central_entity.async_browse_media(
+            "directory",
+            "central-audio-action:linked_zones",
+        )
+
+        self.assertEqual(
+            central_entity.group_members,
+            ["media_player.central_audio", "media_player.kuchnia_audio"],
+        )
+        self.assertEqual(
+            child_entity.group_members,
+            ["media_player.central_audio", "media_player.kuchnia_audio"],
+        )
+        self.assertEqual(
+            [child.title for child in root.children],
+            ["Sources", "Linked Zones"],
+        )
+        self.assertEqual([child.title for child in linked.children], ["Kuchnia Audio"])
+        self.assertEqual(
+            central_entity.extra_state_attributes["group_member_entity_ids"],
+            ["media_player.central_audio", "media_player.kuchnia_audio"],
+        )
+        self.assertEqual(
+            central_entity.extra_state_attributes["group_member_names"],
+            ["Central Audio", "Kuchnia Audio"],
+        )
 
     def test_audio_zone_uses_media_server_states_and_matches_by_host(self) -> None:
         control = self._audio_zone_v2()

@@ -250,7 +250,25 @@ def _install_config_flow_dependency_stubs() -> None:
     sys.modules["custom_components.loxone_home_assistant.runtime"] = runtime
 
     versioning = types.ModuleType("custom_components.loxone_home_assistant.versioning")
+    versioning.MIN_SUPPORTED_VERSION = (10, 2)
     versioning.MIN_SUPPORTED_VERSION_TEXT = "10.2"
+
+    def parse_miniserver_version(value):
+        if value is None:
+            return None
+        parts = [int(item) for item in str(value).replace("-", ".").split(".") if item.isdigit()]
+        if len(parts) < 2:
+            return None
+        return tuple(parts)
+
+    def is_supported_miniserver_version(value):
+        parsed = parse_miniserver_version(value)
+        if parsed is None:
+            return False
+        return parsed[:2] >= versioning.MIN_SUPPORTED_VERSION
+
+    versioning.parse_miniserver_version = parse_miniserver_version
+    versioning.is_supported_miniserver_version = is_supported_miniserver_version
     sys.modules["custom_components.loxone_home_assistant.versioning"] = versioning
 
 
