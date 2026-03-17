@@ -287,25 +287,14 @@ class MoodSelectTests(unittest.IsolatedAsyncioTestCase):
             name="Dzwonek",
             type="IntercomV2",
             states={
-                "answers": "state-answers",
-                "address": "state-address",
+                "lastBellEvents": "state-events",
             },
             details={},
         )
         bridge = _FakeBridge(
             [intercom],
             {
-                "state-address": "198.51.100.70",
-                "state-answers": [
-                    {
-                        "timestamp": "2026-03-14T12:30:00Z",
-                        "imageUrl": "/rest/latest.jpg",
-                    },
-                    {
-                        "timestamp": "2026-03-14T10:00:00Z",
-                        "imageUrl": "/rest/older.jpg",
-                    },
-                ],
+                "state-events": "20260314100000|20260314123045",
             },
         )
         entity = LoxoneIntercomHistorySelectEntity(bridge, intercom)
@@ -319,13 +308,13 @@ class MoodSelectTests(unittest.IsolatedAsyncioTestCase):
         await entity.async_select_option(photo_option)
         self.assertEqual(entity.current_option, photo_option)
         self.assertEqual(
-            bridge._intercom_selected_history_images["intercom-action"],  # noqa: SLF001
-            "https://198.51.100.70/rest/latest.jpg",
+            bridge._intercom_selected_history_timestamps["intercom-action"],  # noqa: SLF001
+            "20260314123045",
         )
 
         await entity.async_select_option("Live")
         self.assertEqual(entity.current_option, "Live")
-        self.assertNotIn("intercom-action", bridge._intercom_selected_history_images)  # noqa: SLF001
+        self.assertNotIn("intercom-action", bridge._intercom_selected_history_timestamps)  # noqa: SLF001
 
 
 if __name__ == "__main__":

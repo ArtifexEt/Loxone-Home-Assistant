@@ -36,23 +36,23 @@ except ImportError:  # pragma: no cover - fallback for minimal test stubs
     class MediaType:  # type: ignore[no-redef]
         MUSIC = "music"
 
-PLAY_STATE_CANDIDATES = ("playState", "play_state", "playstate")
+PLAY_STATE_CANDIDATES = ("playState", "play_state", "playstate", "mode")
 POWER_STATE_CANDIDATES = ("power", "active")
 VOLUME_STATE_CANDIDATES = ("volume", "defaultVolume", "masterVolume")
 VOLUME_STEP_CANDIDATES = ("volumeStep",)
 MUTE_STATE_CANDIDATES = ("mute", "isMuted")
-SHUFFLE_STATE_CANDIDATES = ("shuffle",)
-REPEAT_STATE_CANDIDATES = ("repeat",)
-PROGRESS_STATE_CANDIDATES = ("progress",)
+SHUFFLE_STATE_CANDIDATES = ("shuffle", "plshuffle")
+REPEAT_STATE_CANDIDATES = ("repeat", "plrepeat")
+PROGRESS_STATE_CANDIDATES = ("progress", "time")
 DURATION_STATE_CANDIDATES = ("duration",)
-SOURCE_STATE_CANDIDATES = ("source",)
-SOURCE_LIST_STATE_CANDIDATES = ("sourceList",)
+SOURCE_STATE_CANDIDATES = ("source", "sourceName", "currentFavorite", "slot")
+SOURCE_LIST_STATE_CANDIDATES = ("sourceList", "zoneFavorites", "favorites", "favourites")
 TITLE_STATE_CANDIDATES = ("songName", "title", "station")
 ARTIST_STATE_CANDIDATES = ("artist",)
 ALBUM_STATE_CANDIDATES = ("album",)
 STATION_STATE_CANDIDATES = ("station",)
 GENRE_STATE_CANDIDATES = ("genre",)
-IMAGE_STATE_CANDIDATES = ("cover",)
+IMAGE_STATE_CANDIDATES = ("cover", "coverurl")
 SERVER_STATE_CANDIDATES = ("serverState",)
 CLIENT_STATE_CANDIDATES = ("clientState",)
 TTS_STATE_CANDIDATES = ("tts",)
@@ -73,6 +73,7 @@ FEATURE_VOLUME_MUTE = getattr(MediaPlayerEntityFeature, "VOLUME_MUTE", 0)
 
 AUDIO_ZONE_V2_CONTROL_TYPE = "AudioZoneV2"
 CENTRAL_AUDIO_ZONE_CONTROL_TYPE = "CentralAudioZone"
+CHILD_AUDIO_ZONE_CONTROL_TYPES = {"AudioZone", AUDIO_ZONE_V2_CONTROL_TYPE}
 
 STATE_OFF = -1
 STATE_IDLE = 0
@@ -157,6 +158,7 @@ class LoxoneAudioZoneEntity(LoxoneEntity, MediaPlayerEntity):
         self._media_server_host_uuid = _first_matching_state_uuid(
             media_server_states, MEDIA_SERVER_HOST_STATE_CANDIDATES
         )
+        self._linked_audio_zone_refs = _resolve_linked_audio_zone_refs(bridge, control)
 
     def relevant_state_uuids(self) -> Iterable[str]:
         watched = set(super().relevant_state_uuids())
@@ -168,6 +170,13 @@ class LoxoneAudioZoneEntity(LoxoneEntity, MediaPlayerEntity):
         ):
             if state_uuid:
                 watched.add(state_uuid)
+        for linked_control, play_state_name, power_state_name in self._linked_audio_zone_refs:
+            for state_name in (play_state_name, power_state_name):
+                if state_name is None:
+                    continue
+                state_uuid = linked_control.state_uuid(state_name)
+                if state_uuid:
+                    watched.add(state_uuid)
         return watched
 
     def _state_raw(self, state_name: str | None) -> Any:
@@ -183,6 +192,9 @@ class LoxoneAudioZoneEntity(LoxoneEntity, MediaPlayerEntity):
 
     def _state_positive_float(self, state_name: str | None) -> float | None:
         return _positive_float(self._state_raw(state_name))
+
+    def _play_state(self) -> int | None:
+        return _coerce_play_state(self._state_raw(self._play_state_name))
 
     def _is_audio_zone_v2(self) -> bool:
         return self.control.type == AUDIO_ZONE_V2_CONTROL_TYPE
@@ -207,28 +219,16 @@ class LoxoneAudioZoneEntity(LoxoneEntity, MediaPlayerEntity):
 
     @property
     def state(self) -> MediaPlayerState | None:
-        power = coerce_bool(self._state_raw(self._power_state_name))
-        play_state = self._state_int(self._play_state_name)
+        local_state = _media_player_state_from_values(
+            self._state_raw(self._power_state_name),
+            self._state_raw(self._play_state_name),
+            treat_idle_as_available=self._is_audio_zone_v2(),
+        )
+        if local_state is not None:
+            return local_state
 
-        # AudioZoneV2 commonly reports `power=0` together with `playState=0` (stopped),
-        # but still allows full playback control like in the Loxone app.
-        if self._is_audio_zone_v2() and play_state == STATE_IDLE:
-            return MediaPlayerState.IDLE
-
-        if power is False:
-            return MediaPlayerState.OFF
-
-        if play_state == STATE_PLAYING:
-            return MediaPlayerState.PLAYING
-        if play_state == STATE_PAUSED:
-            return MediaPlayerState.PAUSED
-        if play_state == STATE_IDLE:
-            return MediaPlayerState.IDLE
-        if play_state == STATE_OFF:
-            return MediaPlayerState.OFF
-
-        if power is True:
-            return MediaPlayerState.IDLE
+        if self._is_central_audio_zone():
+            return self._aggregate_linked_audio_zone_state()
         return None
 
     @property
@@ -326,7 +326,7 @@ class LoxoneAudioZoneEntity(LoxoneEntity, MediaPlayerEntity):
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         attrs = super().extra_state_attributes
-        _set_if_not_none(attrs, "play_state", self._state_int(self._play_state_name))
+        _set_if_not_none(attrs, "play_state", self._play_state())
         _set_if_not_none(
             attrs,
             "server_state",
@@ -340,6 +340,7 @@ class LoxoneAudioZoneEntity(LoxoneEntity, MediaPlayerEntity):
         _set_if_not_none(attrs, "source_id", self._state_int(self._source_state_name))
         _set_if_not_none(attrs, "genre", self._state_text(self._genre_state_name))
         self._append_audio_server_attributes(attrs)
+        self._append_linked_audio_zone_attributes(attrs)
         return attrs
 
     def _append_audio_server_attributes(self, attrs: dict[str, Any]) -> None:
@@ -384,7 +385,7 @@ class LoxoneAudioZoneEntity(LoxoneEntity, MediaPlayerEntity):
         await self._async_send_action("pause")
 
     async def async_media_stop(self) -> None:
-        await self._async_send_action("pause")
+        await self._async_send_action("stop")
 
     async def async_media_next_track(self) -> None:
         await self._async_send_action("next")
@@ -485,8 +486,11 @@ class LoxoneAudioZoneEntity(LoxoneEntity, MediaPlayerEntity):
         if kind in {"play", "resume"}:
             await self.async_media_play()
             return
-        if kind in {"pause", "stop"}:
+        if kind == "pause":
             await self.async_media_pause()
+            return
+        if kind == "stop":
+            await self.async_media_stop()
             return
 
     async def async_media_seek(self, position: float) -> None:
@@ -528,11 +532,12 @@ class LoxoneAudioZoneEntity(LoxoneEntity, MediaPlayerEntity):
         return max(MIN_VOLUME_STEP, min(MAX_VOLUME_STEP, abs(step_value)))
 
     def _source_options(self) -> dict[int, str]:
-        raw = (
-            self._state_raw(self._source_list_state_name)
-            if self._source_list_state_name
-            else self.control.details.get("sourceList")
-        )
+        raw = self._state_raw(self._source_list_state_name)
+        if raw is None:
+            for detail_key in SOURCE_LIST_STATE_CANDIDATES:
+                raw = self.control.details.get(detail_key)
+                if raw is not None:
+                    break
         parsed = _deserialize_source_list(raw)
         if parsed is None:
             return {}
@@ -565,6 +570,64 @@ class LoxoneAudioZoneEntity(LoxoneEntity, MediaPlayerEntity):
         if self._media_server is None:
             return None
         return _coerce_text(self._media_server.host)
+
+    def _linked_audio_zone_states(self) -> list[tuple[Any, MediaPlayerState | None]]:
+        states: list[tuple[Any, MediaPlayerState | None]] = []
+        for linked_control, play_state_name, power_state_name in self._linked_audio_zone_refs:
+            states.append(
+                (
+                    linked_control,
+                    _media_player_state_from_values(
+                        _control_state_raw(self.bridge, linked_control, power_state_name),
+                        _control_state_raw(self.bridge, linked_control, play_state_name),
+                        treat_idle_as_available=(
+                            getattr(linked_control, "type", None)
+                            == AUDIO_ZONE_V2_CONTROL_TYPE
+                        ),
+                    ),
+                )
+            )
+        return states
+
+    def _aggregate_linked_audio_zone_state(self) -> MediaPlayerState | None:
+        if not self._linked_audio_zone_refs:
+            return None
+
+        saw_paused = False
+        saw_known_state = False
+        for _linked_control, linked_state in self._linked_audio_zone_states():
+            if linked_state is None:
+                continue
+            saw_known_state = True
+            if linked_state == MediaPlayerState.PLAYING:
+                return MediaPlayerState.PLAYING
+            if linked_state == MediaPlayerState.PAUSED:
+                saw_paused = True
+
+        if saw_paused:
+            return MediaPlayerState.PAUSED
+        if saw_known_state:
+            return MediaPlayerState.IDLE
+        return MediaPlayerState.IDLE
+
+    def _append_linked_audio_zone_attributes(self, attrs: dict[str, Any]) -> None:
+        if not self._linked_audio_zone_refs:
+            return
+
+        active_zone_names: list[str] = []
+        for linked_control, linked_state in self._linked_audio_zone_states():
+            if linked_state not in {MediaPlayerState.PLAYING, MediaPlayerState.PAUSED}:
+                continue
+            display_name = _coerce_text(getattr(linked_control, "display_name", None))
+            if display_name is None:
+                display_name = _coerce_text(getattr(linked_control, "name", None))
+            if display_name is not None:
+                active_zone_names.append(display_name)
+
+        attrs["linked_audio_zone_count"] = len(self._linked_audio_zone_refs)
+        attrs["active_audio_zone_count"] = len(active_zone_names)
+        if active_zone_names:
+            attrs["active_audio_zones"] = active_zone_names
 
 
 def _resolve_media_server(bridge: Any, control: Any) -> Any | None:
@@ -615,6 +678,67 @@ def _resolve_media_server(bridge: Any, control: Any) -> Any | None:
     if len(media_servers) == 1:
         return media_servers[0]
     return None
+
+
+def _resolve_linked_audio_zone_refs(
+    bridge: Any,
+    control: Any,
+) -> tuple[tuple[Any, str | None, str | None], ...]:
+    if getattr(control, "type", None) != CENTRAL_AUDIO_ZONE_CONTROL_TYPE:
+        return ()
+
+    raw_controls = getattr(bridge, "controls", None)
+    if raw_controls is None:
+        return ()
+
+    detail_tokens = {
+        token.casefold()
+        for token in _extract_text_tokens(
+            control.details if isinstance(control.details, Mapping) else {}
+        )
+    }
+    linked_refs: list[tuple[Any, str | None, str | None]] = []
+
+    for candidate in raw_controls:
+        if candidate is control:
+            continue
+        if getattr(candidate, "type", None) not in CHILD_AUDIO_ZONE_CONTROL_TYPES:
+            continue
+        if not _is_linked_audio_zone_candidate(control, candidate, detail_tokens):
+            continue
+        linked_refs.append(
+            (
+                candidate,
+                first_matching_state_name(candidate, PLAY_STATE_CANDIDATES),
+                first_matching_state_name(candidate, POWER_STATE_CANDIDATES),
+            )
+        )
+
+    return tuple(linked_refs)
+
+
+def _is_linked_audio_zone_candidate(
+    parent_control: Any,
+    candidate_control: Any,
+    detail_tokens: set[str],
+) -> bool:
+    if getattr(candidate_control, "parent_uuid_action", None) == getattr(
+        parent_control, "uuid_action", None
+    ):
+        return True
+
+    if not detail_tokens:
+        return False
+
+    candidate_tokens = {
+        token.casefold()
+        for token in (
+            _coerce_text(getattr(candidate_control, "uuid_action", None)),
+            _coerce_text(getattr(candidate_control, "uuid", None)),
+        )
+        if token is not None
+    }
+    return bool(candidate_tokens & detail_tokens)
 
 
 def _first_matching_state_uuid(
@@ -807,6 +931,85 @@ def _positive_float(value: Any) -> float | None:
     return numeric
 
 
+def _coerce_power_state(value: Any) -> bool | None:
+    power = coerce_bool(value)
+    if power is not None:
+        return power
+
+    text = _coerce_text(value)
+    if text is None:
+        return None
+
+    normalized = text.casefold()
+    if normalized == "offline":
+        return False
+    if normalized in {"starting", "rebooting", "updating"}:
+        return True
+    return None
+
+
+def _coerce_play_state(value: Any) -> int | None:
+    numeric = _coerce_int(value)
+    if numeric is not None:
+        return numeric
+
+    text = _coerce_text(value)
+    if text is None:
+        return None
+
+    normalized = text.casefold()
+    if normalized in {"play", "playing", "resume", "resumed"}:
+        return STATE_PLAYING
+    if normalized in {"pause", "paused"}:
+        return STATE_PAUSED
+    if normalized in {"stop", "stopped", "idle"}:
+        return STATE_IDLE
+    if normalized in {"off", "offline"}:
+        return STATE_OFF
+    return None
+
+
+def _media_player_state_from_values(
+    power_value: Any,
+    play_state_value: Any,
+    *,
+    treat_idle_as_available: bool,
+) -> MediaPlayerState | None:
+    power = _coerce_power_state(power_value)
+    play_state = _coerce_play_state(play_state_value)
+
+    if treat_idle_as_available and play_state == STATE_IDLE:
+        return MediaPlayerState.IDLE
+
+    if power is False:
+        return MediaPlayerState.OFF
+
+    if play_state == STATE_PLAYING:
+        return MediaPlayerState.PLAYING
+    if play_state == STATE_PAUSED:
+        return MediaPlayerState.PAUSED
+    if play_state == STATE_IDLE:
+        return MediaPlayerState.IDLE
+    if play_state == STATE_OFF:
+        return MediaPlayerState.OFF
+
+    if power is True:
+        return MediaPlayerState.IDLE
+    return None
+
+
+def _control_state_raw(bridge: Any, control: Any, state_name: str | None) -> Any:
+    if state_name is None:
+        return None
+
+    resolver = getattr(bridge, "control_state", None)
+    if callable(resolver):
+        return resolver(control, state_name)
+
+    state_uuid = getattr(control, "state_uuid", lambda _name: None)(state_name)
+    return getattr(bridge, "state_value", lambda _uuid: None)(state_uuid)
+
+
 def _coerce_tts_volume(kwargs: Mapping[str, Any]) -> int | None:
     raw_value = kwargs.get("volume")
     if raw_value is None:
@@ -857,7 +1060,7 @@ def _extract_source_slots(raw: Any) -> dict[int, str]:
         direct_items = raw.get("items")
         if isinstance(direct_items, list):
             items.extend(item for item in direct_items if isinstance(item, dict))
-        for key in ("sources", "favourites", "favorites"):
+        for key in ("sources", "favourites", "favorites", "zoneFavorites"):
             direct_candidates = raw.get(key)
             if isinstance(direct_candidates, list):
                 items.extend(item for item in direct_candidates if isinstance(item, dict))

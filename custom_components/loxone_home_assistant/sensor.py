@@ -64,12 +64,15 @@ from .entity import (
     state_is_boolean,
 )
 from .intercom import (
-    intercom_address_state_name,
     intercom_history_state_name,
-    intercom_synthetic_history_urls,
     is_intercom_control,
     is_intercom_system_schema_webpage,
     resolve_intercom_http_url,
+)
+from .intercom_media import (
+    intercom_history_entries,
+    intercom_last_bell_events,
+    intercom_last_bell_timestamp,
 )
 from .models import LoxoneControl
 from .runtime import entry_bridge
@@ -1043,17 +1046,7 @@ def _first_non_boolean_state_name(
 
 def _build_intercom_sensors(bridge, control: LoxoneControl) -> list[SensorEntity]:
     history_state_name = intercom_history_state_name(control)
-    dynamic_history_state_names = _dynamic_intercom_history_state_names(control)
-    if history_state_name is None:
-        history_state_name = first_matching_state_name(
-            control,
-            INTERCOM_HISTORY_STATE_CANDIDATES,
-        )
-    if (
-        history_state_name is None
-        and not dynamic_history_state_names
-        and not _has_intercom_history_detail(control)
-    ):
+    if history_state_name is None and not _has_intercom_history_detail(control):
         return []
     return [LoxoneIntercomHistorySensor(bridge, control, history_state_name)]
 
@@ -1793,18 +1786,11 @@ class LoxoneIntercomHistorySensor(LoxoneEntity, SensorEntity):
     ) -> None:
         super().__init__(bridge, control, "History")
         self._history_state_name = history_state_name
-        self._dynamic_history_state_names = _dynamic_intercom_history_state_names(control)
-        self._timestamp_state_names = _intercom_history_timestamp_state_names(
-            control,
-            history_state_name,
-            self._dynamic_history_state_names,
-        )
-        self._address_state_name = intercom_address_state_name(control)
-        self._events_url: str | None = None
         self._latest_event_time: datetime | None = None
         self._latest_event_image_url: str | None = None
         self._event_count = 0
         self._recent_image_urls: list[str] = []
+        self._history_timestamps: list[str] = []
 
     @property
     def should_poll(self) -> bool:
@@ -1812,12 +1798,7 @@ class LoxoneIntercomHistorySensor(LoxoneEntity, SensorEntity):
 
     def relevant_state_uuids(self):
         uuids: list[str] = []
-        for state_name in (
-            self._history_state_name,
-            self._address_state_name,
-            *self._timestamp_state_names,
-            *self._dynamic_history_state_names,
-        ):
+        for state_name in self.control.states:
             if state_name is None:
                 continue
             state_uuid = self.control.state_uuid(state_name)
@@ -1833,107 +1814,39 @@ class LoxoneIntercomHistorySensor(LoxoneEntity, SensorEntity):
         self.async_schedule_update_ha_state(True)
 
     async def async_update(self) -> None:
-        address_value = self._address_state_value()
-
-        for state_name in (
-            self._history_state_name,
-            *self._dynamic_history_state_names,
-        ):
-            state_payload = _intercom_history_payload_from_state(
-                self.bridge,
-                self.control,
-                state_name,
-            )
-            if state_payload is None:
-                continue
-            if _is_intercom_video_settings_payload(state_payload):
-                continue
-
-            normalized_events = _extract_intercom_events(
-                state_payload,
-                self.bridge,
-                self.control,
-                address_value,
-            )
-            if normalized_events:
-                self._events_url = None
-                self._apply_normalized_events(normalized_events)
-                if self._latest_event_time is None:
-                    self._latest_event_time = self._timestamp_fallback_value()
-                return
-
-        for events_url in _intercom_history_url_candidates(
+        history_tokens = intercom_last_bell_events(
             self.bridge,
             self.control,
-            self._history_state_name,
-            address_value,
-            dynamic_state_names=self._dynamic_history_state_names,
-        ):
-            payload = await _async_fetch_json(
-                self.bridge,
-                events_url,
-            )
-            if payload is None:
-                continue
+            state_value_getter=self.state_value,
+        )
+        history_entries = intercom_history_entries(
+            self.bridge,
+            self.control,
+            last_bell_events=history_tokens,
+            state_value_getter=self.state_value,
+        )
 
-            normalized_events = _extract_intercom_events(
-                payload,
-                self.bridge,
-                self.control,
-                address_value,
-            )
-            if not normalized_events:
-                continue
+        self._history_timestamps = [entry.raw_timestamp for entry in history_entries]
+        self._event_count = len(history_entries)
+        self._recent_image_urls = [entry.image_url for entry in history_entries[:10]]
 
-            self._events_url = events_url
-            self._apply_normalized_events(normalized_events)
-            if self._latest_event_time is None:
-                self._latest_event_time = self._timestamp_fallback_value()
-            return
-
-        self._events_url = None
-        self._latest_event_time = self._timestamp_fallback_value()
-        self._latest_event_image_url = None
-        self._event_count = 0
-        self._recent_image_urls = []
-
-    def _address_state_value(self) -> Any:
-        if self._address_state_name is None:
-            return None
-        return self.bridge.control_state(self.control, self._address_state_name)
-
-    def _apply_normalized_events(self, normalized_events: list[dict[str, Any]]) -> None:
-        self._event_count = len(normalized_events)
-        self._recent_image_urls = [
-            event["image_url"]
-            for event in normalized_events
-            if isinstance(event.get("image_url"), str)
-        ][:10]
-
-        latest_event = next(iter(normalized_events), None)
+        latest_entry = next(iter(history_entries), None)
         self._latest_event_time = (
-            latest_event.get("timestamp")
-            if isinstance(latest_event, Mapping)
-            and isinstance(latest_event.get("timestamp"), datetime)
-            else None
+            latest_entry.event_time if latest_entry is not None else None
         )
         self._latest_event_image_url = (
-            latest_event.get("image_url")
-            if isinstance(latest_event, Mapping)
-            and isinstance(latest_event.get("image_url"), str)
-            else None
+            latest_entry.image_url if latest_entry is not None else None
         )
 
-    def _timestamp_fallback_value(self) -> datetime | None:
-        for state_name in self._timestamp_state_names:
-            raw_value = self.bridge.control_state(self.control, state_name)
-            timestamp = _timestamp_state_value(state_name, raw_value)
-            if timestamp is not None:
-                return timestamp
-            timestamp = _coerce_datetime(raw_value)
-            if timestamp is not None:
-                return timestamp
-        return None
+        if self._latest_event_time is None:
+            self._latest_event_time = intercom_last_bell_timestamp(
+                self.bridge,
+                self.control,
+                last_bell_events=history_tokens,
+                state_value_getter=self.state_value,
+            )
+        if self._latest_event_time is None:
+            self._latest_event_time = self._timestamp_fallback_value()
 
     @property
     def native_value(self) -> datetime | None:
@@ -1944,14 +1857,25 @@ class LoxoneIntercomHistorySensor(LoxoneEntity, SensorEntity):
         attrs = super().extra_state_attributes
         if self._history_state_name is not None:
             attrs["history_state"] = self._history_state_name
-        if self._events_url is not None:
-            attrs["history_events_url"] = self._events_url
         attrs["event_count"] = self._event_count
         if self._latest_event_image_url is not None:
             attrs["latest_event_image_url"] = self._latest_event_image_url
         if self._recent_image_urls:
             attrs["recent_image_urls"] = self._recent_image_urls
+        if self._history_timestamps:
+            attrs["history_timestamps"] = self._history_timestamps
         return attrs
+
+    def _timestamp_fallback_value(self) -> datetime | None:
+        for state_name in self.control.states:
+            raw_value = self.state_value(state_name)
+            timestamp = _timestamp_state_value(state_name, raw_value)
+            if timestamp is not None:
+                return timestamp
+            timestamp = _coerce_datetime(raw_value)
+            if timestamp is not None and normalize_state_name(state_name).endswith("date"):
+                return timestamp
+        return None
 
 
 class LoxoneNamedStateSensor(LoxoneSingleStateSensor):
@@ -2049,9 +1973,16 @@ class LoxoneWebpageSensor(LoxoneEntity, SensorEntity):
 
 
 def _has_intercom_history_detail(control: LoxoneControl) -> bool:
+    if first_matching_state_name(control, ("lastBellEvents", "lastBellTimestamp")) is not None:
+        return True
+    if first_matching_state_name(
+        control,
+        ("videoInfo", "videoSettings", "videoSettingsExtern", "videoSettingsIntern"),
+    ) is not None:
+        return True
     return any(
         _nested_detail_value(control.details, path) is not None
-        for path in INTERCOM_HISTORY_DETAIL_PATHS
+        for path in ("lastBellEvents", "videoInfo.lastBellEvents")
     )
 
 
@@ -2112,8 +2043,6 @@ def _intercom_history_url_candidates(
     *,
     dynamic_state_names: tuple[str, ...] = (),
 ) -> tuple[str, ...]:
-    candidates: list[str] = []
-
     resolved_url = _resolve_intercom_history_url(
         bridge,
         control,
@@ -2121,18 +2050,9 @@ def _intercom_history_url_candidates(
         address_value,
         dynamic_state_names=dynamic_state_names,
     )
-    if resolved_url is not None:
-        candidates.append(resolved_url)
-
-    for synthetic_url in intercom_synthetic_history_urls(
-        bridge,
-        control,
-        address_value=address_value,
-    ):
-        if synthetic_url not in candidates:
-            candidates.append(synthetic_url)
-
-    return tuple(candidates)
+    if resolved_url is None:
+        return ()
+    return (resolved_url,)
 
 
 def _dynamic_intercom_history_state_names(control: LoxoneControl) -> tuple[str, ...]:

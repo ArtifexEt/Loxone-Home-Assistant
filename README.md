@@ -309,9 +309,8 @@ cards:
       - button.furtka_send_tts
 ```
 
-Live Intercom MJPEG is proxied through Home Assistant endpoint
-`/api/loxone_home_assistant/intercom_stream/{serial}/{uuid_action}` using configured
-Intercom credentials.
+Live Intercom video is exposed as a native camera MJPEG stream. History images are built
+from `lastBellEvents` and fetched from Miniserver `camimage/{uuidAction}/{timestamp}`.
 
 ### Optional MJPEG -> HLS wrapper
 

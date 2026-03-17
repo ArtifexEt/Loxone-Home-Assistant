@@ -1,16 +1,15 @@
-"""Camera platform for Loxone intercom video preview."""
+"""Camera platform for the Loxone Intercom."""
 
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 from collections.abc import Mapping
 from typing import Any
 from urllib.parse import urlsplit
 
 try:
-    from aiohttp import BasicAuth, ClientError
+    from aiohttp import BasicAuth, ClientError, web
 except ImportError:  # pragma: no cover - fallback for lightweight test stubs
     class ClientError(Exception):
         """Fallback network error type used in tests without aiohttp."""
@@ -21,192 +20,62 @@ except ImportError:  # pragma: no cover - fallback for lightweight test stubs
         def __init__(self, login: str, password: str) -> None:
             self.login = login
             self.password = password
+
+    class _FallbackResponse:
+        def __init__(
+            self,
+            *,
+            status: int = 200,
+            body: bytes | None = None,
+            content_type: str | None = None,
+            headers: Mapping[str, str] | None = None,
+        ) -> None:
+            self.status = status
+            self.body = body
+            self.content_type = content_type
+            self.headers = dict(headers or {})
+
+    class _FallbackStreamResponse(_FallbackResponse):
+        async def prepare(self, request) -> None:
+            del request
+
+        async def write(self, chunk: bytes) -> None:
+            current = self.body or b""
+            self.body = current + chunk
+
+        async def write_eof(self) -> None:
+            return None
+
+    class _FallbackWeb:
+        Response = _FallbackResponse
+        StreamResponse = _FallbackStreamResponse
+
+    web = _FallbackWeb()  # type: ignore[assignment]
+
 from homeassistant.components.camera import Camera
-try:
-    from homeassistant.components.camera import CameraEntityFeature as _CameraEntityFeature
-except ImportError:  # pragma: no cover - compatibility across HA versions
-    try:
-        from homeassistant.components.camera.const import CameraEntityFeature as _CameraEntityFeature
-    except ImportError:  # pragma: no cover - fallback for lightweight test stubs
-        _CameraEntityFeature = None
-try:
-    from homeassistant.components.camera import SUPPORT_STREAM as _SUPPORT_STREAM
-except ImportError:  # pragma: no cover - fallback for lightweight test stubs
-    _SUPPORT_STREAM = 2
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import INTERCOM_CAMERA_CONTROL_TYPES
-from .entity import LoxoneEntity, first_matching_state_name, normalize_state_name
-from .intercom import (
-    intercom_address_state_name,
-    intercom_history_state_name,
-    intercom_synthetic_history_urls,
-    intercom_synthetic_snapshot_urls,
-    intercom_synthetic_stream_urls,
-    is_intercom_control,
-    resolve_intercom_http_url,
-)
-from .intercom_stream_proxy import (
-    intercom_stream_proxy_path,
-    intercom_stream_proxy_url,
-    set_intercom_stream_target,
+from .entity import LoxoneEntity, normalize_state_name
+from .intercom import is_intercom_control
+from .intercom_media import (
+    intercom_auth_credentials,
+    intercom_history_image_url,
+    intercom_last_bell_events,
+    intercom_selected_history_timestamp,
+    intercom_snapshot_url,
+    intercom_stream_url,
+    miniserver_auth_credentials,
 )
 from .models import LoxoneControl
 from .runtime import entry_bridge
 
 _LOGGER = logging.getLogger(__name__)
 
-CAMERA_STREAM_FEATURE = getattr(_CameraEntityFeature, "STREAM", _SUPPORT_STREAM)
-
-STREAM_STATE_CANDIDATES = (
-    "streamUrl",
-    "videoStream",
-    "videoUrl",
-    "video",
-)
-SNAPSHOT_STATE_CANDIDATES = (
-    "alertImage",
-    "liveImage",
-    "liveImageUrl",
-    "image",
-    "snapshot",
-)
-STREAM_DETAIL_PATHS = (
-    "securedDetails.videoInfo.streamUrl",
-    "securedDetails.videoInfo.streamUrlExtern",
-    "securedDetails.videoInfo.streamUrlIntern",
-    "securedDetails.videoInfo.videoUrl",
-    "securedDetails.streamUrl",
-    "videoInfo.streamUrl",
-    "videoInfo.streamUrlExtern",
-    "videoInfo.streamUrlIntern",
-    "videoInfo.videoUrl",
-    "videoSettings.streamUrl",
-    "videoSettings.streamUrlExtern",
-    "videoSettings.streamUrlIntern",
-    "videoSettings.videoUrl",
-    "streamUrl",
-)
-SNAPSHOT_DETAIL_PATHS = (
-    "securedDetails.videoInfo.alertImage",
-    "securedDetails.videoInfo.liveImageUrl",
-    "securedDetails.videoInfo.liveImage",
-    "securedDetails.videoInfo.imageUrl",
-    "securedDetails.videoInfo.alertImageUrl",
-    "videoInfo.liveImageUrl",
-    "videoInfo.liveImage",
-    "videoInfo.alertImage",
-    "videoInfo.alertImageUrl",
-    "videoInfo.imageUrl",
-    "videoSettings.alertImage",
-    "videoSettings.liveImageUrl",
-    "videoSettings.liveImage",
-    "videoSettings.imageUrl",
-    "alertImage",
-    "liveImage",
-    "liveImageUrl",
-)
-LAST_BELL_EVENTS_DETAIL_PATHS = (
-    "lastBellEvents",
-    "eventHistoryUrl",
-    "videoInfo.lastBellEvents",
-    "videoInfo.eventHistoryUrl",
-    "securedDetails.lastBellEvents",
-    "securedDetails.videoInfo.lastBellEvents",
-    "securedDetails.videoInfo.eventHistoryUrl",
-    "videoSettings.lastBellEvents",
-    "videoSettings.eventHistoryUrl",
-)
-INTERCOM_CAMERA_CONTROL_TYPES_NORMALIZED = {
-    normalize_state_name(value) for value in INTERCOM_CAMERA_CONTROL_TYPES
-}
-STREAM_OR_SNAPSHOT_STATE_CANDIDATES = (
-    *STREAM_STATE_CANDIDATES,
-    *SNAPSHOT_STATE_CANDIDATES,
-)
-SECURED_STREAM_DETAIL_PATHS = (
-    "videoInfo.streamUrl",
-    "streamUrl",
-)
-SECURED_SNAPSHOT_DETAIL_PATHS = (
-    "videoInfo.alertImage",
-    "videoInfo.liveImageUrl",
-    "videoInfo.imageUrl",
-    "alertImage",
-    "liveImageUrl",
-    "imageUrl",
-)
-INTERCOM_DYNAMIC_DETAIL_STATE_CANDIDATES = (
-    "videoSettingsIntern",
-    "videoSettingsExtern",
-    "videoSettings",
-    "videoInfo",
-    "answers",
-    "deviceState",
-    "address",
-)
-INTERCOM_DYNAMIC_DETAIL_STATE_HINTS = (
-    "video",
-    "stream",
-    "image",
-    "snapshot",
-    "history",
-    "event",
-    "bell",
-    "answer",
-    "address",
-)
-STREAM_KEY_HINTS = ("stream", "video", "mjpeg", "hls", "rtsp")
-SNAPSHOT_KEY_HINTS = ("image", "snapshot", "alert", "live", "photo", "thumb")
-HISTORY_KEY_HINTS = ("history", "event", "bell", "answer", "record")
-_TEXT_ERROR_HINTS = (
-    "internal server error",
-    "server error",
-    "bad gateway",
-    "gateway timeout",
-    "service unavailable",
-    "unauthorized",
-    "forbidden",
-    "not found",
-)
-_STREAM_URL_HINTS = (
-    "stream",
-    "mjpg",
-    "mjpeg",
-    "hls",
-    "m3u8",
-    "rtsp",
-    "webrtc",
-    "h264",
-    "video",
-)
-_STREAM_HINTS_FOR_IMAGE_PATHS = (
-    "stream",
-    "mjpg",
-    "mjpeg",
-    "hls",
-    "m3u8",
-    "rtsp",
-    "webrtc",
-    "h264",
-)
-_STREAM_MEDIA_EXTENSIONS = (".mjpg", ".mjpeg", ".m3u8", ".mp4", ".ts")
-_STILL_IMAGE_EXTENSIONS = (
-    ".jpg",
-    ".jpeg",
-    ".png",
-    ".gif",
-    ".bmp",
-    ".webp",
-    ".tif",
-    ".tiff",
-    ".ico",
-)
-_BINARY_IMAGE_CONTENT_TYPES = {"application/octet-stream", "binary/octet-stream"}
-_MJPEG_MAX_SCAN_BYTES = 4 * 1024 * 1024
 _MJPEG_CHUNK_SIZE = 16 * 1024
+_MJPEG_MAX_SCAN_BYTES = 4 * 1024 * 1024
 
 
 async def async_setup_entry(
@@ -222,43 +91,21 @@ async def async_setup_entry(
 
 
 class LoxoneIntercomCameraEntity(LoxoneEntity, Camera):
-    """Intercom camera entity exposing video stream and still image preview."""
+    """Expose the Loxone Intercom as a native MJPEG camera."""
 
     _attr_icon = "mdi:video-wireless"
-    _attr_supported_features = CAMERA_STREAM_FEATURE
+    _attr_supported_features = 0
 
     def __init__(self, bridge, control: LoxoneControl) -> None:
         Camera.__init__(self)
         super().__init__(bridge, control, "Video")
-        self._stream_state_name = first_matching_state_name(control, STREAM_STATE_CANDIDATES)
-        self._snapshot_state_name = first_matching_state_name(control, SNAPSHOT_STATE_CANDIDATES)
-        self._last_bell_events_state_name = intercom_history_state_name(control)
-        self._address_state_name = intercom_address_state_name(control)
-        self._dynamic_detail_state_names = _dynamic_intercom_state_names(control)
         self._secured_details: dict[str, Any] | None = None
         self._secured_details_loaded = False
         self._secured_details_lock = asyncio.Lock()
 
     async def stream_source(self) -> str | None:
-        await self._ensure_secured_details_loaded()
-        stream_url = self._stream_url()
-        if stream_url is None:
-            return None
-        auth_username, auth_password = _intercom_auth_credentials(self.bridge)
-        set_intercom_stream_target(
-            self.bridge,
-            self.control.uuid_action,
-            target_url=stream_url,
-            username=auth_username,
-            password=auth_password,
-        )
-        proxy_url = intercom_stream_proxy_url(self.bridge, self.control.uuid_action)
-        if proxy_url is None:
-            return intercom_stream_proxy_path(
-                str(getattr(self.bridge, "serial", "")),
-                self.control.uuid_action,
-            )
-        return proxy_url
+        """Disable Home Assistant stream/WebRTC for the Intercom."""
+        return None
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
@@ -266,16 +113,27 @@ class LoxoneIntercomCameraEntity(LoxoneEntity, Camera):
         stream_url = self._stream_url()
         if stream_url is not None:
             attrs["stream_url"] = stream_url
+
         snapshot_url = self._snapshot_url()
         if snapshot_url is not None:
             attrs["snapshot_url"] = snapshot_url
-        selected_history_image_url = self._selected_history_image_url()
-        if selected_history_image_url is not None:
-            attrs["selected_history_image_url"] = selected_history_image_url
-        bell_events = self._last_bell_events_url()
-        if bell_events is not None:
-            attrs["last_bell_events_url"] = bell_events
-            attrs["history_events_url"] = bell_events
+
+        history_tokens = self._history_timestamps()
+        if history_tokens:
+            attrs["history_timestamps"] = list(history_tokens)
+            attrs["history_count"] = len(history_tokens)
+
+        selected_timestamp = self._selected_history_timestamp()
+        if selected_timestamp is not None:
+            attrs["selected_history_timestamp"] = selected_timestamp
+            selected_image_url = intercom_history_image_url(
+                self.bridge,
+                self.control,
+                selected_timestamp,
+            )
+            if selected_image_url is not None:
+                attrs["selected_history_image_url"] = selected_image_url
+
         return attrs
 
     async def async_camera_image(
@@ -284,281 +142,170 @@ class LoxoneIntercomCameraEntity(LoxoneEntity, Camera):
         del width, height
 
         await self._ensure_secured_details_loaded()
-        snapshot_url = self._snapshot_url()
-        stream_url = self._stream_url()
-        image_urls = tuple(dict.fromkeys(url for url in (snapshot_url, stream_url) if url))
-        if not image_urls:
+        image_url = self._current_image_url()
+        if image_url is None:
             return None
 
         session = getattr(self.bridge, "_session", None)
         if session is None:
             return None
 
-        auth_username, auth_password = _intercom_auth_credentials(self.bridge)
-        request_auth = BasicAuth(auth_username, auth_password) if auth_username is not None else None
-        for image_url in image_urls:
-            try:
-                async with session.get(image_url, auth=request_auth) as response:
-                    response.raise_for_status()
-                    content_type = _response_content_type(response)
-                    if content_type == "multipart/x-mixed-replace":
-                        payload = await _extract_first_mjpeg_frame(response)
-                    else:
-                        payload = await response.read()
-                    if _is_image_payload(response, payload):
-                        return payload
-                    _LOGGER.debug(
-                        "Intercom preview returned non-image payload for %s from %s "
-                        "(status=%s, content_type=%s, preview=%r)",
-                        self.control.uuid_action,
-                        image_url,
-                        response.status,
-                        _response_content_type(response),
-                        _payload_preview(payload),
-                    )
-            except asyncio.CancelledError:
-                raise
-            except ClientError as err:
-                _LOGGER.debug(
-                    "Intercom preview request failed for %s from %s (%s)",
-                    self.control.uuid_action,
-                    image_url,
-                    err,
-                )
-            except Exception as err:  # noqa: BLE001
-                _LOGGER.debug(
-                    "Intercom preview request errored for %s from %s (%s)",
-                    self.control.uuid_action,
-                    image_url,
-                    err,
-                )
+        request_auth = self._request_auth_for_url(image_url)
+        try:
+            async with session.get(image_url, auth=request_auth) as response:
+                response.raise_for_status()
+                content_type = _response_content_type(response)
+                if content_type == "multipart/x-mixed-replace":
+                    return await _extract_first_mjpeg_frame(response)
+                payload = await response.read()
+                return payload or None
+        except asyncio.CancelledError:
+            raise
+        except ClientError as err:
+            _LOGGER.debug(
+                "Intercom image fetch failed for %s from %s (%s)",
+                self.control.uuid_action,
+                image_url,
+                err,
+            )
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug(
+                "Intercom image fetch errored for %s from %s (%s)",
+                self.control.uuid_action,
+                image_url,
+                err,
+            )
         return None
+
+    async def handle_async_mjpeg_stream(self, request) -> Any:
+        """Proxy the raw MJPEG stream directly from the Intercom."""
+        await self._ensure_secured_details_loaded()
+
+        selected_timestamp = self._selected_history_timestamp()
+        if selected_timestamp is not None:
+            image = await self.async_camera_image()
+            if image is None or web is None:
+                return _web_response(status=404)
+            return web.Response(
+                body=image,
+                content_type="image/jpeg",
+                headers={"Cache-Control": "no-store"},
+            )
+
+        stream_url = self._stream_url()
+        if stream_url is None:
+            return _web_response(status=404)
+
+        session = getattr(self.bridge, "_session", None)
+        if session is None:
+            return _web_response(status=503)
+
+        request_auth = self._request_auth_for_url(stream_url)
+        try:
+            async with session.get(stream_url, auth=request_auth) as upstream:
+                if upstream.status != 200 or web is None:
+                    return _web_response(status=upstream.status)
+
+                content_type = upstream.headers.get(
+                    "Content-Type",
+                    "multipart/x-mixed-replace",
+                )
+                response = web.StreamResponse(
+                    status=200,
+                    headers={
+                        "Content-Type": content_type,
+                        "Cache-Control": "no-store",
+                    },
+                )
+                await response.prepare(request)
+                try:
+                    async for chunk in upstream.content.iter_chunked(_MJPEG_CHUNK_SIZE):
+                        if not chunk:
+                            continue
+                        await response.write(chunk)
+                except ConnectionResetError:
+                    return response
+                await response.write_eof()
+                return response
+        except asyncio.CancelledError:
+            raise
+        except ClientError as err:
+            _LOGGER.debug(
+                "Intercom MJPEG proxy failed for %s from %s (%s)",
+                self.control.uuid_action,
+                stream_url,
+                err,
+            )
+            return _web_response(status=502)
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug(
+                "Intercom MJPEG proxy errored for %s from %s (%s)",
+                self.control.uuid_action,
+                stream_url,
+                err,
+            )
+            return _web_response(status=500)
 
     def _stream_url(self) -> str | None:
-        def _pick_stream_candidate(candidate: str | None) -> str | None:
-            if candidate is None:
-                return None
-            if _looks_like_stream_url(candidate):
-                return candidate
-            return None
-
-        address_value = (
-            self.state_value(self._address_state_name)
-            if self._address_state_name is not None
-            else None
-        )
-        from_state = self.state_value(self._stream_state_name) if self._stream_state_name else None
-        resolved_state = resolve_intercom_http_url(
+        return intercom_stream_url(
             self.bridge,
             self.control,
-            from_state,
-            address_value=address_value,
-        )
-        picked = _pick_stream_candidate(resolved_state)
-        if picked is not None:
-            return picked
-        from_details = _resolve_control_detail_url(
-            self.bridge,
-            self.control,
-            STREAM_DETAIL_PATHS,
-            address_value=address_value,
-        )
-        picked = _pick_stream_candidate(from_details)
-        if picked is not None:
-            return picked
-        from_detail_payload = _resolve_url_from_payload_with_key_hints(
-            self.bridge,
-            self.control,
-            self.control.details,
-            key_hints=STREAM_KEY_HINTS,
-            address_value=address_value,
-        )
-        picked = _pick_stream_candidate(from_detail_payload)
-        if picked is not None:
-            return picked
-        from_dynamic_states = _resolve_url_from_intercom_state_payloads(
-            self.bridge,
-            self.control,
-            self._dynamic_detail_state_names,
+            secured_details=self._secured_details,
             state_value_getter=self.state_value,
-            key_hints=STREAM_KEY_HINTS,
-            address_value=address_value,
         )
-        picked = _pick_stream_candidate(from_dynamic_states)
-        if picked is not None:
-            return picked
-        if self._secured_details is not None:
-            from_secured_details = _resolve_detail_url(
-                self.bridge,
-                self._secured_details,
-                SECURED_STREAM_DETAIL_PATHS,
-                control=self.control,
-                address_value=address_value,
-            )
-            picked = _pick_stream_candidate(from_secured_details)
-            if picked is not None:
-                return picked
-            from_secured_payload = _resolve_url_from_payload_with_key_hints(
-                self.bridge,
-                self.control,
-                self._secured_details,
-                key_hints=STREAM_KEY_HINTS,
-                address_value=address_value,
-            )
-            picked = _pick_stream_candidate(from_secured_payload)
-            if picked is not None:
-                return picked
-        for synthetic_url in intercom_synthetic_stream_urls(
-            self.bridge,
-            self.control,
-            address_value=address_value,
-        ):
-            picked = _pick_stream_candidate(synthetic_url)
-            if picked is not None:
-                return picked
-        return None
 
     def _snapshot_url(self) -> str | None:
-        address_value = (
-            self.state_value(self._address_state_name)
-            if self._address_state_name is not None
-            else None
-        )
-        selected_history_image_url = self._selected_history_image_url(
-            address_value=address_value
-        )
-        if selected_history_image_url is not None:
-            return selected_history_image_url
-        from_state = self.state_value(self._snapshot_state_name) if self._snapshot_state_name else None
-        resolved_state = resolve_intercom_http_url(
+        return intercom_snapshot_url(
             self.bridge,
             self.control,
-            from_state,
-            address_value=address_value,
-        )
-        if resolved_state is not None:
-            return resolved_state
-        from_details = _resolve_control_detail_url(
-            self.bridge,
-            self.control,
-            SNAPSHOT_DETAIL_PATHS,
-            address_value=address_value,
-        )
-        if from_details is not None:
-            return from_details
-        from_detail_payload = _resolve_url_from_payload_with_key_hints(
-            self.bridge,
-            self.control,
-            self.control.details,
-            key_hints=SNAPSHOT_KEY_HINTS,
-            address_value=address_value,
-        )
-        if from_detail_payload is not None:
-            return from_detail_payload
-        from_dynamic_states = _resolve_url_from_intercom_state_payloads(
-            self.bridge,
-            self.control,
-            self._dynamic_detail_state_names,
+            secured_details=self._secured_details,
             state_value_getter=self.state_value,
-            key_hints=SNAPSHOT_KEY_HINTS,
-            address_value=address_value,
         )
-        if from_dynamic_states is not None:
-            return from_dynamic_states
-        if self._secured_details is not None:
-            from_secured_details = _resolve_detail_url(
-                self.bridge,
-                self._secured_details,
-                SECURED_SNAPSHOT_DETAIL_PATHS,
-                control=self.control,
-                address_value=address_value,
-            )
-            if from_secured_details is not None:
-                return from_secured_details
-            from_secured_payload = _resolve_url_from_payload_with_key_hints(
-                self.bridge,
-                self.control,
-                self._secured_details,
-                key_hints=SNAPSHOT_KEY_HINTS,
-                address_value=address_value,
-            )
-            if from_secured_payload is not None:
-                return from_secured_payload
-        for synthetic_url in intercom_synthetic_snapshot_urls(
-            self.bridge,
-            self.control,
-            address_value=address_value,
-        ):
-            return synthetic_url
-        return None
 
-    def _last_bell_events_url(self) -> str | None:
-        address_value = (
-            self.state_value(self._address_state_name)
-            if self._address_state_name is not None
-            else None
-        )
-        from_state = (
-            self.state_value(self._last_bell_events_state_name)
-            if self._last_bell_events_state_name
-            else None
-        )
-        resolved_state = resolve_intercom_http_url(
+    def _history_timestamps(self) -> tuple[str, ...]:
+        return intercom_last_bell_events(
             self.bridge,
             self.control,
-            from_state,
-            address_value=address_value,
-        )
-        if resolved_state is not None:
-            return resolved_state
-        from_details = _resolve_control_detail_url(
-            self.bridge,
-            self.control,
-            LAST_BELL_EVENTS_DETAIL_PATHS,
-            address_value=address_value,
-        )
-        if from_details is not None:
-            return from_details
-        from_detail_payload = _resolve_url_from_payload_with_key_hints(
-            self.bridge,
-            self.control,
-            self.control.details,
-            key_hints=HISTORY_KEY_HINTS,
-            address_value=address_value,
-        )
-        if from_detail_payload is not None:
-            return from_detail_payload
-        from_dynamic_states = _resolve_url_from_intercom_state_payloads(
-            self.bridge,
-            self.control,
-            self._dynamic_detail_state_names,
+            secured_details=self._secured_details,
             state_value_getter=self.state_value,
-            key_hints=HISTORY_KEY_HINTS,
-            address_value=address_value,
         )
-        if from_dynamic_states is not None:
-            return from_dynamic_states
-        for synthetic_url in intercom_synthetic_history_urls(
-            self.bridge,
-            self.control,
-            address_value=address_value,
-        ):
-            return synthetic_url
-        return None
 
-    def _selected_history_image_url(self, *, address_value: Any = None) -> str | None:
-        selected_images = getattr(self.bridge, "_intercom_selected_history_images", None)
-        if not isinstance(selected_images, Mapping):
+    def _selected_history_timestamp(self) -> str | None:
+        return intercom_selected_history_timestamp(self.bridge, self.control.uuid_action)
+
+    def _current_image_url(self) -> str | None:
+        selected_timestamp = self._selected_history_timestamp()
+        if selected_timestamp is not None:
+            return intercom_history_image_url(self.bridge, self.control, selected_timestamp)
+
+        snapshot_url = self._snapshot_url()
+        if snapshot_url is not None:
+            return snapshot_url
+        return self._stream_url()
+
+    def _request_auth_for_url(self, url: str) -> BasicAuth | None:
+        if self._is_miniserver_url(url):
+            username, password = miniserver_auth_credentials(self.bridge)
+        else:
+            username, password = intercom_auth_credentials(self.bridge)
+        if username is None:
             return None
-        selected_value = selected_images.get(self.control.uuid_action)
-        if selected_value is None:
-            return None
-        return resolve_intercom_http_url(
-            self.bridge,
-            self.control,
-            selected_value,
-            address_value=address_value,
-        )
+        return BasicAuth(username, password)
+
+    def _is_miniserver_url(self, url: str) -> bool:
+        parsed = urlsplit(url)
+        if not parsed.hostname:
+            return False
+
+        if parsed.hostname != str(getattr(self.bridge, "host", "")):
+            return False
+
+        bridge_port = int(getattr(self.bridge, "port", 0) or 0)
+        if parsed.port is not None:
+            return parsed.port == bridge_port
+
+        default_port = 443 if bool(getattr(self.bridge, "use_tls", True)) else 80
+        return bridge_port == default_port
 
     async def _ensure_secured_details_loaded(self) -> None:
         if self._secured_details_loaded:
@@ -589,297 +336,57 @@ class LoxoneIntercomCameraEntity(LoxoneEntity, Camera):
                 self._secured_details = dict(value)
             self._secured_details_loaded = True
 
-def _resolve_control_detail_url(
-    bridge,
-    control: LoxoneControl,
-    detail_paths: tuple[str, ...],
-    *,
-    address_value: Any = None,
-) -> str | None:
-    return _resolve_detail_url(
-        bridge,
-        control.details,
-        detail_paths,
-        control=control,
-        address_value=address_value,
-    )
-
-
-def _resolve_detail_url(
-    bridge,
-    details: Mapping[str, Any],
-    detail_paths: tuple[str, ...],
-    *,
-    control: LoxoneControl | None = None,
-    address_value: Any = None,
-) -> str | None:
-    for path in detail_paths:
-        raw_value = _nested_detail_value(details, path)
-        if control is not None:
-            resolved = resolve_intercom_http_url(
-                bridge,
-                control,
-                raw_value,
-                address_value=address_value,
-            )
-        else:
-            resolved = bridge.resolve_http_url(_coerce_text(raw_value))
-        if resolved is not None:
-            return resolved
-    return None
-
-
-def _dynamic_intercom_state_names(control: LoxoneControl) -> tuple[str, ...]:
-    names: list[str] = []
-    seen: set[str] = set()
-
-    for candidate in INTERCOM_DYNAMIC_DETAIL_STATE_CANDIDATES:
-        state_name = first_matching_state_name(control, (candidate,))
-        if state_name is None or state_name in seen:
-            continue
-        names.append(state_name)
-        seen.add(state_name)
-
-    for state_name in control.states:
-        normalized = normalize_state_name(state_name)
-        if not any(hint in normalized for hint in INTERCOM_DYNAMIC_DETAIL_STATE_HINTS):
-            continue
-        if state_name in seen:
-            continue
-        names.append(state_name)
-        seen.add(state_name)
-
-    return tuple(names)
-
-
-def _resolve_url_from_intercom_state_payloads(
-    bridge,
-    control: LoxoneControl,
-    state_names: tuple[str, ...],
-    *,
-    state_value_getter,
-    key_hints: tuple[str, ...],
-    address_value: Any = None,
-) -> str | None:
-    for state_name in state_names:
-        state_value = state_value_getter(state_name)
-        resolved = _resolve_url_from_payload_with_key_hints(
-            bridge,
-            control,
-            state_value,
-            key_hints=key_hints,
-            address_value=address_value,
-        )
-        if resolved is not None:
-            return resolved
-    return None
-
-
-def _resolve_url_from_payload_with_key_hints(
-    bridge,
-    control: LoxoneControl,
-    payload: Any,
-    *,
-    key_hints: tuple[str, ...],
-    address_value: Any = None,
-) -> str | None:
-    if payload is None:
-        return None
-
-    if isinstance(payload, str):
-        raw = payload.strip()
-        if not raw:
-            return None
-        if raw.startswith("{") or raw.startswith("["):
-            try:
-                parsed = json.loads(raw)
-            except ValueError:
-                return resolve_intercom_http_url(
-                    bridge,
-                    control,
-                    raw,
-                    address_value=address_value,
-                )
-            return _resolve_url_from_payload_with_key_hints(
-                bridge,
-                control,
-                parsed,
-                key_hints=key_hints,
-                address_value=address_value,
-            )
-        return resolve_intercom_http_url(
-            bridge,
-            control,
-            raw,
-            address_value=address_value,
-        )
-
-    stack: list[Any] = [payload]
-    seen: set[int] = set()
-    while stack:
-        current = stack.pop()
-        current_id = id(current)
-        if current_id in seen:
-            continue
-        seen.add(current_id)
-
-        if isinstance(current, list):
-            stack.extend(current)
-            continue
-
-        if not isinstance(current, Mapping):
-            continue
-
-        indicator_value = _first_mapping_value(
-            current,
-            ("name", "key", "id", "field", "type", "label"),
-        )
-        candidate_value = _first_mapping_value(
-            current,
-            ("url", "path", "href", "src", "value", "data"),
-        )
-        indicator_text = normalize_state_name(str(indicator_value)) if indicator_value else ""
-        if indicator_text and any(hint in indicator_text for hint in key_hints):
-            resolved = resolve_intercom_http_url(
-                bridge,
-                control,
-                candidate_value,
-                address_value=address_value,
-            )
-            if resolved is not None:
-                return resolved
-
-        for key, value in current.items():
-            normalized_key = normalize_state_name(str(key))
-            key_matches_hints = any(hint in normalized_key for hint in key_hints)
-
-            if isinstance(value, Mapping):
-                if key_matches_hints:
-                    nested_candidate = _first_mapping_value(
-                        value,
-                        ("url", "path", "href", "src", "value", "data"),
-                    )
-                    resolved = resolve_intercom_http_url(
-                        bridge,
-                        control,
-                        nested_candidate,
-                        address_value=address_value,
-                    )
-                    if resolved is not None:
-                        return resolved
-                stack.append(value)
-                continue
-            if isinstance(value, list):
-                stack.append(value)
-                continue
-
-            if key_matches_hints:
-                resolved = resolve_intercom_http_url(
-                    bridge,
-                    control,
-                    value,
-                    address_value=address_value,
-                )
-                if resolved is not None:
-                    return resolved
-
-            if key_matches_hints and isinstance(value, str):
-                stack.append(value)
-                continue
-
-            if isinstance(value, str):
-                stripped = value.strip()
-                if stripped.startswith("{") or stripped.startswith("["):
-                    stack.append(stripped)
-
-    return None
-
 
 def _is_intercom_camera_control(control: LoxoneControl) -> bool:
     normalized_type = normalize_state_name(control.type)
-    if normalized_type in INTERCOM_CAMERA_CONTROL_TYPES_NORMALIZED:
+    if normalized_type in {normalize_state_name(value) for value in INTERCOM_CAMERA_CONTROL_TYPES}:
         return True
 
-    normalized_states = {
-        normalize_state_name(state_name) for state_name in control.states
-    }
-    detail_paths = (
-        *STREAM_DETAIL_PATHS,
-        *SNAPSHOT_DETAIL_PATHS,
-        *LAST_BELL_EVENTS_DETAIL_PATHS,
-    )
-    if is_intercom_control(control):
-        has_video_state = any(
-            normalize_state_name(candidate) in normalized_states
-            for candidate in STREAM_OR_SNAPSHOT_STATE_CANDIDATES
-        )
-        has_video_details = any(
-            _nested_detail_value(control.details, path) is not None for path in detail_paths
-        )
-        if has_video_state or has_video_details:
-            return True
-
-    for candidate in STREAM_OR_SNAPSHOT_STATE_CANDIDATES:
-        if normalize_state_name(candidate) in normalized_states:
-            return True
-
-    return any(_nested_detail_value(control.details, path) is not None for path in detail_paths)
-
-
-def _nested_detail_value(details: Mapping[str, Any], path: str) -> Any:
-    current: Any = details
-    for part in path.split("."):
-        if not isinstance(current, Mapping):
-            return None
-        current = _mapping_get_case_insensitive(current, part)
-    return current
-
-
-def _coerce_text(value: Any) -> str | None:
-    if value is None:
-        return None
-    text = str(value).strip()
-    return text or None
-
-
-def _first_mapping_value(mapping: Mapping[str, Any], keys: tuple[str, ...]) -> Any:
-    for key in keys:
-        value = _mapping_get_case_insensitive(mapping, key)
-        if value is not None:
-            return value
-    return None
-
-
-def _mapping_get_case_insensitive(mapping: Mapping[str, Any], key: str) -> Any:
-    if key in mapping:
-        return mapping[key]
-
-    wanted = normalize_state_name(key)
-    for current_key, value in mapping.items():
-        if isinstance(current_key, str) and normalize_state_name(current_key) == wanted:
-            return value
-    return None
-
-
-def _is_image_payload(response: Any, payload: bytes) -> bool:
-    if not payload:
+    if not is_intercom_control(control):
         return False
-    content_type = _response_content_type(response)
-    if content_type is None:
-        return _looks_like_image_bytes(payload)
-    if content_type == "multipart/x-mixed-replace":
-        return _looks_like_image_bytes(payload)
-    if content_type.startswith("image/"):
-        return not _looks_like_text_error(payload)
-    if content_type in _BINARY_IMAGE_CONTENT_TYPES:
-        return _looks_like_image_bytes(payload)
+
+    if _control_has_media_details(control.details):
+        return True
+
+    secured_details = (
+        control.details.get("securedDetails") if isinstance(control.details, Mapping) else None
+    )
+    if _control_has_media_details(secured_details):
+        return True
+
+    return any(
+        normalize_state_name(state_name)
+        in {
+            "streamurl",
+            "videostream",
+            "videourl",
+            "alertimage",
+            "liveimageurl",
+            "liveimage",
+        }
+        for state_name in control.states
+    )
+
+
+def _control_has_media_details(details: Any) -> bool:
+    if not isinstance(details, Mapping):
+        return False
+    for key in ("videoInfo", "streamUrl", "alertImage", "liveImageUrl", "liveImage"):
+        if key in details:
+            return True
+        normalized_key = normalize_state_name(key)
+        if any(
+            isinstance(current_key, str) and normalize_state_name(current_key) == normalized_key
+            for current_key in details
+        ):
+            return True
     return False
 
 
 def _response_content_type(response: Any) -> str | None:
     headers = getattr(response, "headers", None)
     if isinstance(headers, Mapping):
-        value = _mapping_get_case_insensitive(headers, "content-type")
+        value = headers.get("Content-Type") or headers.get("content-type")
         if isinstance(value, str):
             cleaned = value.split(";", 1)[0].strip().casefold()
             if cleaned:
@@ -893,94 +400,23 @@ def _response_content_type(response: Any) -> str | None:
     return None
 
 
-def _looks_like_image_bytes(payload: bytes) -> bool:
-    if payload.startswith(b"\xff\xd8\xff"):  # JPEG
-        return True
-    if payload.startswith(b"\x89PNG\r\n\x1a\n"):  # PNG
-        return True
-    if payload.startswith((b"GIF87a", b"GIF89a")):  # GIF
-        return True
-    if payload.startswith(b"BM"):  # BMP
-        return True
-    if payload.startswith((b"II*\x00", b"MM\x00*")):  # TIFF
-        return True
-    if len(payload) >= 12 and payload[:4] == b"RIFF" and payload[8:12] == b"WEBP":
-        return True
-    return False
-
-
-def _looks_like_stream_url(url: str) -> bool:
-    raw = url.strip()
-    if not raw:
-        return False
-
-    parsed = urlsplit(raw)
-    path = parsed.path.casefold()
-    query = parsed.query.casefold()
-    combined = f"{path}?{query}" if query else path
-
-    if path.endswith(_STREAM_MEDIA_EXTENSIONS):
-        return True
-
-    has_stream_hint = any(hint in combined for hint in _STREAM_URL_HINTS)
-    if path.endswith(_STILL_IMAGE_EXTENSIONS):
-        return any(hint in combined for hint in _STREAM_HINTS_FOR_IMAGE_PATHS)
-
-    return has_stream_hint
-
-
-def _intercom_auth_credentials(bridge) -> tuple[str | None, str]:
-    configured_username = _coerce_text(getattr(bridge, "intercom_username", None))
-    configured_password = getattr(bridge, "intercom_password", None)
-    default_username = _coerce_text(getattr(bridge, "username", None))
-    default_password = getattr(bridge, "password", None)
-
-    username = configured_username or default_username
-    if username is None:
-        return None, ""
-
-    password_source = configured_password if configured_password is not None else default_password
-    password = "" if password_source is None else str(password_source)
-    return username, password
-
-
-def _looks_like_text_error(payload: bytes) -> bool:
-    sample = payload[:512]
-    try:
-        text = sample.decode("utf-8", errors="ignore").casefold()
-    except Exception:  # pragma: no cover - defensive fallback
-        return False
-    if not text:
-        return False
-    return any(hint in text for hint in _TEXT_ERROR_HINTS)
-
-
-def _payload_preview(payload: bytes) -> str:
-    sample = payload[:120]
-    return sample.decode("utf-8", errors="replace").replace("\n", " ").strip()
-
-
-async def _extract_first_mjpeg_frame(response: Any) -> bytes:
+async def _extract_first_mjpeg_frame(response: Any) -> bytes | None:
     content = getattr(response, "content", None)
     if content is None:
         payload = await response.read()
-        return _extract_jpeg_from_bytes(payload) or b""
+        return _extract_jpeg_from_bytes(payload)
 
     buffer = bytearray()
-    try:
-        async for chunk in content.iter_chunked(_MJPEG_CHUNK_SIZE):
-            if not chunk:
-                continue
-            buffer.extend(chunk)
-            frame = _extract_jpeg_from_bytes(buffer)
-            if frame is not None:
-                return frame
-            if len(buffer) >= _MJPEG_MAX_SCAN_BYTES:
-                break
-    except Exception:  # noqa: BLE001
-        return b""
-
-    return _extract_jpeg_from_bytes(buffer) or b""
+    async for chunk in content.iter_chunked(_MJPEG_CHUNK_SIZE):
+        if not chunk:
+            continue
+        buffer.extend(chunk)
+        frame = _extract_jpeg_from_bytes(buffer)
+        if frame is not None:
+            return frame
+        if len(buffer) >= _MJPEG_MAX_SCAN_BYTES:
+            break
+    return _extract_jpeg_from_bytes(buffer)
 
 
 def _extract_jpeg_from_bytes(payload: bytes | bytearray) -> bytes | None:
@@ -992,3 +428,9 @@ def _extract_jpeg_from_bytes(payload: bytes | bytearray) -> bytes | None:
         return None
     frame = payload[start : end + 2]
     return bytes(frame) if frame else None
+
+
+def _web_response(*, status: int) -> Any:
+    if web is None:  # pragma: no cover - only used in stripped test stubs
+        return status
+    return web.Response(status=status)

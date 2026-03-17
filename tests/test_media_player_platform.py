@@ -215,6 +215,25 @@ class MediaPlayerPlatformTests(unittest.IsolatedAsyncioTestCase):
             },
         )
 
+    def _audio_zone_v2_event_style(self) -> LoxoneControl:
+        return LoxoneControl(
+            uuid="audio-event-uuid",
+            uuid_action="audio-event-action",
+            name="Event Audio",
+            type="AudioZoneV2",
+            states={
+                "mode": "state-mode",
+                "power": "state-power",
+                "plshuffle": "state-shuffle",
+                "plrepeat": "state-repeat",
+                "time": "state-progress",
+                "duration": "state-duration",
+                "sourceName": "state-source",
+                "zoneFavorites": "state-zone-favorites",
+                "coverurl": "state-cover",
+            },
+        )
+
     async def test_setup_adds_audio_zone_controls_only(self) -> None:
         audio = self._audio_zone_v2()
         central = self._central_audio_zone()
@@ -314,6 +333,7 @@ class MediaPlayerPlatformTests(unittest.IsolatedAsyncioTestCase):
 
         await entity.async_media_play()
         await entity.async_media_pause()
+        await entity.async_media_stop()
         await entity.async_media_next_track()
         await entity.async_media_previous_track()
         await entity.async_set_volume_level(0.63)
@@ -330,6 +350,7 @@ class MediaPlayerPlatformTests(unittest.IsolatedAsyncioTestCase):
             [
                 ("audio-action", "play"),
                 ("audio-action", "pause"),
+                ("audio-action", "stop"),
                 ("audio-action", "next"),
                 ("audio-action", "prev"),
                 ("audio-action", "volume/63"),
@@ -342,6 +363,15 @@ class MediaPlayerPlatformTests(unittest.IsolatedAsyncioTestCase):
                 ("audio-action", "progress/37"),
             ],
         )
+
+    async def test_play_media_stop_routes_to_stop_command(self) -> None:
+        control = self._audio_zone_v2()
+        bridge = _FakeBridge([control], {})
+        entity = LoxoneAudioZoneEntity(bridge, control)
+
+        await entity.async_play_media("stop", "")
+
+        self.assertEqual(bridge.commands, [("audio-action", "stop")])
 
     async def test_audio_zone_legacy_uses_volstep_source_shuffle_repeat(self) -> None:
         control = LoxoneControl(
@@ -430,6 +460,39 @@ class MediaPlayerPlatformTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
+    def test_audio_zone_v2_event_style_states_are_supported(self) -> None:
+        control = self._audio_zone_v2_event_style()
+        bridge = _FakeBridge(
+            [control],
+            {
+                "state-mode": "resume",
+                "state-power": "on",
+                "state-shuffle": 1,
+                "state-repeat": 3,
+                "state-progress": 21,
+                "state-duration": 245,
+                "state-source": "Jazz",
+                "state-zone-favorites": {
+                    "zoneFavorites": [
+                        {"slot": 1, "name": "Radio"},
+                        {"slot": 2, "name": "Jazz"},
+                    ]
+                },
+                "state-cover": "https://example.invalid/cover.jpg",
+            },
+        )
+        entity = LoxoneAudioZoneEntity(bridge, control)
+
+        self.assertEqual(entity.state, media_player_module.MediaPlayerState.PLAYING)
+        self.assertTrue(entity.shuffle)
+        self.assertEqual(entity.repeat, "one")
+        self.assertEqual(entity.media_position, 21.0)
+        self.assertEqual(entity.media_duration, 245.0)
+        self.assertEqual(entity.source_list, ["Radio", "Jazz"])
+        self.assertEqual(entity.source, "Jazz")
+        self.assertEqual(entity.media_image_url, "https://example.invalid/cover.jpg")
+        self.assertEqual(entity.extra_state_attributes["play_state"], 2)
+
     async def test_audio_zone_v2_tts_escapes_forward_slash(self) -> None:
         control = self._audio_zone_v2()
         bridge = _FakeBridge([control], {})
@@ -516,6 +579,33 @@ class MediaPlayerPlatformTests(unittest.IsolatedAsyncioTestCase):
                 ("central-audio-action", "selectedcontrols/1,2/alarm"),
             ],
         )
+
+    def test_central_audio_zone_aggregates_state_from_linked_audio_zones(self) -> None:
+        central = self._central_audio_zone()
+        central.states = {}
+        child = self._audio_zone_v2()
+        child.uuid = "child-audio-uuid"
+        child.uuid_action = "child-audio-action"
+        child.name = "Kuchnia Audio"
+        child.parent_uuid_action = central.uuid_action
+
+        bridge = _FakeBridge(
+            [central, child],
+            {
+                "state-play": 2,
+                "state-power": 1,
+            },
+        )
+        entity = LoxoneAudioZoneEntity(bridge, central)
+
+        self.assertEqual(entity.state, media_player_module.MediaPlayerState.PLAYING)
+        self.assertEqual(entity.extra_state_attributes["linked_audio_zone_count"], 1)
+        self.assertEqual(entity.extra_state_attributes["active_audio_zone_count"], 1)
+        self.assertEqual(
+            entity.extra_state_attributes["active_audio_zones"],
+            ["Kuchnia Audio"],
+        )
+        self.assertIn("state-play", set(entity.relevant_state_uuids()))
 
     def test_audio_zone_uses_media_server_states_and_matches_by_host(self) -> None:
         control = self._audio_zone_v2()

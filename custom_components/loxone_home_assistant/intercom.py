@@ -89,25 +89,6 @@ _INTERCOM_COMMAND_ALIAS_DEFAULT_ARGUMENTS: dict[str, tuple[str, ...]] = {
 }
 INTERCOM_DEFAULT_TTS_MESSAGE = ""
 INTERCOM_DEFAULT_TTS_VOLUME = 60
-INTERCOM_SYNTHETIC_STREAM_PATHS = (
-    "/mjpg/video.mjpg",
-    "/mjpg/stream.mjpg",
-)
-INTERCOM_SYNTHETIC_SNAPSHOT_PATHS = (
-    "/jpg/image.jpg?size=3",
-    "/jpg/image.jpg?size=2",
-    "/jpg/image.jpg?size=1",
-    "/jpg/image.jpg",
-)
-INTERCOM_SYNTHETIC_HISTORY_PATHS = (
-    "/rest/events.json",
-    "/events.json",
-    "/history.json",
-    "/history/events.json",
-    "/api/events",
-    "/api/history",
-)
-
 
 def is_intercom_control(control: LoxoneControl) -> bool:
     """Return True when a control looks like an intercom/door station."""
@@ -264,6 +245,14 @@ def intercom_history_state_name(control: LoxoneControl) -> str | None:
     return _first_state_with_fallback(control, INTERCOM_HISTORY_STATE_CANDIDATES, _HISTORY_HINTS)
 
 
+def intercom_last_bell_events_state_name(control: LoxoneControl) -> str | None:
+    return first_matching_state_name(control, ("lastBellEvents",))
+
+
+def intercom_last_bell_timestamp_state_name(control: LoxoneControl) -> str | None:
+    return first_matching_state_name(control, ("lastBellTimestamp",))
+
+
 def intercom_address_state_name(control: LoxoneControl) -> str | None:
     return _first_state_with_fallback(control, _ADDRESS_STATE_CANDIDATES, _ADDRESS_HINTS)
 
@@ -275,7 +264,7 @@ def resolve_intercom_http_url(
     *,
     address_value: Any = None,
 ) -> str | None:
-    """Resolve intercom URL/path, preferring a dedicated intercom host when known."""
+    """Resolve an Intercom media URL using the explicit device address."""
     text = _coerce_text(value)
     if text is None:
         return None
@@ -286,6 +275,9 @@ def resolve_intercom_http_url(
     if not _looks_like_urlish_relative(text):
         return None
 
+    if text.startswith("/camimage/") or text.startswith("camimage/"):
+        return bridge.resolve_http_url(text)
+
     intercom_base_url = _intercom_base_url(
         bridge,
         control,
@@ -295,48 +287,6 @@ def resolve_intercom_http_url(
         return _build_absolute_url(intercom_base_url, text)
 
     return bridge.resolve_http_url(text)
-
-
-def intercom_synthetic_stream_urls(
-    bridge,
-    control: LoxoneControl,
-    *,
-    address_value: Any = None,
-) -> tuple[str, ...]:
-    return _intercom_synthetic_urls(
-        bridge,
-        control,
-        INTERCOM_SYNTHETIC_STREAM_PATHS,
-        address_value=address_value,
-    )
-
-
-def intercom_synthetic_snapshot_urls(
-    bridge,
-    control: LoxoneControl,
-    *,
-    address_value: Any = None,
-) -> tuple[str, ...]:
-    return _intercom_synthetic_urls(
-        bridge,
-        control,
-        INTERCOM_SYNTHETIC_SNAPSHOT_PATHS,
-        address_value=address_value,
-    )
-
-
-def intercom_synthetic_history_urls(
-    bridge,
-    control: LoxoneControl,
-    *,
-    address_value: Any = None,
-) -> tuple[str, ...]:
-    return _intercom_synthetic_urls(
-        bridge,
-        control,
-        INTERCOM_SYNTHETIC_HISTORY_PATHS,
-        address_value=address_value,
-    )
 
 
 def intercom_boolean_state_roles(control: LoxoneControl) -> dict[str, str]:
@@ -414,83 +364,7 @@ def _intercom_base_url(bridge, control: LoxoneControl, *, address_value: Any = N
     if from_address_state is not None:
         return from_address_state
 
-    serial = _coerce_text(_mapping_get_case_insensitive(control.details, "serialNr"))
-    if serial is None:
-        return None
-
-    ip_from_arp = _lookup_arp_ipv4_for_serial(serial)
-    if ip_from_arp is None:
-        return None
-    return f"{default_scheme}://{ip_from_arp}"
-
-
-def _intercom_synthetic_urls(
-    bridge,
-    control: LoxoneControl,
-    relative_paths: tuple[str, ...],
-    *,
-    address_value: Any = None,
-) -> tuple[str, ...]:
-    urls: list[str] = []
-    for base_url in _intercom_base_url_candidates(
-        bridge,
-        control,
-        address_value=address_value,
-    ):
-        for path in relative_paths:
-            absolute_url = _build_absolute_url(base_url, path)
-            if absolute_url not in urls:
-                urls.append(absolute_url)
-    return tuple(urls)
-
-
-def _intercom_base_url_candidates(
-    bridge,
-    control: LoxoneControl,
-    *,
-    address_value: Any = None,
-) -> tuple[str, ...]:
-    urls: list[str] = []
-
-    state_name = intercom_address_state_name(control)
-    runtime_address_value = address_value
-    if runtime_address_value is None and state_name is not None:
-        runtime_address_value = bridge.control_state(control, state_name)
-
-    for scheme in ("http", "https"):
-        candidate = _base_url_from_value(runtime_address_value, default_scheme=scheme)
-        if candidate is not None and candidate not in urls:
-            urls.append(candidate)
-
-    serial = _coerce_text(_mapping_get_case_insensitive(control.details, "serialNr"))
-    if serial is None:
-        return tuple(urls)
-
-    ip_from_arp = _lookup_arp_ipv4_for_serial(serial)
-    if ip_from_arp is not None:
-        for scheme in ("http", "https"):
-            candidate = f"{scheme}://{ip_from_arp}"
-            if candidate not in urls:
-                urls.append(candidate)
-
-    for hostname in _serial_hostname_candidates(serial):
-        for scheme in ("http", "https"):
-            candidate = f"{scheme}://{hostname}"
-            if candidate not in urls:
-                urls.append(candidate)
-
-    return tuple(urls)
-
-
-def _serial_hostname_candidates(serial: str) -> tuple[str, ...]:
-    normalized_serial = _normalize_hex_mac(serial)
-    if normalized_serial is None:
-        return ()
-    suffix = normalized_serial[-6:]
-    return (
-        f"ic{suffix}",
-        f"ic{suffix}.lan",
-    )
+    return None
 
 
 def _base_url_from_value(value: Any, *, default_scheme: str) -> str | None:
@@ -581,37 +455,6 @@ def _is_likely_host(value: str) -> bool:
     if "." in candidate:
         return True
     return False
-
-
-def _lookup_arp_ipv4_for_serial(serial: str) -> str | None:
-    wanted_mac = _normalize_hex_mac(serial)
-    if wanted_mac is None:
-        return None
-
-    try:
-        with open("/proc/net/arp", encoding="utf-8") as arp_file:
-            next(arp_file, None)
-            for line in arp_file:
-                parts = line.split()
-                if len(parts) < 4:
-                    continue
-                ip_address = parts[0]
-                mac_address = parts[3]
-                if _normalize_hex_mac(mac_address) == wanted_mac:
-                    return ip_address
-    except OSError:
-        return None
-
-    return None
-
-
-def _normalize_hex_mac(value: str) -> str | None:
-    compact = "".join(character for character in value if character.isalnum())
-    if len(compact) != 12:
-        return None
-    if any(character not in _MAC_HEX_CHARS for character in compact):
-        return None
-    return compact.casefold()
 
 
 def _is_absolute_http_url(value: str) -> bool:
