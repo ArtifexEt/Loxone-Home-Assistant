@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Mapping
+from enum import IntFlag
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -53,6 +54,17 @@ except ImportError:  # pragma: no cover - fallback for lightweight test stubs
     web = _FallbackWeb()  # type: ignore[assignment]
 
 from homeassistant.components.camera import Camera
+
+try:
+    from homeassistant.components.camera import CameraEntityFeature
+except ImportError:  # pragma: no cover - fallback for lightweight test stubs
+    class CameraEntityFeature(IntFlag):  # type: ignore[no-redef]
+        STREAM = 1 << 0
+
+try:
+    CAMERA_FEATURE_NONE = CameraEntityFeature(0)
+except TypeError:  # pragma: no cover - defensive for minimal stubs
+    CAMERA_FEATURE_NONE = 0
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -111,7 +123,7 @@ class LoxoneIntercomCameraEntity(LoxoneEntity, Camera):
     """Expose the Loxone Intercom as a native MJPEG camera."""
 
     _attr_icon = "mdi:video-wireless"
-    _attr_supported_features = 0
+    _attr_supported_features = CAMERA_FEATURE_NONE
 
     def __init__(self, bridge, control: LoxoneControl) -> None:
         Camera.__init__(self)

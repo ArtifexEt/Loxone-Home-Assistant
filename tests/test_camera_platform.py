@@ -5,6 +5,7 @@ from __future__ import annotations
 import sys
 import types
 import unittest
+from enum import IntFlag
 
 from tests._loader import load_integration_module
 
@@ -45,7 +46,11 @@ def _install_homeassistant_stubs() -> None:
         async def async_refresh_providers(self, write_state: bool = False) -> None:
             del write_state
 
+    class CameraEntityFeature(IntFlag):
+        STREAM = 1 << 0
+
     camera.Camera = Camera
+    camera.CameraEntityFeature = CameraEntityFeature
     camera.SUPPORT_STREAM = 2
 
     const = types.ModuleType("homeassistant.const")
@@ -259,7 +264,11 @@ class CameraPlatformTests(unittest.IsolatedAsyncioTestCase):
         bridge = _FakeBridge([control], {}, _FakeSession())
         entity = LoxoneIntercomCameraEntity(bridge, control)
 
-        self.assertEqual(entity._attr_supported_features, 0)
+        self.assertEqual(entity._attr_supported_features, camera_module.CameraEntityFeature(0))
+        self.assertNotIn(
+            camera_module.CameraEntityFeature.STREAM,
+            entity._attr_supported_features,
+        )
         self.assertIsNone(await entity.stream_source())
 
     async def test_setup_adds_only_intercom_cameras(self) -> None:
