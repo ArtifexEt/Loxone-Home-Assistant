@@ -70,7 +70,7 @@ from .intercom import (
     resolve_intercom_http_url,
 )
 from .intercom_media import (
-    intercom_history_entries,
+    async_intercom_history_entries,
     intercom_last_bell_events,
     intercom_last_bell_timestamp,
 )
@@ -1819,14 +1819,18 @@ class LoxoneIntercomHistorySensor(LoxoneEntity, SensorEntity):
             self.control,
             state_value_getter=self.state_value,
         )
-        history_entries = intercom_history_entries(
+        history_entries = await async_intercom_history_entries(
             self.bridge,
             self.control,
             last_bell_events=history_tokens,
             state_value_getter=self.state_value,
         )
 
-        self._history_timestamps = [entry.raw_timestamp for entry in history_entries]
+        self._history_timestamps = [
+            entry.raw_timestamp
+            for entry in history_entries
+            if not entry.raw_timestamp.startswith("url:")
+        ]
         self._event_count = len(history_entries)
         self._recent_image_urls = [entry.image_url for entry in history_entries[:10]]
 
@@ -1973,7 +1977,10 @@ class LoxoneWebpageSensor(LoxoneEntity, SensorEntity):
 
 
 def _has_intercom_history_detail(control: LoxoneControl) -> bool:
-    if first_matching_state_name(control, ("lastBellEvents", "lastBellTimestamp")) is not None:
+    if first_matching_state_name(
+        control,
+        ("lastBellEvents", "lastBellTimestamp", "eventHistoryUrl"),
+    ) is not None:
         return True
     if first_matching_state_name(
         control,
@@ -1982,7 +1989,13 @@ def _has_intercom_history_detail(control: LoxoneControl) -> bool:
         return True
     return any(
         _nested_detail_value(control.details, path) is not None
-        for path in ("lastBellEvents", "videoInfo.lastBellEvents")
+        for path in (
+            "lastBellEvents",
+            "eventHistoryUrl",
+            "videoInfo.lastBellEvents",
+            "videoInfo.eventHistoryUrl",
+            "securedDetails.videoInfo.eventHistoryUrl",
+        )
     )
 
 

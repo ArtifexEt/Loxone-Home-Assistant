@@ -174,7 +174,7 @@ If your Intercom camera stream returns `401 Unauthorized`, open integration `Opt
 
 After successful connection and validation, the final step asks for startup options:
 
-- mood selection entities for `LightControllerV2` as a separate `select` helper
+- mood selection entities for `LightControllerV2` as a separate `select` helper (enabled by default)
 - individual child light entities inside one `LightController` (enabled by default)
 - optional automatic creation of suggested automations
 - optional Loxone icon pictures for entities (disabled by default)
@@ -312,8 +312,9 @@ cards:
 
 Live Intercom video is exposed as a native camera MJPEG stream. History images are built
 from `lastBellEvents` and fetched from Miniserver `camimage/{uuidAction}/{timestamp}`.
-The optional `select.<name>_history_photo` entity is disabled by default and can be enabled
-manually if you want to switch the camera preview between `Live` and historical snapshots.
+The `select.<name>_history_photo` entity is enabled by default so you can switch the camera
+preview between `Live` and historical snapshots. When the Intercom also exposes an
+`eventHistoryUrl` payload, the selector includes the full history returned by that endpoint.
 
 ## Audio TTS UI in Home Assistant
 

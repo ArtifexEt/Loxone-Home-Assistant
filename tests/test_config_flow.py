@@ -317,7 +317,7 @@ class ConfigFlowFormTests(unittest.TestCase):
         result = flow._async_show_setup_form()
         defaults = _schema_defaults(result["data_schema"])
 
-        self.assertEqual(defaults["enable_light_mood_select"], False)
+        self.assertEqual(defaults["enable_light_mood_select"], True)
         self.assertEqual(defaults["expose_controller_child_lights"], True)
         self.assertEqual(defaults["use_loxone_icons"], False)
 

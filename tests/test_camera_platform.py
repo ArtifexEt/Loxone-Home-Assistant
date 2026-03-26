@@ -433,6 +433,50 @@ class CameraPlatformTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(await entity.async_camera_image(), frame)
 
+    async def test_camera_falls_back_to_stream_when_snapshot_endpoint_fails(self) -> None:
+        control = LoxoneControl(
+            uuid="intercom-uuid",
+            uuid_action="intercom-action",
+            name="Furtka",
+            type="Intercom",
+            states={},
+            details={
+                "videoInfo": {
+                    "streamUrl": "/dev/stream.mjpg",
+                    "liveImageUrl": "/dev/live.jpg",
+                }
+            },
+        )
+        expected_snapshot_url = "https://mini.local/dev/live.jpg"
+        expected_stream_url = "https://mini.local/dev/stream.mjpg"
+        frame = b"\xff\xd8\xff\xe0JPEG-FRAME\xff\xd9"
+        mjpeg_payload = (
+            b"--frameboundary\r\n"
+            b"Content-Type: image/jpeg\r\n\r\n"
+            + frame
+            + b"\r\n--frameboundary--\r\n"
+        )
+        session = _FakeSession(
+            {
+                (expected_snapshot_url, True): (404, b"", "image/jpeg"),
+                (
+                    expected_stream_url,
+                    True,
+                ): (200, mjpeg_payload, "multipart/x-mixed-replace; boundary=frameboundary"),
+            }
+        )
+        bridge = _FakeBridge([control], {}, session)
+        entity = LoxoneIntercomCameraEntity(bridge, control)
+
+        self.assertEqual(await entity.async_camera_image(), frame)
+        self.assertEqual(
+            session.calls,
+            [
+                (expected_snapshot_url, True),
+                (expected_stream_url, True),
+            ],
+        )
+
     async def test_camera_uses_selected_history_timestamp_for_preview(self) -> None:
         control = LoxoneControl(
             uuid="intercom-uuid",

@@ -159,6 +159,33 @@ LoxoneRadioOutputSelectEntity = select_module.LoxoneRadioOutputSelectEntity
 LoxoneIntercomHistorySelectEntity = select_module.LoxoneIntercomHistorySelectEntity
 
 
+class _FakeHistoryResponse:
+    def __init__(self, payload) -> None:
+        self._payload = payload
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, _exc_type, _exc, _tb):
+        return False
+
+    def raise_for_status(self) -> None:
+        return None
+
+    async def json(self, content_type=None):
+        del content_type
+        return self._payload
+
+
+class _FakeHistorySession:
+    def __init__(self, payload_by_url: dict[str, object]) -> None:
+        self._payload_by_url = payload_by_url
+
+    def get(self, url: str, auth=None):
+        del auth
+        return _FakeHistoryResponse(self._payload_by_url[url])
+
+
 class _FakeBridge:
     serial = "1234567890"
     available = True
@@ -169,12 +196,12 @@ class _FakeBridge:
     use_tls = True
     _ws_path_prefix = ""
 
-    def __init__(self, controls, values):
+    def __init__(self, controls, values, session=None):
         self.controls = controls
         self._controls_by_action = {control.uuid_action: control for control in controls}
         self._values = values
         self.commands: list[tuple[str, str]] = []
-        self._session = None
+        self._session = session
 
     def add_listener(self, _callback_fn, _watched_uuids):
         return lambda: None
@@ -299,7 +326,7 @@ class MoodSelectTests(unittest.IsolatedAsyncioTestCase):
         )
         entity = LoxoneIntercomHistorySelectEntity(bridge, intercom)
 
-        self.assertFalse(entity._attr_entity_registry_enabled_default)  # noqa: SLF001
+        self.assertTrue(entity._attr_entity_registry_enabled_default)  # noqa: SLF001
 
         await entity.async_update()
 
@@ -317,6 +344,48 @@ class MoodSelectTests(unittest.IsolatedAsyncioTestCase):
         await entity.async_select_option("Live")
         self.assertEqual(entity.current_option, "Live")
         self.assertNotIn("intercom-action", bridge._intercom_selected_history_timestamps)  # noqa: SLF001
+
+    async def test_intercom_history_select_loads_full_history_from_event_history_url(self) -> None:
+        intercom = LoxoneControl(
+            uuid="intercom-uuid",
+            uuid_action="intercom-action",
+            name="Dzwonek",
+            type="IntercomV2",
+            states={},
+            details={"videoInfo": {"eventHistoryUrl": "/history/intercom.json"}},
+        )
+        history_url = "https://mini.local/history/intercom.json"
+        session = _FakeHistorySession(
+            {
+                history_url: {
+                    "events": [
+                        {
+                            "timestamp": "20260313120000",
+                            "imageUrl": "/camimage/intercom-action/20260313120000",
+                        },
+                        {
+                            "timestamp": "20260314153000",
+                            "imageUrl": "/camimage/intercom-action/20260314153000",
+                        },
+                    ]
+                }
+            }
+        )
+        bridge = _FakeBridge([intercom], {}, session=session)
+        entity = LoxoneIntercomHistorySelectEntity(bridge, intercom)
+
+        await entity.async_update()
+
+        self.assertEqual(entity._attr_options[0], "Live")
+        self.assertEqual(len(entity._attr_options), 3)
+
+        latest_photo_option = entity._attr_options[1]
+        await entity.async_select_option(latest_photo_option)
+
+        self.assertEqual(
+            bridge._intercom_selected_history_timestamps["intercom-action"],  # noqa: SLF001
+            "20260314153000",
+        )
 
 
 if __name__ == "__main__":

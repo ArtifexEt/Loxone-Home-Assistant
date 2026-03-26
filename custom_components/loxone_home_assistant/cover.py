@@ -30,7 +30,6 @@ CURTAIN_HINTS = {
     "firanki",
     "zaslona",
     "zaslony",
-    "zacienienie",
 }
 BLIND_HINTS = {
     "blind",
@@ -49,7 +48,6 @@ CURTAIN_HINT_SUBSTRINGS = {
     "drape",
     "firan",
     "zaslon",
-    "zacien",
 }
 BLIND_HINT_SUBSTRINGS = {
     "blind",
@@ -230,21 +228,27 @@ def _has_jalousie_tilt_states(control) -> bool:
 
 
 def _detect_jalousie_device_class(control):
-    # Loxone icon naming usually distinguishes textile curtains from blinds.
+    primary_text_based = _device_class_from_candidates(_primary_cover_candidates(control))
+    if primary_text_based is not None:
+        return primary_text_based
+
+    # Loxone icon naming often distinguishes textile curtains from blinds,
+    # but explicit control naming should win when available.
     icon_based = _device_class_from_text(control.icon)
     if icon_based is not None:
         return icon_based
 
-    if _has_cover_hint(control, CURTAIN_HINTS, CURTAIN_HINT_SUBSTRINGS):
-        return _cover_device_class("CURTAIN")
-
-    if _has_cover_hint(control, BLIND_HINTS, BLIND_HINT_SUBSTRINGS):
-        return _cover_device_class("BLIND")
+    contextual_text_based = _device_class_from_candidates(_context_cover_candidates(control))
+    if contextual_text_based is not None:
+        return contextual_text_based
 
     if _has_jalousie_tilt_states(control):
         return _cover_device_class("BLIND")
 
-    # For generic shading controls we default to curtain-like semantics.
+    if _supports_jalousie_tilt(control):
+        return _cover_device_class("BLIND")
+
+    # For generic shading controls without lamellas we default to curtain-like semantics.
     return _cover_device_class("CURTAIN")
 
 
@@ -279,21 +283,43 @@ def _device_class_from_text(value: str | None):
     return None
 
 
-def _has_cover_hint(control, hints: set[str], substrings: set[str]) -> bool:
-    candidates = (
+def _device_class_from_candidates(candidates: tuple[str | None, ...]):
+    normalized_candidates = {
+        normalized
+        for value in candidates
+        if (normalized := _normalize_cover_label(value))
+    }
+    if not normalized_candidates:
+        return None
+
+    curtain_match = any(
+        _matches_hint(value, value.replace(" ", ""), CURTAIN_HINTS, CURTAIN_HINT_SUBSTRINGS)
+        for value in normalized_candidates
+    )
+    blind_match = any(
+        _matches_hint(value, value.replace(" ", ""), BLIND_HINTS, BLIND_HINT_SUBSTRINGS)
+        for value in normalized_candidates
+    )
+    if curtain_match and not blind_match:
+        return _cover_device_class("CURTAIN")
+    if blind_match and not curtain_match:
+        return _cover_device_class("BLIND")
+    return None
+
+
+def _primary_cover_candidates(control) -> tuple[str | None, ...]:
+    return (
         control.name,
         control.display_name,
+        *control.path,
+    )
+
+
+def _context_cover_candidates(control) -> tuple[str | None, ...]:
+    return (
         control.room_name,
         control.category_name,
     )
-    for value in candidates:
-        normalized = _normalize_cover_label(value)
-        if not normalized:
-            continue
-        compact = normalized.replace(" ", "")
-        if _matches_hint(normalized, compact, hints, substrings):
-            return True
-    return False
 
 
 def _matches_hint(

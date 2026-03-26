@@ -23,7 +23,7 @@ from .const import (
 from .entity import LoxoneEntity, control_entity_unique_id
 from .intercom import intercom_history_state_name, is_intercom_control
 from .intercom_media import (
-    intercom_history_entries,
+    async_intercom_history_entries,
     set_intercom_selected_history_timestamp,
 )
 from .light import CONTROLLER_TYPES
@@ -36,7 +36,6 @@ OFF_MOOD_IDS = {0, 778}
 NON_DIGIT_RE = re.compile(r"[^0-9,.-]+")
 INTERCOM_HISTORY_SELECT_SUFFIX = "history_photo"
 INTERCOM_HISTORY_SELECT_LIVE_OPTION = "Live"
-INTERCOM_HISTORY_SELECT_MAX_OPTIONS = 15
 
 
 async def async_setup_entry(
@@ -176,7 +175,7 @@ class LoxoneIntercomHistorySelectEntity(LoxoneEntity, SelectEntity):
     """Select old Intercom snapshots and expose them for camera preview."""
 
     _attr_icon = "mdi:image-multiple"
-    _attr_entity_registry_enabled_default = False
+    _attr_entity_registry_enabled_default = True
 
     def __init__(self, bridge, control: LoxoneControl) -> None:
         super().__init__(bridge, control, "History Photo")
@@ -218,7 +217,7 @@ class LoxoneIntercomHistorySelectEntity(LoxoneEntity, SelectEntity):
             schedule_update(True)
 
     async def async_update(self) -> None:
-        history_entries = intercom_history_entries(
+        history_entries = await async_intercom_history_entries(
             self.bridge,
             self.control,
             state_value_getter=self.state_value,
@@ -329,8 +328,6 @@ def _build_intercom_history_options(
     seen_labels: set[str] = set(options)
 
     for index, event in enumerate(history_entries, start=1):
-        if len(options) > INTERCOM_HISTORY_SELECT_MAX_OPTIONS:
-            break
         label = _intercom_event_option_label(event, index)
         while label in seen_labels:
             label = f"{label} ({index})"

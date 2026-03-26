@@ -131,6 +131,8 @@ class LoxoneIntercomCameraEntity(LoxoneEntity, Camera):
         self._secured_details: dict[str, Any] | None = None
         self._secured_details_loaded = False
         self._secured_details_lock = asyncio.Lock()
+        self._last_image: bytes | None = None
+        self._attr_entity_picture = None
 
     async def stream_source(self) -> str | None:
         """Disable Home Assistant stream/WebRTC for the Intercom."""
@@ -171,40 +173,13 @@ class LoxoneIntercomCameraEntity(LoxoneEntity, Camera):
         del width, height
 
         await self._ensure_secured_details_loaded()
-        image_url = self._current_image_url()
-        if image_url is None:
-            return None
-
-        session = getattr(self.bridge, "_session", None)
-        if session is None:
-            return None
-
-        request_auth = self._request_auth_for_url(image_url)
-        try:
-            async with session.get(image_url, auth=request_auth) as response:
-                response.raise_for_status()
-                content_type = _response_content_type(response)
-                if content_type == "multipart/x-mixed-replace":
-                    return await _extract_first_mjpeg_frame(response)
-                payload = await response.read()
-                return payload or None
-        except asyncio.CancelledError:
-            raise
-        except ClientError as err:
-            _LOGGER.debug(
-                "Intercom image fetch failed for %s from %s (%s)",
-                self.control.uuid_action,
-                image_url,
-                err,
-            )
-        except Exception as err:  # noqa: BLE001
-            _LOGGER.debug(
-                "Intercom image fetch errored for %s from %s (%s)",
-                self.control.uuid_action,
-                image_url,
-                err,
-            )
-        return None
+        for image_url in self._image_url_candidates():
+            image = await self._async_fetch_image(image_url)
+            if image is None:
+                continue
+            self._last_image = image
+            return image
+        return self._last_image
 
     async def handle_async_mjpeg_stream(self, request) -> Any:
         """Proxy the raw MJPEG stream directly from the Intercom."""
@@ -311,6 +286,55 @@ class LoxoneIntercomCameraEntity(LoxoneEntity, Camera):
         if snapshot_url is not None:
             return snapshot_url
         return self._stream_url()
+
+    def _image_url_candidates(self) -> tuple[str, ...]:
+        selected_timestamp = self._selected_history_timestamp()
+        if selected_timestamp is not None:
+            selected_url = intercom_history_image_url(
+                self.bridge,
+                self.control,
+                selected_timestamp,
+            )
+            return (selected_url,) if selected_url is not None else ()
+
+        candidates: list[str] = []
+        for image_url in (self._snapshot_url(), self._stream_url()):
+            if image_url is None or image_url in candidates:
+                continue
+            candidates.append(image_url)
+        return tuple(candidates)
+
+    async def _async_fetch_image(self, image_url: str) -> bytes | None:
+        session = getattr(self.bridge, "_session", None)
+        if session is None:
+            return None
+
+        request_auth = self._request_auth_for_url(image_url)
+        try:
+            async with session.get(image_url, auth=request_auth) as response:
+                response.raise_for_status()
+                content_type = _response_content_type(response)
+                if content_type == "multipart/x-mixed-replace":
+                    return await _extract_first_mjpeg_frame(response)
+                payload = await response.read()
+                return payload or None
+        except asyncio.CancelledError:
+            raise
+        except ClientError as err:
+            _LOGGER.debug(
+                "Intercom image fetch failed for %s from %s (%s)",
+                self.control.uuid_action,
+                image_url,
+                err,
+            )
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug(
+                "Intercom image fetch errored for %s from %s (%s)",
+                self.control.uuid_action,
+                image_url,
+                err,
+            )
+        return None
 
     def _request_auth_for_url(self, url: str) -> BasicAuth | None:
         if self._is_miniserver_url(url):
