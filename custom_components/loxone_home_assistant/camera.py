@@ -349,6 +349,8 @@ class LoxoneIntercomCameraEntity(LoxoneEntity, Camera):
         parsed = urlsplit(url)
         if not parsed.hostname:
             return False
+        if "/proxy/" in parsed.path:
+            return True
 
         if parsed.hostname != str(getattr(self.bridge, "host", "")):
             return False

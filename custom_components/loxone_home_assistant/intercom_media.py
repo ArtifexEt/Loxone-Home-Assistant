@@ -7,7 +7,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
-from urllib.parse import quote, urlsplit
+from urllib.parse import quote, urljoin, urlsplit, urlunsplit
 
 try:
     from aiohttp import BasicAuth, ClientError
@@ -91,12 +91,14 @@ INTERCOM_EVENT_COLLECTION_PATHS = (
 INTERCOM_EVENT_IMAGE_KEY_CANDIDATES = (
     "imageUrl",
     "imagePath",
+    "path",
     "image",
     "alertImage",
     "snapshot",
     "photo",
     "thumb",
     "thumbPath",
+    "thumbnailPath",
     "thumbnail",
     "thumbnailUrl",
     "snapshotUrl",
@@ -307,6 +309,7 @@ async def async_intercom_history_entries(
         bridge,
         control,
         address_value=address_value,
+        media_base_url=history_payload_url,
     ):
         key = _history_entry_key(event_entry)
         existing = merged.get(key)
@@ -595,6 +598,7 @@ def _history_entries_from_payload(
     control: LoxoneControl,
     *,
     address_value: Any = None,
+    media_base_url: str | None = None,
 ) -> tuple[IntercomHistoryEntry, ...]:
     entries: list[IntercomHistoryEntry] = []
     for event in _extract_intercom_events(
@@ -602,6 +606,7 @@ def _history_entries_from_payload(
         bridge,
         control,
         address_value=address_value,
+        media_base_url=media_base_url,
     ):
         image_url = event["image_url"]
         if image_url is None:
@@ -661,6 +666,8 @@ def _is_miniserver_url(bridge, url: str) -> bool:
     parsed = urlsplit(url)
     if not parsed.hostname:
         return False
+    if "/proxy/" in parsed.path:
+        return True
     if parsed.hostname != str(getattr(bridge, "host", "")):
         return False
 
@@ -797,17 +804,19 @@ def _extract_intercom_events(
     control: LoxoneControl,
     *,
     address_value: Any = None,
+    media_base_url: str | None = None,
 ) -> list[dict[str, Any]]:
     events = _find_event_mappings(payload)
     normalized: list[dict[str, Any]] = []
     for event in events:
         timestamp = _event_timestamp(event)
         image_value = _first_mapping_value(event, INTERCOM_EVENT_IMAGE_KEY_CANDIDATES)
-        image_url = resolve_intercom_http_url(
+        image_url = _resolve_intercom_event_image_url(
             bridge,
             control,
             image_value,
             address_value=address_value,
+            media_base_url=media_base_url,
         )
         if timestamp is None and image_url is None:
             continue
@@ -829,6 +838,67 @@ def _extract_intercom_events(
         reverse=True,
     )
     return normalized
+
+
+def _resolve_intercom_event_image_url(
+    bridge,
+    control: LoxoneControl,
+    value: Any,
+    *,
+    address_value: Any = None,
+    media_base_url: str | None = None,
+) -> str | None:
+    text = _coerce_text(value)
+    if text is None:
+        return None
+
+    if media_base_url is not None:
+        resolved_from_base = _resolve_media_path_from_base(media_base_url, text)
+        if resolved_from_base is not None:
+            return resolve_intercom_http_url(
+                bridge,
+                control,
+                resolved_from_base,
+                address_value=address_value,
+            )
+
+    return resolve_intercom_http_url(
+        bridge,
+        control,
+        text,
+        address_value=address_value,
+    )
+
+
+def _resolve_media_path_from_base(media_base_url: str, raw_path: str) -> str | None:
+    split = urlsplit(media_base_url)
+    if not split.scheme or not split.netloc:
+        return None
+
+    if raw_path.startswith(("http://", "https://", "//")):
+        return raw_path
+
+    proxy_prefix = _proxy_path_prefix(split.path)
+    if raw_path.startswith("/"):
+        if proxy_prefix is not None and not raw_path.startswith(f"{proxy_prefix}/"):
+            return urlunsplit((split.scheme, split.netloc, f"{proxy_prefix}{raw_path}", "", ""))
+        return urlunsplit((split.scheme, split.netloc, raw_path, "", ""))
+
+    if raw_path.startswith(("jpg/", "images/", "mjpg/", "image/", "video/")):
+        root_path = f"/{raw_path}"
+        if proxy_prefix is not None:
+            root_path = f"{proxy_prefix}{root_path}"
+        return urlunsplit((split.scheme, split.netloc, root_path, "", ""))
+
+    return urljoin(media_base_url, raw_path)
+
+
+def _proxy_path_prefix(path: str) -> str | None:
+    segments = [segment for segment in path.split("/") if segment]
+    for index, segment in enumerate(segments):
+        if segment == "proxy" and index + 1 < len(segments):
+            return "/" + "/".join(segments[: index + 2])
+    return None
 
 
 def _find_event_mappings(raw: Any) -> list[Mapping[str, Any]]:

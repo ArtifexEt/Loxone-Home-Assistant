@@ -430,6 +430,107 @@ class IntercomSensorTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
+    async def test_history_sensor_accepts_path_payload_key(self) -> None:
+        control = LoxoneControl(
+            uuid="intercom-uuid",
+            uuid_action="intercom-action",
+            name="Gate",
+            type="IntercomV2",
+            states={},
+            details={
+                "videoInfo": {
+                    "eventHistoryUrl": "/history/intercom.json",
+                    "host": "192.168.0.50",
+                }
+            },
+        )
+        bridge = _FakeBridge(
+            [control],
+            {},
+            session=_FakeSession(
+                {
+                    "https://192.168.0.50/history/intercom.json": {
+                        "events": [
+                            {
+                                "timestamp": "20260312083000",
+                                "path": "jpg/history/20260312083000.jpg",
+                            }
+                        ]
+                    }
+                }
+            ),
+        )
+        entry = _FakeConfigEntry("entry-1")
+        hass = _FakeHass(entry.entry_id, bridge, const.DOMAIN)
+        entities: list = []
+
+        await sensor_module.async_setup_entry(
+            hass,
+            entry,
+            lambda new_entities: entities.extend(new_entities),
+        )
+
+        self.assertEqual(len(entities), 1)
+        history_entity = entities[0]
+        await history_entity.async_update()
+
+        attrs = history_entity.extra_state_attributes
+        self.assertEqual(attrs["event_count"], 1)
+        self.assertEqual(
+            attrs["latest_event_image_url"],
+            "https://192.168.0.50/jpg/history/20260312083000.jpg",
+        )
+        self.assertEqual(attrs["history_timestamps"], ["20260312083000"])
+
+    async def test_history_sensor_keeps_proxy_prefix_for_root_relative_images(self) -> None:
+        control = LoxoneControl(
+            uuid="intercom-uuid",
+            uuid_action="intercom-action",
+            name="Gate",
+            type="IntercomV2",
+            states={},
+            details={
+                "videoInfo": {
+                    "eventHistoryUrl": "/proxy/device-uuid/history/intercom.json",
+                    "host": "mini.local",
+                }
+            },
+        )
+        bridge = _FakeBridge(
+            [control],
+            {},
+            session=_FakeSession(
+                {
+                    "https://mini.local/proxy/device-uuid/history/intercom.json": {
+                        "events": [
+                            {
+                                "timestamp": "20260314123045",
+                                "thumbPath": "/images/history/20260314123045_thumb.jpg",
+                            }
+                        ]
+                    }
+                }
+            ),
+        )
+        entry = _FakeConfigEntry("entry-1")
+        hass = _FakeHass(entry.entry_id, bridge, const.DOMAIN)
+        entities: list = []
+
+        await sensor_module.async_setup_entry(
+            hass,
+            entry,
+            lambda new_entities: entities.extend(new_entities),
+        )
+
+        history_entity = entities[0]
+        await history_entity.async_update()
+
+        attrs = history_entity.extra_state_attributes
+        self.assertEqual(
+            attrs["latest_event_image_url"],
+            "https://mini.local/proxy/device-uuid/images/history/20260314123045_thumb.jpg",
+        )
+
     async def test_intercom_system_schema_webpage_is_disabled_by_default(self) -> None:
         intercom = LoxoneControl(
             uuid="intercom-uuid",

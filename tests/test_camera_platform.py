@@ -635,6 +635,24 @@ class CameraPlatformTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(session.auth_logins, ["user"])
 
+    async def test_proxy_history_urls_use_miniserver_credentials(self) -> None:
+        control = LoxoneControl(
+            uuid="intercom-uuid",
+            uuid_action="intercom-action",
+            name="Furtka",
+            type="Intercom",
+            states={},
+            details={},
+        )
+        bridge = _FakeBridge([control], {}, _FakeSession())
+        bridge.intercom_username = "camuser"
+        bridge.intercom_password = "campass"
+        entity = LoxoneIntercomCameraEntity(bridge, control)
+
+        auth = entity._request_auth_for_url("https://camera.local/proxy/device-uuid/images/1.jpg")
+
+        self.assertEqual(getattr(auth, "login", None), "user")
+
 
 if __name__ == "__main__":
     unittest.main()

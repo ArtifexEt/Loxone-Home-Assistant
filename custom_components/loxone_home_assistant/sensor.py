@@ -204,11 +204,15 @@ INTERCOM_EVENT_COLLECTION_PATHS = (
 )
 INTERCOM_EVENT_IMAGE_KEY_CANDIDATES = (
     "imageUrl",
+    "imagePath",
+    "path",
     "image",
     "alertImage",
     "snapshot",
     "photo",
     "thumb",
+    "thumbPath",
+    "thumbnailPath",
     "thumbnail",
     "thumbnailUrl",
     "snapshotUrl",
