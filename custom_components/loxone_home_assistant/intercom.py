@@ -57,6 +57,36 @@ _ADDRESS_STATE_CANDIDATES = (
     "host",
     "hostname",
 )
+_ADDRESS_DETAIL_PATHS = (
+    "address",
+    "trustAddress",
+    "ipAddress",
+    "deviceAddress",
+    "deviceIp",
+    "host",
+    "hostname",
+    "videoInfo.address",
+    "videoInfo.trustAddress",
+    "videoInfo.ipAddress",
+    "videoInfo.deviceAddress",
+    "videoInfo.deviceIp",
+    "videoInfo.host",
+    "videoInfo.hostname",
+    "securedDetails.address",
+    "securedDetails.trustAddress",
+    "securedDetails.ipAddress",
+    "securedDetails.deviceAddress",
+    "securedDetails.deviceIp",
+    "securedDetails.host",
+    "securedDetails.hostname",
+    "securedDetails.videoInfo.address",
+    "securedDetails.videoInfo.trustAddress",
+    "securedDetails.videoInfo.ipAddress",
+    "securedDetails.videoInfo.deviceAddress",
+    "securedDetails.videoInfo.deviceIp",
+    "securedDetails.videoInfo.host",
+    "securedDetails.videoInfo.hostname",
+)
 _MAC_HEX_CHARS = set("0123456789abcdefABCDEF")
 _NON_ALNUM_RE = re.compile(r"[^a-z0-9]+")
 
@@ -374,6 +404,14 @@ def _intercom_base_url(bridge, control: LoxoneControl, *, address_value: Any = N
     from_address_state = _base_url_from_value(runtime_address_value, default_scheme=default_scheme)
     if from_address_state is not None:
         return from_address_state
+
+    for detail_path in _ADDRESS_DETAIL_PATHS:
+        from_details = _base_url_from_value(
+            _nested_detail_value(control.details, detail_path),
+            default_scheme=default_scheme,
+        )
+        if from_details is not None:
+            return from_details
 
     return None
 

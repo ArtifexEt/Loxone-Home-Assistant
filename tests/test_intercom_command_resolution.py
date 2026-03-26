@@ -79,6 +79,7 @@ intercom_module = load_integration_module("custom_components.loxone_home_assista
 resolve_intercom_command = intercom_module.resolve_intercom_command
 build_intercom_tts_command = intercom_module.build_intercom_tts_command
 intercom_address_state_name = intercom_module.intercom_address_state_name
+resolve_intercom_http_url = intercom_module.resolve_intercom_http_url
 LoxoneControl = models.LoxoneControl
 
 
@@ -147,3 +148,26 @@ class IntercomCommandResolutionTests(unittest.TestCase):
             },
         )
         self.assertEqual(intercom_address_state_name(control), "trustAddress")
+
+    def test_resolve_intercom_http_url_falls_back_to_detail_address(self) -> None:
+        class _FakeBridge:
+            use_tls = False
+
+            @staticmethod
+            def resolve_http_url(value: str) -> str:
+                path = value if value.startswith("/") else f"/{value}"
+                return f"http://miniserver.local{path}"
+
+        control = LoxoneControl(
+            uuid="intercom-uuid",
+            uuid_action="intercom-action",
+            name="Gate",
+            type="IntercomV2",
+            states={},
+            details={"videoInfo": {"host": "192.168.0.50"}},
+        )
+
+        self.assertEqual(
+            resolve_intercom_http_url(_FakeBridge(), control, "jpg/image.jpg"),
+            "http://192.168.0.50/jpg/image.jpg",
+        )

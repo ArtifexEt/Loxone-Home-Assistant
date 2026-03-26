@@ -110,9 +110,31 @@ def _install_homeassistant_stubs() -> None:
     sys.modules["homeassistant.helpers.entity"] = entity
 
 
+class _FakeResponse:
+    def __init__(self, payload) -> None:
+        self._payload = payload
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, _exc_type, _exc, _tb):
+        return False
+
+    def raise_for_status(self) -> None:
+        return None
+
+    async def json(self, content_type=None):
+        del content_type
+        return self._payload
+
+
 class _FakeSession:
     def __init__(self, responses: dict[str, object] | None = None) -> None:
         self.responses = responses or {}
+
+    def get(self, url: str, auth=None):
+        del auth
+        return _FakeResponse(self.responses[url])
 
 
 class _FakeBridge:
@@ -291,6 +313,122 @@ class IntercomSensorTests(unittest.IsolatedAsyncioTestCase):
         attrs = history_entity.extra_state_attributes
         self.assertEqual(attrs["event_count"], 0)
         self.assertIsNotNone(history_entity.native_value)
+
+    async def test_history_sensor_uses_event_history_url_payload(self) -> None:
+        control = LoxoneControl(
+            uuid="intercom-uuid",
+            uuid_action="intercom-action",
+            name="Furtka",
+            type="IntercomV2",
+            states={},
+            details={"videoInfo": {"eventHistoryUrl": "/history/intercom.json"}},
+        )
+        bridge = _FakeBridge(
+            [control],
+            {},
+            session=_FakeSession(
+                {
+                    "https://mini.local/history/intercom.json": {
+                        "events": [
+                            {
+                                "timestamp": "20260313090000",
+                                "imageUrl": "/camimage/intercom-action/20260313090000",
+                            },
+                            {
+                                "timestamp": "20260314123045",
+                                "imageUrl": "/camimage/intercom-action/20260314123045",
+                            },
+                        ]
+                    }
+                }
+            ),
+        )
+        entry = _FakeConfigEntry("entry-1")
+        hass = _FakeHass(entry.entry_id, bridge, const.DOMAIN)
+        entities: list = []
+
+        await sensor_module.async_setup_entry(
+            hass,
+            entry,
+            lambda new_entities: entities.extend(new_entities),
+        )
+
+        self.assertEqual(len(entities), 1)
+        history_entity = entities[0]
+        await history_entity.async_update()
+
+        attrs = history_entity.extra_state_attributes
+        self.assertEqual(attrs["event_count"], 2)
+        self.assertEqual(
+            attrs["latest_event_image_url"],
+            "https://mini.local/camimage/intercom-action/20260314123045",
+        )
+        self.assertEqual(
+            attrs["history_timestamps"],
+            ["20260314123045", "20260313090000"],
+        )
+
+    async def test_history_sensor_accepts_image_path_payload_keys(self) -> None:
+        control = LoxoneControl(
+            uuid="intercom-uuid",
+            uuid_action="intercom-action",
+            name="Gate",
+            type="IntercomV2",
+            states={},
+            details={
+                "videoInfo": {
+                    "eventHistoryUrl": "/history/intercom.json",
+                    "host": "192.168.0.50",
+                }
+            },
+        )
+        bridge = _FakeBridge(
+            [control],
+            {},
+            session=_FakeSession(
+                {
+                    "https://192.168.0.50/history/intercom.json": {
+                        "events": [
+                            {
+                                "timestamp": "20260314123045",
+                                "imagePath": "/jpg/history/20260314123045.jpg",
+                            },
+                            {
+                                "timestamp": "20260313090000",
+                                "thumbPath": "jpg/history/thumb-20260313090000.jpg",
+                            },
+                        ]
+                    }
+                }
+            ),
+        )
+        entry = _FakeConfigEntry("entry-1")
+        hass = _FakeHass(entry.entry_id, bridge, const.DOMAIN)
+        entities: list = []
+
+        await sensor_module.async_setup_entry(
+            hass,
+            entry,
+            lambda new_entities: entities.extend(new_entities),
+        )
+
+        self.assertEqual(len(entities), 1)
+        history_entity = entities[0]
+        await history_entity.async_update()
+
+        attrs = history_entity.extra_state_attributes
+        self.assertEqual(attrs["event_count"], 2)
+        self.assertEqual(
+            attrs["latest_event_image_url"],
+            "https://192.168.0.50/jpg/history/20260314123045.jpg",
+        )
+        self.assertEqual(
+            attrs["recent_image_urls"],
+            [
+                "https://192.168.0.50/jpg/history/20260314123045.jpg",
+                "https://192.168.0.50/jpg/history/thumb-20260313090000.jpg",
+            ],
+        )
 
     async def test_intercom_system_schema_webpage_is_disabled_by_default(self) -> None:
         intercom = LoxoneControl(
