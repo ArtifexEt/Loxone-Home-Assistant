@@ -51,8 +51,8 @@ class IntercomRtcLoader:
 def _import_rtc():
     return (
         import_module("aiortc"),
-        import_module("aiortc.contrib.media").MediaRelay,
-        import_module("aiortc.sdp").candidate_from_sdp,
+        import_module("aiortc.contrib.media"),
+        import_module("aiortc.sdp"),
     )
 
 
@@ -86,6 +86,7 @@ class _ClientSession:
 
     connection: Any = None
     intercom: IntercomPeer | None = None
+    discarded_media: Any = None
     negotiation: asyncio.Task | None = None
     parse_candidate: Callable | None = None
     remote_description_set: bool = False
@@ -127,11 +128,12 @@ class LoxoneIntercomWebRTCCamera(LoxoneEntity, Camera):
     async def _async_negotiate(self, session_id, session, offer_sdp, send_message) -> None:
         try:
             async with asyncio.timeout(_OFFER_TIMEOUT):
-                rtc, relay_factory, session.parse_candidate = await self._snapshots.loader.async_load()
+                rtc, media, sdp = await self._snapshots.loader.async_load()
+                session.parse_candidate = sdp.candidate_from_sdp
                 connection = session.connection = rtc.RTCPeerConnection(
                     rtc.RTCConfiguration(iceServers=[])
                 )
-                relay = relay_factory()
+                relay = media.MediaRelay()
                 microphone = None
 
                 @connection.on("track")
@@ -149,6 +151,28 @@ class LoxoneIntercomWebRTCCamera(LoxoneEntity, Camera):
                         self.close_webrtc_session(session_id)
 
                 await connection.setRemoteDescription(rtc.RTCSessionDescription(offer_sdp, "offer"))
+                receive_mids = {
+                    section.rtp.muxId
+                    for section in sdp.SessionDescription.parse(offer_sdp).media
+                    if section.port != 0 and section.direction in {"recvonly", "sendrecv"}
+                }
+                receivers = {}
+                for transceiver in connection.getTransceivers():
+                    if transceiver.mid in receive_mids:
+                        receivers.setdefault(transceiver.kind, transceiver)
+
+                async def route_to_client(track):
+                    if (transceiver := receivers.get(track.kind)) is not None:
+                        transceiver.sender.replaceTrack(relay.subscribe(track, buffered=False))
+                        transceiver.direction = "sendrecv"
+                        return
+                    # Companion microphone sessions may offer audio without video.
+                    # Drain unused upstream tracks so their frame queues stay bounded.
+                    if session.discarded_media is None:
+                        session.discarded_media = media.MediaBlackhole()
+                    session.discarded_media.addTrack(track)
+                    await session.discarded_media.start()
+
                 session.remote_description_set = True
                 for candidate in session.candidates:
                     await _async_add_candidate(session, candidate)
@@ -157,12 +181,12 @@ class LoxoneIntercomWebRTCCamera(LoxoneEntity, Camera):
                 intercom = session.intercom = await IntercomPeer.async_connect(
                     self.bridge, self._snapshots.device_uuid
                 )
-                connection.addTrack(relay.subscribe(intercom.video_track, buffered=False))
+                await route_to_client(intercom.video_track)
                 if microphone is not None:
                     doorbell_audio = await intercom.async_add_audio(
                         relay.subscribe(microphone, buffered=False)
                     )
-                    connection.addTrack(relay.subscribe(doorbell_audio, buffered=False))
+                    await route_to_client(doorbell_audio)
 
                 await connection.setLocalDescription(await connection.createAnswer())
                 send_message(WebRTCAnswer(connection.localDescription.sdp))
@@ -219,4 +243,6 @@ async def _async_close_session(session: _ClientSession) -> None:
         resources.append(session.connection.close())
     if session.intercom is not None:
         resources.append(session.intercom.async_close())
+    if session.discarded_media is not None:
+        resources.append(session.discarded_media.stop())
     await asyncio.gather(*resources, return_exceptions=True)
