@@ -150,6 +150,8 @@ def _coerce_details(raw_control: Mapping[str, Any]) -> dict[str, Any]:
     raw_secured_details = raw_control.get("securedDetails")
     if isinstance(raw_secured_details, Mapping):
         details["securedDetails"] = dict(raw_secured_details)
+    elif raw_secured_details is True:
+        details["securedDetails"] = True
 
     return details
 

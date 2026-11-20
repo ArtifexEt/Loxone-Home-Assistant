@@ -15,7 +15,10 @@ def normalize_icon_path(value: str | None) -> str | None:
     if not raw:
         return None
 
-    split = urlsplit(raw)
+    try:
+        split = urlsplit(raw)
+    except ValueError:
+        return None
     # Accept only relative icon paths from Loxone structure payloads.
     if split.scheme or split.netloc or split.query or split.fragment:
         return None
@@ -41,6 +44,14 @@ def decode_icon_key(value: str | None) -> str | None:
     if not isinstance(value, str):
         return None
     return normalize_icon_path(unquote(value))
+
+
+def icon_content_type(header: str | None, icon_path: str) -> str | None:
+    """Accept image responses and recognize SVGs without a MIME header."""
+    if header is None:
+        return "image/svg+xml" if icon_path.casefold().endswith(".svg") else None
+    mime_type = header.partition(";")[0].strip().lower()
+    return mime_type if mime_type.startswith("image/") else None
 
 
 def icon_proxy_url(serial: str | None, icon_path: str | None) -> str | None:

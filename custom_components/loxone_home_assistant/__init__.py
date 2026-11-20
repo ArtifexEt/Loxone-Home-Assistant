@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from typing import Any
@@ -10,9 +11,13 @@ from aiohttp import BasicAuth, ClientError, web
 import voluptuous as vol
 from homeassistant.components.http import HomeAssistantView
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import CONF_PASSWORD
 from homeassistant.core import HomeAssistant, ServiceCall
-from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
+from homeassistant.exceptions import (
+    ConfigEntryError,
+    ConfigEntryNotReady,
+    HomeAssistantError,
+    ServiceValidationError,
+)
 from homeassistant.helpers import config_validation as cv, device_registry as dr
 
 try:
@@ -20,10 +25,14 @@ try:
 except ImportError:  # pragma: no cover - compatibility for lightweight test stubs
     SupportsResponse = None  # type: ignore[assignment]
 
-from .bridge import LoxoneBridge
+from .bridge import (
+    LoxoneAuthenticationError,
+    LoxoneBridge,
+    LoxoneConnectionError,
+    LoxoneUnsupportedError,
+)
+from .connection_config import merge_connection_config
 from .const import (
-    CONF_SERVER_MODEL,
-    CONF_SOFTWARE_VERSION,
     DATA_BRIDGES,
     DOMAIN,
     MANUFACTURER,
@@ -42,13 +51,12 @@ from .const import (
     SERVICE_SEND_TTS,
 )
 from .entity import miniserver_device_identifier
-from .icons import decode_icon_key, normalize_icon_path
+from .icons import decode_icon_key, icon_content_type
 from .intercom import (
     build_intercom_tts_command,
     is_intercom_control,
     resolve_intercom_command,
 )
-from .intercom_media import get_media_response
 from .media_player import build_audio_tts_command, resolve_audio_tts_target_uuid_action
 from .models import LoxoneControl
 from .runtime import bridges_by_entry_id, remove_entry_bridge, set_entry_bridge
@@ -117,13 +125,11 @@ def _service_validation_exception(message: str) -> Exception:
 
 
 class LoxoneIconProxyView(HomeAssistantView):
-    """Serve Loxone icons through authenticated HA endpoint."""
+    """Serve configured Loxone icons in dashboard image elements."""
 
     url = f"/api/{DOMAIN}/icon/{{serial}}/{{icon_key}}"
     name = f"api:{DOMAIN}:icon"
-    # Keep icon URLs usable in plain <img> contexts where HA auth headers/cookies
-    # may not be attached. Path validation in `decode_icon_key` limits fetch scope
-    # to safe relative Miniserver icon paths only.
+    # Dashboard image elements may load without attaching HA credentials.
     requires_auth = False
 
     async def get(self, request: web.Request, serial: str, icon_key: str) -> web.Response:
@@ -133,12 +139,14 @@ class LoxoneIconProxyView(HomeAssistantView):
             return web.Response(status=500)
 
         bridge = _resolve_bridge_for_serial(hass, serial)
-        if bridge is None:
+        if bridge is None or not bridge.use_loxone_icons:
             return web.Response(status=404)
 
         icon_path = decode_icon_key(icon_key)
         if icon_path is None:
             return web.Response(status=400)
+        if icon_path not in bridge.icon_paths:
+            return web.Response(status=404)
 
         cached = _cached_icon_payload(hass, bridge.serial, icon_path)
         if cached is not None:
@@ -214,40 +222,55 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.data.setdefault(DOMAIN, {})
     hass.data[DOMAIN].setdefault(DATA_BRIDGES, {})
 
-    merged_data = {**entry.data, **entry.options}
-    bridge = LoxoneBridge(hass, merged_data)
-    await bridge.async_initialize()
-    if getattr(bridge, "use_loxone_icons", True):
-        hass.async_create_task(_async_prefetch_icons(hass, bridge))
+    bridge = None
+    try:
+        bridge = LoxoneBridge(hass, merge_connection_config(entry.data, entry.options))
+        await bridge.async_initialize()
+        _async_register_miniserver_device(hass, entry, bridge)
 
-    _async_register_miniserver_device(hass, entry, bridge)
+        set_entry_bridge(hass, entry, bridge)
+        await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
-    set_entry_bridge(hass, entry, bridge)
-    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
-
-    if bridge.serial != entry.unique_id or _runtime_data_changed(entry.data, bridge):
-        hass.config_entries.async_update_entry(
-            entry,
-            unique_id=bridge.serial,
-            data={
-                **entry.data,
-                **bridge.export_runtime_data(),
-            },
-        )
+        data = {**entry.data, **bridge.export_runtime_data()}
+        if bridge.serial != entry.unique_id or data != entry.data:
+            hass.config_entries.async_update_entry(
+                entry,
+                unique_id=bridge.serial,
+                data=data,
+            )
+    except (Exception, asyncio.CancelledError) as err:
+        if bridge is not None:
+            remove_entry_bridge(hass, entry)
+            await bridge.async_shutdown()
+        if isinstance(err, LoxoneConnectionError):
+            raise ConfigEntryNotReady(str(err)) from err
+        if isinstance(err, LoxoneAuthenticationError):
+            raise ConfigEntryError(
+                "Loxone rejected the configured credentials. Update them in the integration options."
+            ) from err
+        if isinstance(err, LoxoneUnsupportedError):
+            raise ConfigEntryError(str(err)) from err
+        raise
 
     entry.async_on_unload(entry.add_update_listener(async_reload_entry))
+    if bridge.use_loxone_icons:
+        entry.async_create_background_task(
+            hass, _async_prefetch_icons(hass, bridge), "loxone_prefetch_icons"
+        )
     return True
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry."""
-    unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    if not await hass.config_entries.async_unload_platforms(entry, PLATFORMS):
+        return False
+
     bridge = remove_entry_bridge(hass, entry)
     if bridge is not None:
-        _clear_cached_bridge_icons(hass, bridge.serial)
         await bridge.async_shutdown()
+        _clear_cached_bridge_icons(hass, bridge.serial)
 
-    return unload_ok
+    return True
 
 
 async def async_reload_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
@@ -474,19 +497,6 @@ def _resolve_bridge(hass: HomeAssistant, call: ServiceCall) -> LoxoneBridge:
     )
 
 
-def _runtime_data_changed(data: dict, bridge: LoxoneBridge) -> bool:
-    return (
-        data.get("serial") != bridge.serial
-        or data.get("client_uuid") != bridge.client_uuid
-        or data.get("token") != bridge.token
-        or data.get("token_valid_until") != bridge.token_valid_until
-        or data.get("loxapp_version") != bridge.loxapp_version
-        or data.get(CONF_SOFTWARE_VERSION) != bridge.software_version
-        or data.get(CONF_SERVER_MODEL, DEFAULT_SERVER_MODEL) != bridge.server_model
-        or not data.get(CONF_PASSWORD)
-    )
-
-
 def _async_register_miniserver_device(
     hass: HomeAssistant, entry: ConfigEntry, bridge: LoxoneBridge
 ) -> None:
@@ -551,7 +561,14 @@ def _clear_cached_bridge_icons(hass: HomeAssistant, serial: str) -> None:
 
 def _icon_web_response(payload: tuple[str, bytes]) -> web.Response:
     content_type, body = payload
-    return web.Response(body=body, content_type=content_type or "image/svg+xml")
+    return web.Response(
+        body=body,
+        content_type=content_type,
+        headers={
+            "Content-Security-Policy": "sandbox; default-src 'none'; style-src 'unsafe-inline'",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
 
 
 async def _async_fetch_icon_payload(
@@ -567,18 +584,18 @@ async def _async_fetch_icon_payload(
     auth_options = (BasicAuth(bridge.username, bridge.password), None) if bridge.use_tls else (None,)
     for request_auth in auth_options:
         try:
-            async with get_media_response(bridge, session, icon_url, request_auth) as response:
+            async with session.get(icon_url, auth=request_auth, allow_redirects=False) as response:
                 if response.status == 401 and request_auth is not None:
                     continue
                 if response.status != 200:
                     return None
+                content_type = icon_content_type(response.headers.get("Content-Type"), icon_path)
+                if content_type is None:
+                    return None
                 body = await response.read()
                 if not body:
                     return None
-                content_type = response.headers.get("Content-Type", "image/svg+xml")
-                if ";" in content_type:
-                    content_type = content_type.split(";", 1)[0].strip()
-                return content_type or "image/svg+xml", body
+                return content_type, body
         except (ClientError, RuntimeError) as err:
             _LOGGER.debug(
                 "Loxone icon fetch failed for serial=%s path=%s (%s)",
@@ -592,11 +609,7 @@ async def _async_fetch_icon_payload(
 
 
 async def _async_prefetch_icons(hass: HomeAssistant, bridge: LoxoneBridge) -> None:
-    icon_paths = {
-        icon_path
-        for control in bridge.controls
-        if (icon_path := normalize_icon_path(control.icon))
-    }
+    icon_paths = bridge.icon_paths
     if not icon_paths:
         return
 

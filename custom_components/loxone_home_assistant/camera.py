@@ -64,6 +64,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from .entity import LoxoneEntity, normalize_state_name
 from .intercom import is_intercom_control
 from .intercom_media import (
+    HISTORY_URL_DETAIL_PATHS,
     INTERCOM_DYNAMIC_PAYLOAD_STATE_NAMES,
     LAST_BELL_EVENTS_DETAIL_PATHS,
     SNAPSHOT_DETAIL_PATHS,
@@ -81,12 +82,14 @@ from .runtime import entry_bridge
 
 _LOGGER = logging.getLogger(__name__)
 
+_SNAPSHOT_TIMEOUT = 4
 _MJPEG_CHUNK_SIZE = 16 * 1024
 _MJPEG_MAX_SCAN_BYTES = 4 * 1024 * 1024
 INTERCOM_CAMERA_DETAIL_PATHS = (
     *STREAM_DETAIL_PATHS,
     *SNAPSHOT_DETAIL_PATHS,
     *LAST_BELL_EVENTS_DETAIL_PATHS,
+    *HISTORY_URL_DETAIL_PATHS,
 )
 INTERCOM_CAMERA_STATE_HINTS = frozenset(
     {
@@ -123,7 +126,7 @@ class LoxoneIntercomCameraEntity(LoxoneEntity, Camera):
         self._secured_details: dict[str, Any] | None = None
         self._secured_details_loaded = False
         self._secured_details_lock = asyncio.Lock()
-        self._last_image: bytes | None = None
+        self._last_live_image: bytes | None = None
         self._attr_entity_picture = None
 
     async def stream_source(self) -> str | None:
@@ -165,20 +168,22 @@ class LoxoneIntercomCameraEntity(LoxoneEntity, Camera):
         del width, height
 
         await self._ensure_secured_details_loaded()
+        selected_history = self._selected_history_timestamp() is not None
         for image_url in self._image_url_candidates():
             image = await self._async_fetch_image(image_url)
             if image is None:
                 continue
-            self._last_image = image
+            if not selected_history:
+                self._last_live_image = image
             return image
-        return self._last_image
+        return None if selected_history else self._last_live_image
 
     async def handle_async_mjpeg_stream(self, request) -> Any:
         """Proxy the raw MJPEG stream directly from the Intercom."""
         await self._ensure_secured_details_loaded()
 
-        selected_timestamp = self._selected_history_timestamp()
-        if selected_timestamp is not None:
+        stream_url = self._stream_url()
+        if self._selected_history_timestamp() is not None or stream_url is None:
             image = await self.async_camera_image()
             if image is None or web is None:
                 return _web_response(status=404)
@@ -188,24 +193,24 @@ class LoxoneIntercomCameraEntity(LoxoneEntity, Camera):
                 headers={"Cache-Control": "no-store"},
             )
 
-        stream_url = self._stream_url()
-        if stream_url is None:
-            return _web_response(status=404)
-
         session = getattr(self.bridge, "_session", None)
         if session is None:
             return _web_response(status=503)
 
-        request_auth = intercom_request_auth(self.bridge, stream_url)
         try:
+            request_auth = intercom_request_auth(self.bridge, stream_url)
             async with get_media_response(self.bridge, session, stream_url, request_auth) as upstream:
-                if upstream.status != 200 or web is None:
-                    return _web_response(status=upstream.status)
+                if upstream.status != 200:
+                    return _web_response(status=upstream.status if upstream.status >= 400 else 502)
+                if web is None:
+                    return _web_response(status=502)
 
-                content_type = upstream.headers.get(
-                    "Content-Type",
-                    "multipart/x-mixed-replace",
-                )
+                content_type = upstream.headers.get("Content-Type")
+                media_type = _response_content_type(upstream)
+                if content_type is None or media_type is None or not (
+                    media_type.startswith("image/") or media_type == "multipart/x-mixed-replace"
+                ):
+                    return _web_response(status=502)
                 response = web.StreamResponse(
                     status=200,
                     headers={
@@ -225,20 +230,17 @@ class LoxoneIntercomCameraEntity(LoxoneEntity, Camera):
                 return response
         except asyncio.CancelledError:
             raise
-        except ClientError as err:
+        except ClientError:
             _LOGGER.debug(
-                "Intercom MJPEG proxy failed for %s from %s (%s)",
+                "Intercom MJPEG proxy failed for %s",
                 self.control.uuid_action,
-                stream_url,
-                err,
             )
             return _web_response(status=502)
         except Exception as err:  # noqa: BLE001
             _LOGGER.debug(
-                "Intercom MJPEG proxy errored for %s from %s (%s)",
+                "Intercom MJPEG proxy errored for %s (%s)",
                 self.control.uuid_action,
-                stream_url,
-                err,
+                type(err).__name__,
             )
             return _web_response(status=500)
 
@@ -301,32 +303,32 @@ class LoxoneIntercomCameraEntity(LoxoneEntity, Camera):
         if session is None:
             return None
 
-        request_auth = intercom_request_auth(self.bridge, image_url)
         try:
-            async with get_media_response(self.bridge, session, image_url, request_auth) as response:
-                if not getattr(self.bridge, "use_tls", True) and 300 <= response.status < 400:
+            request_auth = intercom_request_auth(self.bridge, image_url)
+            async with asyncio.timeout(_SNAPSHOT_TIMEOUT), get_media_response(
+                self.bridge, session, image_url, request_auth
+            ) as response:
+                if response.status != 200:
                     return None
-                response.raise_for_status()
                 content_type = _response_content_type(response)
-                if content_type == "multipart/x-mixed-replace":
+                if content_type in (None, "application/octet-stream", "multipart/x-mixed-replace"):
                     return await _extract_first_mjpeg_frame(response)
-                payload = await response.read()
-                return payload or None
+                if content_type.startswith("image/"):
+                    payload = await response.read()
+                    return payload or None
         except asyncio.CancelledError:
             raise
-        except ClientError as err:
+        except (ClientError, TimeoutError, ValueError) as err:
             _LOGGER.debug(
-                "Intercom image fetch failed for %s from %s (%s)",
+                "Intercom image fetch failed for %s (%s)",
                 self.control.uuid_action,
-                image_url,
-                err,
+                type(err).__name__,
             )
         except Exception as err:  # noqa: BLE001
             _LOGGER.debug(
-                "Intercom image fetch errored for %s from %s (%s)",
+                "Intercom image fetch errored for %s (%s)",
                 self.control.uuid_action,
-                image_url,
-                err,
+                type(err).__name__,
             )
         return None
 
@@ -351,13 +353,14 @@ class LoxoneIntercomCameraEntity(LoxoneEntity, Camera):
                     self.control.uuid_action,
                     err,
                 )
-                self._secured_details_loaded = True
                 return
 
             value = response.get("value") if isinstance(response, Mapping) else None
             if isinstance(value, Mapping):
                 self._secured_details = dict(value)
-            self._secured_details_loaded = True
+                self._secured_details_loaded = True
+            elif self.control.details.get("securedDetails") is not True:
+                self._secured_details_loaded = True
 
 
 def _is_intercom_camera_control(control: LoxoneControl) -> bool:
@@ -370,7 +373,7 @@ def _is_intercom_camera_control(control: LoxoneControl) -> bool:
     secured_details = (
         control.details.get("securedDetails") if isinstance(control.details, Mapping) else None
     )
-    if _control_has_camera_details(secured_details):
+    if secured_details is True or _control_has_camera_details(secured_details):
         return True
 
     return any(

@@ -448,6 +448,62 @@ class ConnectionConfigFlowTests(unittest.IsolatedAsyncioTestCase):
                 bridge.async_initialize.assert_awaited_once_with(probe_legacy=True)
                 self.assertEqual(result["data"], {"port": port, "use_tls": new_tls})
 
+    async def test_options_keep_existing_password_overrides_when_blank(self) -> None:
+        config_entry = types.SimpleNamespace(
+            data={
+                "host": "miniserver.local",
+                "port": 443,
+                "username": "loxone",
+                "password": "initial-password",
+                "intercom_password": "initial-intercom-password",
+                "token": "initial-token",
+            },
+            options={"password": "updated-password", "intercom_password": "updated-intercom"},
+        )
+        flow = config_flow.LoxoneCommunityOptionsFlow(config_entry)
+        flow.hass = object()
+        with patch.object(config_flow, "LoxoneBridge", return_value=_connected_bridge(use_tls=True)) as factory:
+            result = await flow.async_step_init({"password": "", "intercom_password": ""})
+
+        connection = factory.call_args.args[1]
+        self.assertEqual(connection["password"], "updated-password")
+        self.assertEqual(connection["intercom_password"], "updated-intercom")
+        self.assertIsNone(connection["token"])
+        self.assertEqual(result["data"]["password"], "updated-password")
+        self.assertEqual(result["data"]["intercom_password"], "updated-intercom")
+
+    async def test_options_use_cached_token_only_for_unchanged_connection(self) -> None:
+        for key, value, expect_cached_token in (
+            ("host", "new-address.local", False),
+            ("port", 8443, False),
+            ("username", "new-user", False),
+            ("password", "new-password", False),
+            ("use_loxone_icons", True, True),
+        ):
+            with self.subTest(key=key):
+                config_entry = types.SimpleNamespace(
+                    data={
+                        "host": "miniserver.local",
+                        "port": 443,
+                        "username": "loxone",
+                        "password": "initial-password",
+                        "token": "cached-token",
+                        "token_valid_until": "999999999",
+                    },
+                    options={},
+                )
+                flow = config_flow.LoxoneCommunityOptionsFlow(config_entry)
+                flow.hass = object()
+                bridge = _connected_bridge(use_tls=True)
+                with patch.object(config_flow, "LoxoneBridge", return_value=bridge) as factory:
+                    await flow.async_step_init({key: value})
+
+                connection = factory.call_args.args[1]
+                self.assertEqual(connection["token"], "cached-token" if expect_cached_token else None)
+                self.assertEqual(
+                    connection["token_valid_until"], "999999999" if expect_cached_token else None
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

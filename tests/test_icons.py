@@ -24,6 +24,7 @@ class IconHelpersTests(unittest.TestCase):
 
     def test_normalize_icon_path_rejects_absolute_or_unsafe_values(self) -> None:
         self.assertIsNone(icons.normalize_icon_path("https://mini.local/IconsFilled/a.svg"))
+        self.assertIsNone(icons.normalize_icon_path("https://[::1/IconsFilled/a.svg"))
         self.assertIsNone(icons.normalize_icon_path("IconsFilled/a.svg?x=1"))
         self.assertIsNone(icons.normalize_icon_path("../IconsFilled/a.svg"))
 
@@ -40,6 +41,19 @@ class IconHelpersTests(unittest.TestCase):
             icons.decode_icon_key(encoded),
             "IconsFilled/lightbulb-3.svg",
         )
+
+    def test_icon_content_type_accepts_images_and_headerless_svg(self) -> None:
+        self.assertEqual(
+            icons.icon_content_type("Image/SVG+XML; charset=utf-8", "icon.svg"),
+            "image/svg+xml",
+        )
+        self.assertEqual(icons.icon_content_type("image/png", "icon.png"), "image/png")
+        self.assertEqual(icons.icon_content_type(None, "icon.svg"), "image/svg+xml")
+
+    def test_icon_content_type_rejects_non_image_responses(self) -> None:
+        self.assertIsNone(icons.icon_content_type("text/html", "icon.svg"))
+        self.assertIsNone(icons.icon_content_type("application/json", "icon.svg"))
+        self.assertIsNone(icons.icon_content_type(None, "icon.png"))
 
 
 if __name__ == "__main__":

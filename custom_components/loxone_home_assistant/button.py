@@ -31,9 +31,9 @@ from .models import LoxoneControl
 from .runtime import entry_bridge
 
 INTERCOM_GEN2_BUTTON_SPECS = (
-    ("Answer Call", "answer", None, "mdi:phone-check"),
-    ("Mute Microphone", "mute", ("1",), "mdi:microphone-off"),
-    ("Unmute Microphone", "mute", ("0",), "mdi:microphone"),
+    ("Answer Call", "Stop Ringing", "answer", None, "mdi:bell-cancel-outline"),
+    ("Mute Microphone", "Mute Doorbell", "mute", ("1",), "mdi:bell-off-outline"),
+    ("Unmute Microphone", "Unmute Doorbell", "mute", ("0",), "mdi:bell-outline"),
 )
 INTERCOM_TTS_CONTROL_TYPES_NORMALIZED = {
     normalize_state_name(value) for value in INTERCOM_CONTROL_TYPES
@@ -60,12 +60,19 @@ def _build_intercom_command_buttons(bridge) -> list[ButtonEntity]:
             LoxoneIntercomCommandButton(
                 bridge,
                 control,
+                legacy_suffix,
                 name_suffix,
                 command_name,
                 command_args,
                 icon,
             )
-            for name_suffix, command_name, command_args, icon in INTERCOM_GEN2_BUTTON_SPECS
+            for (
+                legacy_suffix,
+                name_suffix,
+                command_name,
+                command_args,
+                icon,
+            ) in INTERCOM_GEN2_BUTTON_SPECS
         )
     return entities
 
@@ -120,12 +127,14 @@ class LoxoneIntercomCommandButton(LoxoneEntity, ButtonEntity):
         self,
         bridge,
         control: LoxoneControl,
-        suffix: str,
+        legacy_suffix: str,
+        name_suffix: str,
         command: str,
         arguments: Sequence[str] | None,
         icon: str,
     ) -> None:
-        super().__init__(bridge, control, suffix)
+        super().__init__(bridge, control, legacy_suffix)
+        self._attr_name = f"{control.display_name} {name_suffix}"
         self._command = resolve_intercom_command(command, list(arguments or []))
         self._attr_icon = icon
 

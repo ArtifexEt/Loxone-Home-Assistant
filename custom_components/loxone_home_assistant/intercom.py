@@ -316,7 +316,7 @@ def resolve_intercom_http_url(
     if not _looks_like_urlish_relative(text):
         return None
 
-    if text.startswith("/camimage/") or text.startswith("camimage/"):
+    if text.lstrip("/").startswith(("camimage/", "proxy/")):
         return bridge.resolve_http_url(text)
 
     intercom_base_url = _intercom_base_url(

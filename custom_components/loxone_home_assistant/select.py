@@ -23,6 +23,7 @@ from .const import (
 from .entity import LoxoneEntity, control_entity_unique_id
 from .intercom import intercom_history_state_name, is_intercom_control
 from .intercom_media import (
+    IntercomHistoryEntry,
     async_intercom_history_entries,
     set_intercom_selected_history_timestamp,
 )
@@ -185,7 +186,7 @@ class LoxoneIntercomHistorySelectEntity(LoxoneEntity, SelectEntity):
             INTERCOM_HISTORY_SELECT_SUFFIX,
         )
         self._history_state_name = intercom_history_state_name(control)
-        self._option_to_timestamp: dict[str, str] = {}
+        self._option_to_event: dict[str, IntercomHistoryEntry] = {}
         self._selected_option = INTERCOM_HISTORY_SELECT_LIVE_OPTION
         self._attr_options = [INTERCOM_HISTORY_SELECT_LIVE_OPTION]
 
@@ -222,9 +223,9 @@ class LoxoneIntercomHistorySelectEntity(LoxoneEntity, SelectEntity):
             self.control,
             state_value_getter=self.state_value,
         )
-        options, option_to_timestamp = _build_intercom_history_options(history_entries)
+        options, option_to_event = _build_intercom_history_options(history_entries)
         self._attr_options = options
-        self._option_to_timestamp = option_to_timestamp
+        self._option_to_event = option_to_event
 
         if self._selected_option not in self._attr_options:
             self._selected_option = INTERCOM_HISTORY_SELECT_LIVE_OPTION
@@ -244,16 +245,17 @@ class LoxoneIntercomHistorySelectEntity(LoxoneEntity, SelectEntity):
     def extra_state_attributes(self) -> dict[str, Any]:
         attrs = super().extra_state_attributes
         attrs["option_count"] = len(self._attr_options)
-        selected_timestamp = self._option_to_timestamp.get(self._selected_option)
-        if selected_timestamp is not None:
-            attrs["selected_timestamp"] = selected_timestamp
+        event = self._option_to_event.get(self._selected_option)
+        if event is not None:
+            attrs["selected_timestamp"] = event.raw_timestamp
         return attrs
 
     def _apply_selected_history_timestamp(self) -> None:
+        event = self._option_to_event.get(self._selected_option)
         set_intercom_selected_history_timestamp(
             self.bridge,
             self.control.uuid_action,
-            self._option_to_timestamp.get(self._selected_option),
+            event.selection_value if event is not None else None,
         )
 
 
@@ -321,10 +323,10 @@ def _supports_intercom_history_select(control: LoxoneControl) -> bool:
 
 
 def _build_intercom_history_options(
-    history_entries,
-) -> tuple[list[str], dict[str, str]]:
+    history_entries: tuple[IntercomHistoryEntry, ...],
+) -> tuple[list[str], dict[str, IntercomHistoryEntry]]:
     options = [INTERCOM_HISTORY_SELECT_LIVE_OPTION]
-    option_to_timestamp: dict[str, str] = {}
+    option_to_event: dict[str, IntercomHistoryEntry] = {}
     seen_labels: set[str] = set(options)
 
     for index, event in enumerate(history_entries, start=1):
@@ -333,13 +335,13 @@ def _build_intercom_history_options(
             label = f"{label} ({index})"
         seen_labels.add(label)
         options.append(label)
-        option_to_timestamp[label] = event.raw_timestamp
+        option_to_event[label] = event
 
-    return options, option_to_timestamp
+    return options, option_to_event
 
 
-def _intercom_event_option_label(event: Mapping[str, Any], index: int) -> str:
-    timestamp = getattr(event, "event_time", None)
+def _intercom_event_option_label(event: IntercomHistoryEntry, index: int) -> str:
+    timestamp = event.event_time
     if isinstance(timestamp, datetime):
         localized = (
             timestamp.astimezone()

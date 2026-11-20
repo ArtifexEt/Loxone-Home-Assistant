@@ -27,6 +27,7 @@ from .bridge import (
     LoxoneVersionUnsupportedError,
     async_discover_miniservers,
 )
+from .connection_config import merge_connection_config
 from .const import (
     CONF_AUTO_CREATE_AUTOMATIONS,
     CONF_CLIENT_UUID,
@@ -394,17 +395,17 @@ class LoxoneCommunityOptionsFlow(OptionsFlow):
         config_entry = _resolve_options_config_entry(self)
         entry_data = _coerce_mapping(config_entry.data if config_entry else None)
         entry_options = _coerce_mapping(config_entry.options if config_entry else None)
-        stored = {**entry_data, **entry_options}
+        stored = merge_connection_config(entry_data, entry_options)
 
         if user_input is not None:
             options = dict(user_input)
-            # Keep currently stored password when options password is left empty.
-            if not options.get(CONF_PASSWORD):
-                options.pop(CONF_PASSWORD, None)
-            # Keep currently stored Intercom password when left empty.
-            if not options.get(CONF_INTERCOM_PASSWORD):
-                options.pop(CONF_INTERCOM_PASSWORD, None)
-            merged = {**stored, **options}
+            # Blank fields keep password overrides from earlier option edits.
+            for key in (CONF_PASSWORD, CONF_INTERCOM_PASSWORD):
+                if not options.get(key):
+                    options.pop(key, None)
+                    if entry_options.get(key):
+                        options[key] = entry_options[key]
+            merged = merge_connection_config(stored, options)
             if any(merged.get(key) != stored.get(key) for key in (CONF_HOST, CONF_PORT)):
                 # Detect the transport again when the connection target changes.
                 merged[CONF_USE_TLS] = True

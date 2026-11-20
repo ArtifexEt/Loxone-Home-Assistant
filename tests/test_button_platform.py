@@ -326,6 +326,14 @@ class ButtonPlatformTests(unittest.IsolatedAsyncioTestCase):
             if isinstance(entity, button_module.LoxoneIntercomCommandButton)
         ]
         self.assertEqual(len(intercom_buttons), 3)
+        self.assertEqual(
+            [(button._attr_name, button._attr_unique_id) for button in intercom_buttons],
+            [
+                ("Furtka Stop Ringing", "1234567890:intercom-action:answer_call"),
+                ("Furtka Mute Doorbell", "1234567890:intercom-action:mute_microphone"),
+                ("Furtka Unmute Doorbell", "1234567890:intercom-action:unmute_microphone"),
+            ],
+        )
 
         for button in intercom_buttons:
             await button.async_press()
