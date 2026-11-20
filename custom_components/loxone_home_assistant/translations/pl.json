@@ -2,6 +2,13 @@
   "config": {
     "step": {
       "user": {
+        "title": "Połącz z serwerem Loxone",
+        "menu_options": {
+          "auto": "Przeszukaj sieć lokalną",
+          "manual": "Wpisz adres i port"
+        }
+      },
+      "finish": {
         "title": "Dodatkowe opcje instalacji",
         "description": "Wyszukiwanie i logowanie zostały zakończone. Ustaw opcjonalne zachowanie encji oświetlenia i automatyzacji.",
         "data": {
@@ -32,7 +39,7 @@
       },
       "manual": {
         "title": "Ręczna konfiguracja serwera Loxone",
-        "description": "Automatyczne wyszukiwanie nie zakończyło się powodzeniem. Wpisz lokalny adres serwera Loxone ręcznie. Wideo interkomu domyślnie używa tego samego konta; osobne dane ustaw później w Opcjach tylko wtedy, gdy urządzenie tego wymaga.",
+        "description": "Wpisz adres i port serwera Loxone. W przypadku Miniservera Gen 1 podaj skonfigurowany port HTTP.",
         "data": {
           "host": "Host",
           "port": "Port",
@@ -45,7 +52,7 @@
     "error": {
       "cannot_connect": "Nie można połączyć się z serwerem Loxone.",
       "invalid_auth": "Nieprawidłowy login lub hasło.",
-      "legacy_not_supported": "Ta integracja obsługuje obecnie tylko serwery Loxone z lokalnym TLS/WSS.",
+      "legacy_not_supported": "Nie udało się nawiązać szyfrowanego połączenia z Miniserverem Gen 1.",
       "unsupported_version": "Nieobsługiwana wersja oprogramowania serwera Loxone. Minimalna wspierana wersja to 10.2.",
       "no_device_found": "Nie znaleziono wspieranego serwera Loxone w lokalnej sieci."
     },
@@ -54,6 +61,12 @@
     }
   },
   "options": {
+    "error": {
+      "cannot_connect": "Nie można połączyć się z serwerem Loxone.",
+      "invalid_auth": "Nieprawidłowy login lub hasło.",
+      "legacy_not_supported": "Nie udało się nawiązać szyfrowanego połączenia z Miniserverem Gen 1.",
+      "unsupported_version": "Nieobsługiwana wersja oprogramowania serwera Loxone. Minimalna wspierana wersja to 10.2."
+    },
     "step": {
       "init": {
         "title": "Opcje Loxone",

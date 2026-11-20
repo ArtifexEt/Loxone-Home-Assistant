@@ -10,6 +10,7 @@ import ipaddress
 import json
 import logging
 import re
+import ssl
 import sys
 from time import monotonic
 import uuid
@@ -60,6 +61,7 @@ from .intercom import (
     intercom_proximity_state_name,
     is_intercom_control,
 )
+from .legacy_crypto import LegacyCryptoError, LegacySession
 from .models import LoxoneControl, LoxoneMediaServer, LoxoneStructure
 from .parser import parse_structure
 from .protocol import (
@@ -93,10 +95,15 @@ else:
         return dataclass(cls)
 
 PROBE_PATH = "/jdev/cfg/apiKey"
+LEGACY_PROBE_TIMEOUT = 2
+LEGACY_CERTIFICATE_PATH = "/jdev/sys/getcertificate"
+LEGACY_CERTIFICATE_TIMEOUT = 10
 WS_PATH = "/ws/rfc6455"
+LOXONE_EPOCH = datetime(2009, 1, 1, tzinfo=UTC)
 KEEPALIVE_RESPONSE = 6
 OUT_OF_SERVICE = 5
 TEXT_MESSAGE = 0
+FILE_MESSAGE = 1
 VALUE_STATE_TABLE = 2
 TEXT_STATE_TABLE = 3
 CLOUD_DNS_HOST = "dns.loxonecloud.com"
@@ -193,6 +200,10 @@ class LoxoneConnectionError(LoxoneError):
     """Raised when the Miniserver cannot be reached."""
 
 
+class _LoxoneWebSocketConnectionError(LoxoneConnectionError):
+    """Raised when opening the websocket fails before authentication."""
+
+
 class LoxoneAuthenticationError(LoxoneError):
     """Raised when Loxone rejects credentials or token auth."""
 
@@ -249,10 +260,6 @@ class LoxoneBridge:
         self.use_loxone_icons: bool = bool(
             data.get(CONF_USE_LOXONE_ICONS, DEFAULT_USE_LOXONE_ICONS)
         )
-        if not self.use_tls:
-            raise LoxoneUnsupportedError(
-                "Legacy non-TLS Miniservers are intentionally not enabled in this integration."
-            )
 
         self.serial: str = str(data.get(CONF_SERIAL, "unknown"))
         self.loxapp_version: str = str(data.get(CONF_LOXAPP_VERSION, ""))
@@ -280,6 +287,8 @@ class LoxoneBridge:
         self._session: ClientSession = async_get_clientsession(
             hass, verify_ssl=self.verify_ssl
         )
+        self._legacy_client: ClientSession | None = None
+        self._legacy_session: LegacySession | None = None
         self._ws = None
         self._pending_response: asyncio.Future[str] | None = None
         self._pending_header: PendingHeader | None = None
@@ -293,11 +302,29 @@ class LoxoneBridge:
         self._closing = False
         self._unavailable_logged = False
 
-    async def async_initialize(self) -> None:
-        """Open the websocket, authenticate and load structure."""
+    async def async_initialize(self, *, probe_legacy: bool = False) -> None:
+        """Connect and load structure, optionally detecting the legacy transport."""
         _LOGGER.debug("Loxone bridge: initialize start")
-        await self._ensure_connected(load_structure=True)
+        await self._ensure_connected(load_structure=True, probe_legacy=probe_legacy)
         _LOGGER.debug("Loxone bridge: initialize complete")
+
+    async def _async_probe_legacy_endpoint(self) -> Mapping[str, Any] | None:
+        """Identify a legacy endpoint without attempting authentication over HTTP."""
+        if "@" in self.host:
+            # An embedded username or password would turn this into an authenticated request.
+            return None
+
+        url = f"http://{self.host}:{self.port}{self._ws_path_prefix}{PROBE_PATH}"
+        try:
+            # A fresh session keeps cookies from the shared Home Assistant session out of the probe.
+            async with ClientSession() as session:
+                payload = await asyncio.wait_for(
+                    _fetch_probe_payload(session, url, ssl=False, allow_redirects=False),
+                    timeout=LEGACY_PROBE_TIMEOUT,
+                )
+        except (ClientError, TimeoutError, OSError, ValueError):
+            return None
+        return _parse_legacy_probe(payload)
 
     async def async_shutdown(self) -> None:
         """Stop tasks and close the websocket."""
@@ -487,47 +514,119 @@ class LoxoneBridge:
                 for key in SYSTEM_STATS_COMMANDS
             }
 
-    async def _ensure_connected(self, load_structure: bool = False) -> None:
+    async def _ensure_connected(
+        self, load_structure: bool = False, *, probe_legacy: bool = False
+    ) -> None:
         async with self._connect_lock:
+            if self._closing:
+                raise LoxoneConnectionError("The Loxone bridge is shutting down.")
             if self._ws is not None and not self._ws.closed:
                 if load_structure and self.structure is None:
                     await self._load_structure()
                 return
 
-            await self._connect(load_structure=load_structure)
+            if self._reader_task is not None:
+                await self._cleanup_connection(cancel_reconnect=False)
+            await self._connect(load_structure=load_structure, probe_legacy=probe_legacy)
 
-    async def _connect(self, load_structure: bool) -> None:
-        scheme = "wss" if self.use_tls else "ws"
-        ssl = None if self.verify_ssl else False
+    async def _open_websocket(self, session: ClientSession, *, use_tls: bool) -> None:
+        scheme = "wss" if use_tls else "ws"
+        ssl_verification = None if self.verify_ssl else False
         url = f"{scheme}://{self.host}:{self.port}{self._ws_path_prefix}{WS_PATH}"
 
         _LOGGER.debug("Connecting to Loxone websocket")
         try:
-            self._ws = await self._session.ws_connect(
+            websocket = await session.ws_connect(
                 url,
                 protocols=("remotecontrol",),
-                ssl=ssl,
+                ssl=ssl_verification,
                 heartbeat=None,
             )
         except (ClientError, TimeoutError, OSError) as err:
-            raise LoxoneConnectionError(
+            raise _LoxoneWebSocketConnectionError(
                 "Could not connect to the configured Loxone host."
             ) from err
+        if self._closing:
+            await websocket.close()
+            raise LoxoneConnectionError("The Loxone bridge is shutting down.")
+        self._ws = websocket
         _LOGGER.debug("Loxone bridge: websocket connected")
 
-        self._pending_header = None
-        self._reader_task = self.hass.async_create_background_task(
-            self._reader_loop(),
-            "loxone_ws_reader",
-        )
-        self._keepalive_task = self.hass.async_create_background_task(
-            self._keepalive_loop(),
-            "loxone_keepalive",
-        )
+    async def _open_legacy_websocket(self, expected_serial: str | None) -> LegacySession:
+        if "@" in self.host:
+            raise LoxoneConnectionError("Enter the Miniserver hostname without credentials.")
 
+        # Keep the credentials and cookies of the shared HA session out of HTTP and WS.
+        client = self._legacy_client = ClientSession()
+        url = f"http://{self.host}:{self.port}{self._ws_path_prefix}{LEGACY_CERTIFICATE_PATH}"
         try:
+            async with asyncio.timeout(LEGACY_CERTIFICATE_TIMEOUT):
+                async with client.get(url, allow_redirects=False) as response:
+                    if response.status != 200:
+                        raise LoxoneUnsupportedError(
+                            "The Gen1 Miniserver did not provide a verifiable certificate chain."
+                        )
+                    certificate = await response.text()
+        except (ClientError, TimeoutError, OSError, ValueError) as err:
+            raise LoxoneConnectionError("Could not read the Gen1 Miniserver certificate.") from err
+
+        # Firmware may return the PEM directly or put it in an LL JSON envelope.
+        try:
+            if not certificate.lstrip().startswith("-----BEGIN CERTIFICATE-----"):
+                certificate = _parse_loxone_command_payload(certificate, LEGACY_CERTIFICATE_PATH)[
+                    "value"
+                ]
+            if not isinstance(certificate, str):
+                raise LegacyCryptoError("Expected a PEM certificate chain.")
+            legacy_session = LegacySession.from_certificate_chain(
+                certificate, expected_serial=expected_serial
+            )
+        except (LegacyCryptoError, LoxoneConnectionError, LoxoneAuthenticationError) as err:
+            raise LoxoneUnsupportedError(
+                "The Gen1 Miniserver certificate could not be verified."
+            ) from err
+
+        await self._open_websocket(client, use_tls=False)
+        return legacy_session
+
+    async def _connect(self, load_structure: bool, *, probe_legacy: bool = False) -> None:
+        legacy_session = None
+        try:
+            if self.use_tls:
+                try:
+                    await self._open_websocket(self._session, use_tls=True)
+                except _LoxoneWebSocketConnectionError as err:
+                    if not probe_legacy or isinstance(
+                        err.__cause__, ssl.SSLCertVerificationError
+                    ):
+                        raise
+                    metadata = await self._async_probe_legacy_endpoint()
+                    if metadata is None:
+                        raise
+                    version = _extract_software_version(metadata)
+                    _ensure_supported_miniserver_version(version)
+                    legacy_session = await self._open_legacy_websocket(
+                        _normalize_mac(self.serial) or _normalize_mac(str(metadata["snr"]))
+                    )
+                    self.software_version = version
+                    self.use_tls = False
+            else:
+                legacy_session = await self._open_legacy_websocket(_normalize_mac(self.serial))
+
+            self._pending_header = None
+            self._reader_task = self.hass.async_create_background_task(
+                self._reader_loop(), "loxone_ws_reader"
+            )
+            self._keepalive_task = self.hass.async_create_background_task(
+                self._keepalive_loop(), "loxone_keepalive"
+            )
+
             _LOGGER.debug("Loxone bridge: authenticate start")
-            await self._authenticate()
+            if legacy_session is None:
+                await self._authenticate()
+            else:
+                challenge = await self._exchange_legacy_key(legacy_session)
+                await self._authenticate(legacy_challenge=challenge)
             _LOGGER.debug("Loxone bridge: authenticate complete")
             if load_structure or self.structure is None:
                 _LOGGER.debug("Loxone bridge: loading structure")
@@ -544,22 +643,41 @@ class LoxoneBridge:
                 ensure_connected=False,
             )
             self._ensure_system_stats_task()
-        except Exception:
-            # During initial setup errors we explicitly avoid background reconnect
-            # loops, because they can block HA startup and keep stale tasks alive.
-            await self._cleanup_connection(cancel_reconnect=True)
+        except (Exception, asyncio.CancelledError):
+            await self._cleanup_connection(cancel_reconnect=False)
             raise
 
         self._mark_available()
 
-    async def _authenticate(self) -> None:
+    async def _exchange_legacy_key(self, session: LegacySession) -> bytes:
+        try:
+            response = await self._send_loxone_command(
+                session.key_exchange_command(), ensure_connected=False
+            )
+            challenge = bytes.fromhex(session.decrypt_response(response["value"]))
+        except (TypeError, ValueError) as err:
+            raise LoxoneConnectionError("The Gen1 Miniserver rejected the key exchange.") from err
+        if not challenge or response["code"] != 200:
+            raise LoxoneConnectionError("The Gen1 Miniserver returned an invalid key challenge.")
+        self._legacy_session = session
+        return challenge
+
+    async def _authenticate(self, *, legacy_challenge: bytes | None = None) -> None:
         auth_username = _auth_path_segment(self.username)
         encoded_username = quote(auth_username, safe="")
-        if self.token and not self._token_expired():
+        legacy = legacy_challenge is not None
+        software_version = parse_miniserver_version(self.software_version)
+        if self.token and not self._token_expired() and (not legacy or software_version):
+            token_proof = self.token
+            if legacy:
+                # Loxone's SDK uses SHA256 for token challenges starting in firmware 10.4.
+                algorithm = hashlib.sha256 if software_version >= (10, 4) else hashlib.sha1
+                token_proof = hmac.new(legacy_challenge, self.token.encode(), algorithm).hexdigest()
             try:
                 await self._send_loxone_command(
-                    f"authwithtoken/{quote(self.token, safe='')}/{encoded_username}",
+                    f"authwithtoken/{quote(token_proof, safe='')}/{encoded_username}",
                     ensure_connected=False,
+                    encrypt_response=legacy,
                 )
                 return
             except LoxoneAuthenticationError:
@@ -572,34 +690,41 @@ class LoxoneBridge:
             ensure_connected=False,
         )
         value = _ensure_mapping(key_response.get("value"))
-        key = str(value["key"])
-        salt = str(value["salt"])
-        hash_algorithm = str(value.get("hashAlg", "SHA256")).upper()
-        password_hash = _hash_password(self.password, salt, hash_algorithm)
-        final_hash = _hmac_user_hash(auth_username, password_hash, key, hash_algorithm)
-
-        token_response: dict[str, Any]
+        hash_algorithm = str(value.get("hashAlg") or ("SHA1" if legacy else "SHA256")).upper()
         try:
-            token_response = await self._send_loxone_command(
-                "jdev/sys/getjwt/"
-                f"{final_hash}/{encoded_username}/{APP_PERMISSION}/"
-                f"{quote(self.client_uuid, safe='-')}/{quote(CLIENT_INFO, safe='')}",
-                ensure_connected=False,
+            password_hash = _hash_password(self.password, str(value["salt"]), hash_algorithm)
+            final_hash = _hmac_user_hash(
+                auth_username, password_hash, str(value["key"]), hash_algorithm
             )
-        except LoxoneAuthenticationError:
-            _LOGGER.info(
-                "JWT auth with app permission failed, falling back to web permission."
-            )
-            token_response = await self._send_loxone_command(
-                "jdev/sys/getjwt/"
-                f"{final_hash}/{encoded_username}/{WEB_PERMISSION}/"
-                f"{quote(self.client_uuid, safe='-')}/{quote(CLIENT_INFO, safe='')}",
-                ensure_connected=False,
-            )
+        except (KeyError, ValueError) as err:
+            raise LoxoneConnectionError(
+                "The Miniserver returned an invalid password challenge."
+            ) from err
+
+        client_uuid = self.client_uuid
+        if legacy:
+            parts = client_uuid.split("-")
+            if len(parts) == 5:
+                client_uuid = "-".join((*parts[:3], parts[3] + parts[4]))
+        for permission in (APP_PERMISSION, WEB_PERMISSION):
+            try:
+                token_response = await self._send_loxone_command(
+                    "jdev/sys/getjwt/"
+                    f"{final_hash}/{encoded_username}/{permission}/"
+                    f"{quote(client_uuid, safe='-')}/{quote(CLIENT_INFO, safe='')}",
+                    ensure_connected=False,
+                    encrypt_response=legacy,
+                )
+            except LoxoneAuthenticationError:
+                if permission == WEB_PERMISSION:
+                    raise
+                _LOGGER.info("JWT auth with app permission failed, falling back to web permission.")
+            else:
+                break
 
         token_value = _ensure_mapping(token_response.get("value"))
         token_raw = token_value.get("token")
-        if not token_raw:
+        if not token_raw or (legacy and token_response["code"] != 200):
             raise LoxoneAuthenticationError("Authentication failed.")
         self.token = str(token_raw)
         valid_until = token_value.get("validUntil")
@@ -618,8 +743,15 @@ class LoxoneBridge:
         if not _is_loxapp_structure_payload(structure_payload):
             raise LoxoneConnectionError("Unexpected LoxAPP3.json payload.")
 
-        self.structure = parse_structure(structure_payload)
-        self.serial = self.structure.serial
+        structure = parse_structure(structure_payload)
+        serial = structure.serial
+        if self._legacy_session is not None:
+            certified_serial = self._legacy_session.serial
+            if _normalize_mac(serial) not in (None, certified_serial):
+                raise LoxoneConnectionError("The Gen1 structure does not match its certificate.")
+            serial = certified_serial
+        self.structure = structure
+        self.serial = serial
         self.loxapp_version = self.structure.loxapp_version
         self.server_model = self.structure.server_model
         self.miniserver_name = self.structure.miniserver_name
@@ -646,29 +778,52 @@ class LoxoneBridge:
         return _extract_software_version(_ensure_mapping(response.get("value")))
 
     async def _send_loxone_command(
-        self, command: str, *, ensure_connected: bool = True
+        self, command: str, *, ensure_connected: bool = True, encrypt_response: bool = False
     ) -> dict[str, Any]:
-        raw = await self._send_text_command(command, ensure_connected=ensure_connected)
+        if encrypt_response:
+            raw = await self._send_text_command(
+                command, ensure_connected=ensure_connected, encrypt_response=True
+            )
+        else:
+            raw = await self._send_text_command(command, ensure_connected=ensure_connected)
         return _parse_loxone_command_payload(raw, command)
 
     async def _send_text_command(
-        self, command: str, *, ensure_connected: bool = True
+        self, command: str, *, ensure_connected: bool = True, encrypt_response: bool = False
     ) -> str:
         if ensure_connected:
             await self._ensure_connected(load_structure=False)
-        if self._ws is None or self._ws.closed:
-            raise LoxoneConnectionError("Websocket is not connected.")
-
         async with self._command_lock:
+            websocket = self._ws
+            if websocket is None or websocket.closed:
+                raise LoxoneConnectionError("Websocket is not connected.")
+            legacy_session = self._legacy_session
+            if not self.use_tls and legacy_session is None and not command.startswith(
+                "jdev/sys/keyexchange/"
+            ):
+                raise LoxoneConnectionError("The encrypted Gen1 session is no longer connected.")
             loop = asyncio.get_running_loop()
             self._pending_response = loop.create_future()
             try:
-                await self._ws.send_str(command)
-                return await asyncio.wait_for(self._pending_response, timeout=20)
+                wire_command = command
+                if legacy_session is not None:
+                    wire_command = legacy_session.encrypt_command(
+                        command, encrypt_response=encrypt_response
+                    )
+                await websocket.send_str(wire_command)
+                response = await asyncio.wait_for(self._pending_response, timeout=20)
+                if encrypt_response and legacy_session is not None:
+                    if response.lstrip().startswith("{"):
+                        _raise_for_ll_error_payload(_deserialize_json(response))
+                        raise LoxoneConnectionError("Expected an encrypted Gen1 response.")
+                    return legacy_session.decrypt_response(response)
+                return response
             except asyncio.TimeoutError as err:
                 raise LoxoneConnectionError(
                     "No response for Loxone command."
                 ) from err
+            except (ClientError, LegacyCryptoError, OSError) as err:
+                raise LoxoneConnectionError("Could not complete the Miniserver command.") from err
             finally:
                 self._pending_response = None
 
@@ -683,14 +838,14 @@ class LoxoneBridge:
         except Exception as err:  # noqa: BLE001
             loop_error = err
             _LOGGER.debug("Loxone websocket reader stopped: %s", err)
-        finally:
-            if not self._closing:
-                self._mark_unavailable(
-                    reason="websocket reader stopped",
-                    err=loop_error,
-                )
-                await self._cleanup_connection(cancel_reconnect=False, close_ws=False)
-                self._schedule_reconnect()
+
+        if not self._closing:
+            self._mark_unavailable(
+                reason="websocket reader stopped",
+                err=loop_error,
+            )
+            await self._cleanup_connection(cancel_reconnect=False)
+            self._schedule_reconnect()
 
     async def _handle_ws_message(self, message: WSMessage) -> None:
         if message.type == WSMsgType.TEXT:
@@ -733,7 +888,7 @@ class LoxoneBridge:
             self._merge_changed_states(changed)
             return
 
-        if header.identifier == TEXT_MESSAGE:
+        if header.identifier in (TEXT_MESSAGE, FILE_MESSAGE):
             self._deliver_text(data.decode("utf-8", errors="ignore"))
 
     async def _keepalive_loop(self) -> None:
@@ -774,7 +929,7 @@ class LoxoneBridge:
             while True:
                 if self.available:
                     try:
-                        await self.async_refresh_system_stats(force=True)
+                        await self.async_refresh_system_stats(force=True, ensure_connected=False)
                     except LoxoneError as err:
                         _LOGGER.debug("System diagnostics refresh failed: %s", err)
                 await asyncio.sleep(SYSTEM_STATS_REFRESH_SECONDS)
@@ -782,7 +937,7 @@ class LoxoneBridge:
             raise
 
     def _schedule_reconnect(self) -> None:
-        if self._reconnect_task and not self._reconnect_task.done():
+        if self._closing or (self._reconnect_task and not self._reconnect_task.done()):
             return
         self._reconnect_task = self.hass.async_create_background_task(
             self._reconnect_loop(),
@@ -794,7 +949,7 @@ class LoxoneBridge:
         while not self._closing:
             await asyncio.sleep(delay)
             try:
-                await self._connect(load_structure=self.structure is None)
+                await self._ensure_connected(load_structure=self.structure is None)
             except LoxoneError as err:
                 _LOGGER.debug("Reconnect to Loxone failed: %s", err)
                 delay = min(delay * 2, 60)
@@ -833,15 +988,17 @@ class LoxoneBridge:
     def _token_expired(self) -> bool:
         if not self.token_valid_until:
             return False
-        if str(self.token_valid_until).isdigit():
-            return datetime.fromtimestamp(int(self.token_valid_until), tz=UTC) <= datetime.now(UTC)
+        valid_until = str(self.token_valid_until)
+        now = datetime.now(UTC)
         try:
-            expires = datetime.fromisoformat(self.token_valid_until)
+            if valid_until.isdecimal():
+                return int(valid_until) <= (now - LOXONE_EPOCH).total_seconds()
+            expires = datetime.fromisoformat(valid_until)
         except ValueError:
             return False
         if expires.tzinfo is None:
             expires = expires.replace(tzinfo=UTC)
-        return expires <= datetime.now(UTC)
+        return expires <= now
 
     async def _cleanup_connection(
         self, cancel_reconnect: bool, close_ws: bool = True
@@ -863,11 +1020,18 @@ class LoxoneBridge:
             self._keepalive_waiter.cancel()
         self._keepalive_waiter = None
 
+        if self._pending_response and not self._pending_response.done():
+            self._pending_response.set_exception(LoxoneConnectionError("Websocket is not connected."))
+
         if close_ws and self._ws is not None and not self._ws.closed:
             with contextlib.suppress(ClientError, RuntimeError):
                 await self._ws.close()
 
         self._ws = None
+        self._legacy_session = None
+        if self._legacy_client is not None:
+            legacy_client, self._legacy_client = self._legacy_client, None
+            await legacy_client.close()
         if self._reader_task is current_task:
             self._reader_task = None
         elif self._reader_task and self._reader_task.done():
@@ -1227,30 +1391,21 @@ async def async_discover_miniservers(
     hass: HomeAssistant, timeout: int = DEFAULT_SCAN_TIMEOUT
 ) -> DiscoverySummary:
     """Scan the local network for Loxone Miniservers."""
-    session = async_get_clientsession(hass, verify_ssl=False)
     candidates = _candidate_hosts(await async_get_adapters(hass))
     if not candidates:
         return DiscoverySummary()
 
-    devices = await _async_probe_hosts(
-        session,
-        candidates,
-        timeout=timeout,
-        probe_legacy=False,
-    )
-
-    legacy_found = False
-    if not devices:
-        legacy_results = await _async_probe_hosts(
+    async with ClientSession() as session:
+        devices = await _async_probe_hosts(
             session,
             candidates,
-            timeout=max(1, min(timeout, 2)),
+            timeout=timeout,
             probe_legacy=True,
         )
-        legacy_found = any(not item.use_tls for item in legacy_results)
-
     devices.sort(key=lambda item: item.label.lower())
-    return DiscoverySummary(devices=devices, legacy_found=legacy_found)
+    return DiscoverySummary(
+        devices=devices, legacy_found=any(not item.use_tls for item in devices)
+    )
 
 
 async def _async_probe_hosts(
@@ -1289,28 +1444,27 @@ async def _probe_host(
     *,
     probe_legacy: bool,
 ) -> DiscoveryResult | None:
-    probe_variants = [("https", 443, False)]
+    probe_variants = [("https", 443, timeout)]
     if probe_legacy:
-        probe_variants.append(("http", 80, False))
+        probe_variants.append(("http", 80, min(timeout, LEGACY_PROBE_TIMEOUT)))
 
-    for scheme, port, ssl in probe_variants:
+    for scheme, port, probe_timeout in probe_variants:
         url = f"{scheme}://{host}:{port}{PROBE_PATH}"
+        use_tls = scheme == "https"
         try:
             payload = await asyncio.wait_for(
-                _fetch_probe_payload(session, url, ssl=ssl),
-                timeout=timeout,
+                _fetch_probe_payload(session, url, ssl=False, allow_redirects=use_tls),
+                timeout=probe_timeout,
             )
         except (ClientError, TimeoutError, OSError, ValueError):
             continue
         if payload is None:
             continue
 
-        api_payload = parse_api_key_payload(payload)
+        api_payload = parse_api_key_payload(payload) if use_tls else _parse_legacy_probe(payload)
         if api_payload is None:
             continue
 
-        https_status = int(api_payload.get("httpsStatus", 0) or 0)
-        use_tls = https_status > 0 or scheme == "https"
         version = _extract_software_version(api_payload)
         server_model = detect_server_model_from_mapping(api_payload)
         name = (
@@ -1323,7 +1477,7 @@ async def _probe_host(
         label = _build_discovery_label(str(name), host, server_model)
         return DiscoveryResult(
             host=host,
-            port=443 if use_tls else port,
+            port=port,
             use_tls=use_tls,
             label=label,
             server_model=server_model,
@@ -1332,8 +1486,26 @@ async def _probe_host(
     return None
 
 
-async def _fetch_probe_payload(session: ClientSession, url: str, *, ssl: bool) -> Any | None:
-    async with session.get(url, ssl=ssl) as response:
+def _parse_legacy_probe(payload: Any) -> Mapping[str, Any] | None:
+    """Require a successful Loxone response identifying a non-TLS device."""
+    api_payload = parse_api_key_payload(payload)
+    if api_payload is None:
+        return None
+    root = payload["LL"]
+    if (
+        _coerce_response_code(root.get("Code") or root.get("code")) == 200
+        and _normalize_mac(str(api_payload.get("snr") or "")) is not None
+        and parse_miniserver_version(_extract_software_version(api_payload)) is not None
+        and api_payload.get("httpsStatus") in (None, 0, "0")
+    ):
+        return api_payload
+    return None
+
+
+async def _fetch_probe_payload(
+    session: ClientSession, url: str, *, ssl: bool, allow_redirects: bool = True
+) -> Any | None:
+    async with session.get(url, ssl=ssl, allow_redirects=allow_redirects) as response:
         if response.status != 200:
             return None
         return await response.json(content_type=None)

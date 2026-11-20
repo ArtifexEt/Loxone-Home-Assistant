@@ -133,6 +133,11 @@ def intercom_auth_credentials(bridge) -> tuple[str | None, str]:
     """Return HTTP auth for the Intercom camera itself."""
     configured_username = _coerce_text(getattr(bridge, "intercom_username", None))
     configured_password = getattr(bridge, "intercom_password", None)
+    if not getattr(bridge, "use_tls", True):
+        if configured_username is None or configured_password is None:
+            return None, ""
+        return configured_username, str(configured_password)
+
     default_username = _coerce_text(getattr(bridge, "username", None))
     default_password = getattr(bridge, "password", None)
 
@@ -147,11 +152,24 @@ def intercom_auth_credentials(bridge) -> tuple[str | None, str]:
 
 def miniserver_auth_credentials(bridge) -> tuple[str | None, str]:
     """Return HTTP auth for Miniserver-served image endpoints."""
+    if not getattr(bridge, "use_tls", True):
+        return None, ""
     username = _coerce_text(getattr(bridge, "username", None))
     if username is None:
         return None, ""
     password = getattr(bridge, "password", None)
     return username, "" if password is None else str(password)
+
+
+def get_media_response(bridge, session, url: str, auth: BasicAuth | None):
+    """Open a media request without accepting URL credentials on a Gen1 connection."""
+    if getattr(bridge, "use_tls", True):
+        return session.get(url, auth=auth)
+
+    parts = urlsplit(url)
+    if parts.username is not None:
+        url = parts._replace(netloc=parts.netloc.rsplit("@", 1)[-1]).geturl()
+    return session.get(url, auth=auth, allow_redirects=False)
 
 
 def intercom_stream_url(
@@ -629,9 +647,11 @@ async def _async_fetch_json(bridge, url: str) -> Any | None:
     if session is None:
         return None
 
-    request_auth = _request_auth_for_url(bridge, url)
+    request_auth = intercom_request_auth(bridge, url)
     try:
-        async with session.get(url, auth=request_auth) as response:
+        async with get_media_response(bridge, session, url, request_auth) as response:
+            if not getattr(bridge, "use_tls", True) and 300 <= response.status < 400:
+                return None
             response.raise_for_status()
             response_json = getattr(response, "json", None)
             if callable(response_json):
@@ -652,7 +672,8 @@ async def _async_fetch_json(bridge, url: str) -> Any | None:
         return None
 
 
-def _request_auth_for_url(bridge, url: str) -> BasicAuth | None:
+def intercom_request_auth(bridge, url: str) -> BasicAuth | None:
+    """Choose credentials for a Miniserver proxy or a direct Intercom URL."""
     if _is_miniserver_url(bridge, url):
         username, password = miniserver_auth_credentials(bridge)
     else:

@@ -7,20 +7,12 @@ import logging
 from collections.abc import Mapping
 from enum import IntFlag
 from typing import Any
-from urllib.parse import urlsplit
 
 try:
-    from aiohttp import BasicAuth, ClientError, web
+    from aiohttp import ClientError, web
 except ImportError:  # pragma: no cover - fallback for lightweight test stubs
     class ClientError(Exception):
         """Fallback network error type used in tests without aiohttp."""
-
-    class BasicAuth:  # type: ignore[no-redef]
-        """Fallback auth container used in tests without aiohttp."""
-
-        def __init__(self, login: str, password: str) -> None:
-            self.login = login
-            self.password = password
 
     class _FallbackResponse:
         def __init__(
@@ -76,13 +68,13 @@ from .intercom_media import (
     LAST_BELL_EVENTS_DETAIL_PATHS,
     SNAPSHOT_DETAIL_PATHS,
     STREAM_DETAIL_PATHS,
-    intercom_auth_credentials,
+    get_media_response,
     intercom_history_image_url,
     intercom_last_bell_events,
+    intercom_request_auth,
     intercom_selected_history_timestamp,
     intercom_snapshot_url,
     intercom_stream_url,
-    miniserver_auth_credentials,
 )
 from .models import LoxoneControl
 from .runtime import entry_bridge
@@ -204,9 +196,9 @@ class LoxoneIntercomCameraEntity(LoxoneEntity, Camera):
         if session is None:
             return _web_response(status=503)
 
-        request_auth = self._request_auth_for_url(stream_url)
+        request_auth = intercom_request_auth(self.bridge, stream_url)
         try:
-            async with session.get(stream_url, auth=request_auth) as upstream:
+            async with get_media_response(self.bridge, session, stream_url, request_auth) as upstream:
                 if upstream.status != 200 or web is None:
                     return _web_response(status=upstream.status)
 
@@ -309,9 +301,11 @@ class LoxoneIntercomCameraEntity(LoxoneEntity, Camera):
         if session is None:
             return None
 
-        request_auth = self._request_auth_for_url(image_url)
+        request_auth = intercom_request_auth(self.bridge, image_url)
         try:
-            async with session.get(image_url, auth=request_auth) as response:
+            async with get_media_response(self.bridge, session, image_url, request_auth) as response:
+                if not getattr(self.bridge, "use_tls", True) and 300 <= response.status < 400:
+                    return None
                 response.raise_for_status()
                 content_type = _response_content_type(response)
                 if content_type == "multipart/x-mixed-replace":
@@ -335,32 +329,6 @@ class LoxoneIntercomCameraEntity(LoxoneEntity, Camera):
                 err,
             )
         return None
-
-    def _request_auth_for_url(self, url: str) -> BasicAuth | None:
-        if self._is_miniserver_url(url):
-            username, password = miniserver_auth_credentials(self.bridge)
-        else:
-            username, password = intercom_auth_credentials(self.bridge)
-        if username is None:
-            return None
-        return BasicAuth(username, password)
-
-    def _is_miniserver_url(self, url: str) -> bool:
-        parsed = urlsplit(url)
-        if not parsed.hostname:
-            return False
-        if "/proxy/" in parsed.path:
-            return True
-
-        if parsed.hostname != str(getattr(self.bridge, "host", "")):
-            return False
-
-        bridge_port = int(getattr(self.bridge, "port", 0) or 0)
-        if parsed.port is not None:
-            return parsed.port == bridge_port
-
-        default_port = 443 if bool(getattr(self.bridge, "use_tls", True)) else 80
-        return bridge_port == default_port
 
     async def _ensure_secured_details_loaded(self) -> None:
         if self._secured_details_loaded:

@@ -68,7 +68,6 @@ class LoxoneCommunityConfigFlow(ConfigFlow, domain=DOMAIN):
     def __init__(self) -> None:
         self._auth_data: dict[str, Any] = {}
         self._devices: list[DiscoveryResult] = []
-        self._legacy_found = False
         self._pending_entry_data: dict[str, Any] | None = None
         self._pending_entry_title: str | None = None
         self._setup_options: dict[str, bool] = {
@@ -81,9 +80,14 @@ class LoxoneCommunityConfigFlow(ConfigFlow, domain=DOMAIN):
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        if self._pending_entry_data is None:
-            return await self.async_step_auto()
+        return self.async_show_menu(
+            step_id="user",
+            menu_options=["auto", "manual"],
+        )
 
+    async def async_step_finish(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
         if user_input is not None:
             self._setup_options = {
                 CONF_ENABLE_LIGHT_MOOD_SELECT: _coerce_bool(
@@ -126,11 +130,10 @@ class LoxoneCommunityConfigFlow(ConfigFlow, domain=DOMAIN):
                 self.hass, timeout=DEFAULT_SCAN_TIMEOUT
             )
             self._devices = discovery.devices
-            self._legacy_found = discovery.legacy_found
             _LOGGER.debug(
                 "Loxone flow: discovery completed devices=%s legacy_found=%s",
                 len(self._devices),
-                self._legacy_found,
+                discovery.legacy_found,
             )
 
             if len(self._devices) == 1:
@@ -138,7 +141,7 @@ class LoxoneCommunityConfigFlow(ConfigFlow, domain=DOMAIN):
             if len(self._devices) > 1:
                 return await self.async_step_select()
 
-            errors["base"] = "legacy_not_supported" if self._legacy_found else "no_device_found"
+            errors["base"] = "no_device_found"
             return await self.async_step_manual(errors=errors)
 
         return self._async_show_auto_form(errors=errors)
@@ -191,7 +194,7 @@ class LoxoneCommunityConfigFlow(ConfigFlow, domain=DOMAIN):
 
     def _async_show_setup_form(self) -> ConfigFlowResult:
         return self.async_show_form(
-            step_id="user",
+            step_id="finish",
             data_schema=vol.Schema(
                 {
                     vol.Required(
@@ -344,7 +347,13 @@ class LoxoneCommunityConfigFlow(ConfigFlow, domain=DOMAIN):
             )
 
         await self.async_set_unique_id(info[CONF_SERIAL])
-        self._abort_if_unique_id_configured(updates={CONF_HOST: device.host, CONF_PORT: device.port})
+        self._abort_if_unique_id_configured(
+            updates={
+                CONF_HOST: device.host,
+                CONF_PORT: device.port,
+                CONF_USE_TLS: info[CONF_USE_TLS],
+            }
+        )
 
         self._pending_entry_title = _normalize_entry_title(info["title"])
         self._pending_entry_data = {
@@ -354,6 +363,7 @@ class LoxoneCommunityConfigFlow(ConfigFlow, domain=DOMAIN):
             CONF_LOXAPP_VERSION: info[CONF_LOXAPP_VERSION],
             CONF_SOFTWARE_VERSION: info[CONF_SOFTWARE_VERSION],
             CONF_SERVER_MODEL: info[CONF_SERVER_MODEL],
+            CONF_USE_TLS: info[CONF_USE_TLS],
             CONF_TOKEN: info.get(CONF_TOKEN),
             CONF_TOKEN_VALID_UNTIL: info.get(CONF_TOKEN_VALID_UNTIL),
         }
@@ -384,6 +394,7 @@ class LoxoneCommunityOptionsFlow(OptionsFlow):
         config_entry = _resolve_options_config_entry(self)
         entry_data = _coerce_mapping(config_entry.data if config_entry else None)
         entry_options = _coerce_mapping(config_entry.options if config_entry else None)
+        stored = {**entry_data, **entry_options}
 
         if user_input is not None:
             options = dict(user_input)
@@ -393,9 +404,12 @@ class LoxoneCommunityOptionsFlow(OptionsFlow):
             # Keep currently stored Intercom password when left empty.
             if not options.get(CONF_INTERCOM_PASSWORD):
                 options.pop(CONF_INTERCOM_PASSWORD, None)
-            merged = {**entry_data, **entry_options, **options}
+            merged = {**stored, **options}
+            if any(merged.get(key) != stored.get(key) for key in (CONF_HOST, CONF_PORT)):
+                # Detect the transport again when the connection target changes.
+                merged[CONF_USE_TLS] = True
             try:
-                await _async_validate_input(self.hass, merged)
+                info = await _async_validate_input(self.hass, merged)
             except LoxoneVersionUnsupportedError:
                 errors["base"] = "unsupported_version"
             except LoxoneAuthenticationError:
@@ -405,10 +419,10 @@ class LoxoneCommunityOptionsFlow(OptionsFlow):
             except LoxoneConnectionError:
                 errors["base"] = "cannot_connect"
             else:
+                options[CONF_USE_TLS] = info[CONF_USE_TLS]
                 return self.async_create_entry(title="", data=options)
 
-        data = {**entry_data, **entry_options}
-        form_data = {**data, **(user_input or {})}
+        form_data = {**stored, **(user_input or {})}
         host_default = _coerce_text(form_data.get(CONF_HOST), "")
         port_default = _coerce_int(form_data.get(CONF_PORT), DEFAULT_PORT)
         username_default = _coerce_text(form_data.get(CONF_USERNAME), "")
@@ -498,7 +512,7 @@ async def _async_validate_input(hass, data: dict[str, Any]) -> dict[str, Any]:
     bridge = LoxoneBridge(hass, data)
     try:
         _LOGGER.debug("Loxone flow: bridge initialize start")
-        await bridge.async_initialize()
+        await bridge.async_initialize(probe_legacy=True)
         _LOGGER.debug("Loxone flow: bridge initialize done")
         return {
             "title": bridge.miniserver_name,
@@ -507,6 +521,7 @@ async def _async_validate_input(hass, data: dict[str, Any]) -> dict[str, Any]:
             CONF_LOXAPP_VERSION: bridge.loxapp_version,
             CONF_SOFTWARE_VERSION: bridge.software_version,
             CONF_SERVER_MODEL: bridge.server_model,
+            CONF_USE_TLS: bridge.use_tls,
             CONF_TOKEN: bridge.token,
             CONF_TOKEN_VALID_UNTIL: bridge.token_valid_until,
         }

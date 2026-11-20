@@ -6,6 +6,7 @@ import sys
 import types
 import unittest
 from dataclasses import dataclass
+from unittest.mock import AsyncMock, patch
 
 from tests._loader import load_integration_module
 
@@ -65,6 +66,9 @@ def _install_homeassistant_stubs() -> None:
             del kwargs
 
         def async_show_form(self, **kwargs):
+            return kwargs
+
+        def async_show_menu(self, **kwargs):
             return kwargs
 
         def async_create_entry(self, **kwargs):
@@ -165,7 +169,8 @@ def _install_config_flow_dependency_stubs() -> None:
         def __init__(self, hass, data) -> None:
             del hass, data
 
-        async def async_initialize(self) -> None:
+        async def async_initialize(self, *, probe_legacy: bool = False) -> None:
+            del probe_legacy
             return None
 
         async def async_shutdown(self) -> None:
@@ -289,6 +294,22 @@ def _schema_defaults(schema) -> dict[str, object]:
     }
 
 
+def _connected_bridge(*, use_tls: bool):
+    return types.SimpleNamespace(
+        async_initialize=AsyncMock(),
+        async_shutdown=AsyncMock(),
+        miniserver_name="Workshop",
+        serial="504F94000000",
+        client_uuid="integration-client",
+        loxapp_version="1.0",
+        software_version="15.5.0.0",
+        server_model="Miniserver",
+        use_tls=use_tls,
+        token="test-token",
+        token_valid_until=None,
+    )
+
+
 class ConfigFlowFormTests(unittest.TestCase):
     """Verify exposed config flow fields."""
 
@@ -317,9 +338,115 @@ class ConfigFlowFormTests(unittest.TestCase):
         result = flow._async_show_setup_form()
         defaults = _schema_defaults(result["data_schema"])
 
+        self.assertEqual(result["step_id"], "finish")
         self.assertEqual(defaults["enable_light_mood_select"], True)
         self.assertEqual(defaults["expose_controller_child_lights"], True)
         self.assertEqual(defaults["use_loxone_icons"], False)
+
+
+class ConnectionConfigFlowTests(unittest.IsolatedAsyncioTestCase):
+    """Verify the setup routes and persisted connection mode."""
+
+    async def test_manual_entry_is_available_without_running_discovery(self) -> None:
+        flow = config_flow.LoxoneCommunityConfigFlow()
+        flow.hass = object()
+
+        with patch.object(config_flow, "async_discover_miniservers", new_callable=AsyncMock) as discover:
+            menu = await flow.async_step_user()
+            form = await flow.async_step_manual()
+
+        self.assertEqual(menu, {"step_id": "user", "menu_options": ["auto", "manual"]})
+        self.assertEqual(form["step_id"], "manual")
+        discover.assert_not_awaited()
+
+    async def test_manual_gen1_setup_persists_validated_transport_and_port(self) -> None:
+        flow = config_flow.LoxoneCommunityConfigFlow()
+        flow.hass = object()
+        bridge = _connected_bridge(use_tls=False)
+        host = "miniserver.local"
+
+        with patch.object(config_flow, "LoxoneBridge", return_value=bridge) as bridge_factory:
+            form = await flow.async_step_manual(
+                {"host": host, "port": 7778, "username": "loxone", "password": "password"}
+            )
+            entry = await flow.async_step_finish({})
+
+        self.assertTrue(bridge_factory.call_args.args[1]["use_tls"])
+        bridge.async_initialize.assert_awaited_once_with(probe_legacy=True)
+        self.assertEqual(form["step_id"], "finish")
+        self.assertFalse(entry["data"]["use_tls"])
+        self.assertEqual(entry["data"]["host"], host)
+        self.assertEqual(entry["data"]["port"], 7778)
+
+    async def test_automatic_setup_connects_to_discovered_gen1(self) -> None:
+        flow = config_flow.LoxoneCommunityConfigFlow()
+        flow.hass = object()
+        bridge = _connected_bridge(use_tls=False)
+        result = config_flow.DiscoveryResult(
+            host="miniserver.local", port=80, use_tls=False, label="Workshop"
+        )
+        discovery = AsyncMock(return_value=types.SimpleNamespace(devices=[result], legacy_found=True))
+
+        with (
+            patch.object(config_flow, "async_discover_miniservers", discovery),
+            patch.object(config_flow, "LoxoneBridge", return_value=bridge) as bridge_factory,
+        ):
+            await flow.async_step_auto({"username": "loxone", "password": "password"})
+            entry = await flow.async_step_finish({})
+
+        self.assertFalse(bridge_factory.call_args.args[1]["use_tls"])
+        self.assertFalse(entry["data"]["use_tls"])
+        self.assertEqual(entry["data"]["port"], 80)
+
+    async def test_manual_legacy_error_keeps_configured_port(self) -> None:
+        flow = config_flow.LoxoneCommunityConfigFlow()
+        flow.hass = object()
+        bridge = types.SimpleNamespace(
+            async_initialize=AsyncMock(side_effect=config_flow.LoxoneUnsupportedError),
+            async_shutdown=AsyncMock(),
+        )
+        host = "miniserver.local"
+
+        with patch.object(config_flow, "LoxoneBridge", return_value=bridge) as bridge_factory:
+            result = await flow.async_step_manual(
+                {"host": host, "port": 7778, "username": "loxone", "password": "password"}
+            )
+
+        self.assertEqual(bridge_factory.call_args.args[1]["port"], 7778)
+        bridge.async_initialize.assert_awaited_once_with(probe_legacy=True)
+        bridge.async_shutdown.assert_awaited_once_with()
+        self.assertEqual(result["step_id"], "manual")
+        self.assertEqual(result["errors"], {"base": "legacy_not_supported"})
+        defaults = _schema_defaults(result["data_schema"])
+        self.assertEqual(defaults["host"], host)
+        self.assertEqual(defaults["port"], 7778)
+
+    async def test_options_persist_transport_and_redetect_on_endpoint_change(self) -> None:
+        for old_tls, port, expected_initial_tls, new_tls in (
+            (False, 7778, False, False),
+            (False, 443, True, True),
+            (True, 7778, True, False),
+        ):
+            with self.subTest(old_tls=old_tls, port=port):
+                config_entry = types.SimpleNamespace(
+                    data={
+                        "host": "miniserver.local",
+                        "port": 7778 if not old_tls else 443,
+                        "username": "loxone",
+                        "password": "password",
+                    },
+                    options={"use_tls": old_tls},
+                )
+                flow = config_flow.LoxoneCommunityOptionsFlow(config_entry)
+                flow.hass = object()
+                bridge = _connected_bridge(use_tls=new_tls)
+
+                with patch.object(config_flow, "LoxoneBridge", return_value=bridge) as bridge_factory:
+                    result = await flow.async_step_init({"port": port})
+
+                self.assertIs(bridge_factory.call_args.args[1]["use_tls"], expected_initial_tls)
+                bridge.async_initialize.assert_awaited_once_with(probe_legacy=True)
+                self.assertEqual(result["data"], {"port": port, "use_tls": new_tls})
 
 
 if __name__ == "__main__":

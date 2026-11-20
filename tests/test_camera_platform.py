@@ -152,11 +152,13 @@ class _FakeSession:
         self.responses = responses or {}
         self.calls: list[tuple[str, bool]] = []
         self.auth_logins: list[str | None] = []
+        self.allow_redirects: list[bool] = []
 
-    def get(self, url: str, auth=None):
+    def get(self, url: str, auth=None, *, allow_redirects=True):
         has_auth = auth is not None
         self.calls.append((url, has_auth))
         self.auth_logins.append(getattr(auth, "login", None) if has_auth else None)
+        self.allow_redirects.append(allow_redirects)
         response_data = self.responses.get((url, has_auth), (200, b"default-image", "image/jpeg"))
         if len(response_data) == 2:
             status, payload = response_data
@@ -647,11 +649,54 @@ class CameraPlatformTests(unittest.IsolatedAsyncioTestCase):
         bridge = _FakeBridge([control], {}, _FakeSession())
         bridge.intercom_username = "camuser"
         bridge.intercom_password = "campass"
-        entity = LoxoneIntercomCameraEntity(bridge, control)
-
-        auth = entity._request_auth_for_url("https://camera.local/proxy/device-uuid/images/1.jpg")
+        auth = media_module.intercom_request_auth(
+            bridge, "https://camera.local/proxy/device-uuid/images/1.jpg"
+        )
 
         self.assertEqual(getattr(auth, "login", None), "user")
+
+    async def test_gen1_proxy_snapshot_uses_no_auth_and_does_not_follow_redirects(self) -> None:
+        url = "http://mini.local:7778/proxy/device-uuid/images/1.jpg"
+        control = LoxoneControl(
+            uuid="intercom-uuid",
+            uuid_action="intercom-action",
+            name="Furtka",
+            type="Intercom",
+            states={},
+            details={"videoInfo": {"liveImageUrl": url}},
+        )
+        session = _FakeSession({(url, False): (302, b"redirect")})
+        bridge = _FakeBridge([control], {}, session, port=7778, use_tls=False)
+        bridge.intercom_username = "camuser"
+        bridge.intercom_password = "campass"
+        entity = LoxoneIntercomCameraEntity(bridge, control)
+
+        self.assertIsNone(await entity.async_camera_image())
+        self.assertEqual(session.calls, [(url, False)])
+        self.assertEqual(session.allow_redirects, [False])
+
+    async def test_gen1_direct_snapshot_uses_only_dedicated_credentials(self) -> None:
+        camera_url = "http://camera.local/snapshot.jpg"
+        control = LoxoneControl(
+            uuid="intercom-uuid",
+            uuid_action="intercom-action",
+            name="Furtka",
+            type="Intercom",
+            states={},
+            details={"videoInfo": {"liveImageUrl": "http://user:pass@camera.local/snapshot.jpg"}},
+        )
+        session = _FakeSession()
+        bridge = _FakeBridge([control], {}, session, port=7778, use_tls=False)
+        bridge.intercom_username = "camuser"
+        entity = LoxoneIntercomCameraEntity(bridge, control)
+
+        await entity.async_camera_image()
+        bridge.intercom_password = "campass"
+        await entity.async_camera_image()
+
+        self.assertEqual(session.calls, [(camera_url, False), (camera_url, True)])
+        self.assertEqual(session.auth_logins, [None, "camuser"])
+        self.assertEqual(session.allow_redirects, [False, False])
 
 
 if __name__ == "__main__":

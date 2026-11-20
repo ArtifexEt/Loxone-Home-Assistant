@@ -48,6 +48,7 @@ from .intercom import (
     is_intercom_control,
     resolve_intercom_command,
 )
+from .intercom_media import get_media_response
 from .media_player import build_audio_tts_command, resolve_audio_tts_target_uuid_action
 from .models import LoxoneControl
 from .runtime import bridges_by_entry_id, remove_entry_bridge, set_entry_bridge
@@ -563,10 +564,10 @@ async def _async_fetch_icon_payload(
     if session is None:
         return None
 
-    auth = BasicAuth(bridge.username, bridge.password)
-    for request_auth in (auth, None):
+    auth_options = (BasicAuth(bridge.username, bridge.password), None) if bridge.use_tls else (None,)
+    for request_auth in auth_options:
         try:
-            async with session.get(icon_url, auth=request_auth) as response:
+            async with get_media_response(bridge, session, icon_url, request_auth) as response:
                 if response.status == 401 and request_auth is not None:
                     continue
                 if response.status != 200:

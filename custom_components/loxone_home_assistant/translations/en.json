@@ -2,6 +2,13 @@
   "config": {
     "step": {
       "user": {
+        "title": "Connect a Loxone server",
+        "menu_options": {
+          "auto": "Search the local network",
+          "manual": "Enter a host and port"
+        }
+      },
+      "finish": {
         "title": "Additional setup options",
         "description": "Discovery and authentication are complete. Configure optional light and automation behavior for this installation.",
         "data": {
@@ -32,7 +39,7 @@
       },
       "manual": {
         "title": "Manual Loxone server setup",
-        "description": "Automatic discovery did not complete. Enter the local Loxone server host manually. Intercom video uses the same account by default; only set dedicated Intercom video credentials later in Options if your device requires it.",
+        "description": "Enter the address and port of your Loxone server. For Miniserver Gen 1, enter the configured HTTP port.",
         "data": {
           "host": "Host",
           "port": "Port",
@@ -45,7 +52,7 @@
     "error": {
       "cannot_connect": "Cannot connect to the Loxone server.",
       "invalid_auth": "Invalid username or password.",
-      "legacy_not_supported": "This integration currently supports local TLS/WSS enabled Loxone servers only.",
+      "legacy_not_supported": "Could not establish an encrypted connection to the Miniserver Gen 1.",
       "unsupported_version": "Unsupported Loxone server software version. Minimum supported version is 10.2.",
       "no_device_found": "No supported Loxone server was found on the local network."
     },
@@ -54,6 +61,12 @@
     }
   },
   "options": {
+    "error": {
+      "cannot_connect": "Cannot connect to the Loxone server.",
+      "invalid_auth": "Invalid username or password.",
+      "legacy_not_supported": "Could not establish an encrypted connection to the Miniserver Gen 1.",
+      "unsupported_version": "Unsupported Loxone server software version. Minimum supported version is 10.2."
+    },
     "step": {
       "init": {
         "title": "Loxone options",
