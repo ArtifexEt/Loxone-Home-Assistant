@@ -2,6 +2,13 @@
   "config": {
     "step": {
       "user": {
+        "title": "Loxone-Server verbinden",
+        "menu_options": {
+          "auto": "Lokales Netzwerk durchsuchen",
+          "manual": "Adresse und Port eingeben"
+        }
+      },
+      "finish": {
         "title": "Zusätzliche Einrichtungsoptionen",
         "description": "Erkennung und Anmeldung sind abgeschlossen. Konfigurieren Sie optionales Verhalten für Beleuchtung und Automatisierungen.",
         "data": {
@@ -32,7 +39,7 @@
       },
       "manual": {
         "title": "Manuelle Loxone-Server-Einrichtung",
-        "description": "Die automatische Erkennung wurde nicht abgeschlossen. Geben Sie den lokalen Host des Loxone-Servers manuell ein. Intercom-Video verwendet standardmäßig dasselbe Konto; getrennte Intercom-Video-Anmeldedaten sollten Sie erst später in den Optionen setzen, wenn Ihr Gerät das verlangt.",
+        "description": "Geben Sie die Adresse und den Port Ihres Loxone-Servers ein. Verwenden Sie für den Miniserver Gen 1 den konfigurierten HTTP-Port.",
         "data": {
           "host": "Host",
           "port": "Port",
@@ -45,7 +52,7 @@
     "error": {
       "cannot_connect": "Verbindung zum Loxone-Server nicht möglich.",
       "invalid_auth": "Ungültiger Benutzername oder ungültiges Passwort.",
-      "legacy_not_supported": "Diese Integration unterstützt derzeit nur lokale Loxone-Server mit aktiviertem TLS/WSS.",
+      "legacy_not_supported": "Eine verschlüsselte Verbindung zum Miniserver Gen 1 konnte nicht hergestellt werden.",
       "unsupported_version": "Nicht unterstützte Version der Loxone-Server-Software. Die minimale unterstützte Version ist 10.2.",
       "no_device_found": "Im lokalen Netzwerk wurde kein unterstützter Loxone-Server gefunden."
     },
@@ -54,6 +61,12 @@
     }
   },
   "options": {
+    "error": {
+      "cannot_connect": "Verbindung zum Loxone-Server nicht möglich.",
+      "invalid_auth": "Ungültiger Benutzername oder ungültiges Passwort.",
+      "legacy_not_supported": "Eine verschlüsselte Verbindung zum Miniserver Gen 1 konnte nicht hergestellt werden.",
+      "unsupported_version": "Nicht unterstützte Version der Loxone-Server-Software. Die minimale unterstützte Version ist 10.2."
+    },
     "step": {
       "init": {
         "title": "Loxone-Optionen",

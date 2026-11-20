@@ -4,7 +4,7 @@
 [![HACS](https://img.shields.io/badge/HACS-Custom-41BDF5?logo=home-assistant-community-store&logoColor=white)](https://hacs.xyz/)
 [![Home Assistant](https://img.shields.io/badge/Home%20Assistant-2025.1%2B-18BCF2?logo=homeassistant&logoColor=white)](https://www.home-assistant.io/)
 
-Custom HACS integration for local Loxone Miniserver, Miniserver Go, and Miniserver Compact control from Home Assistant.
+Custom HACS integration for local control of Loxone Miniserver Gen 1 and Gen 2, Miniserver Go, and Miniserver Compact from Home Assistant.
 
 ## Quick Start in Home Assistant
 
@@ -23,14 +23,14 @@ If the button does not open the flow directly, use `Settings -> Devices & Servic
 
 - asks for Loxone username and password during setup
 - scans the local network for a Loxone server (Miniserver, Miniserver Go, Miniserver Compact)
-- connects locally over secure WebSocket
+- connects locally over WebSocket using WSS or Loxone command encryption
 - imports the Loxone structure from `LoxAPP3.json`
 - keeps two-way state sync between Home Assistant and Loxone
 - exposes common Loxone blocks as Home Assistant entities
 - exposes Intercom/IntercomV2 (and DoorController/DoorStation variants) as dedicated doorbell entities:
   - camera stream + snapshot preview when available
   - binary sensors for ring, call, proximity, and intercom light state
-  - Intercom Gen2 action buttons (`Answer Call`, `Mute Microphone`, `Unmute Microphone`)
+  - Intercom Gen2 action buttons (`Stop Ringing`, `Mute Doorbell`, `Unmute Doorbell`)
   - intercom history sensor based on `lastBellEvents` (latest event timestamp + recent image URLs)
   - Home Assistant bus events (`loxone_home_assistant_intercom_event`) for automation triggers
 - exposes access/keypad-style activity events as Home Assistant bus events (`loxone_home_assistant_access_event`) so automations can react to granted/denied attempts (for example wrong PIN)
@@ -135,9 +135,9 @@ The following documented sections are currently not mapped to dedicated Home Ass
 - `autopilot`
 - `messageCenter`
 
-## Important scope
+## Miniserver connection
 
-This version targets modern Loxone servers (Miniserver, Miniserver Go, Miniserver Compact) with local TLS/WSS enabled. Discovery detects legacy units, but setup intentionally refuses insecure legacy mode because full real-time support without a verified crypto path would be brittle.
+TLS-capable Miniservers use secure WebSocket (WSS). Miniserver Gen 1 uses Loxone command encryption over WebSocket on its configured HTTP port. Gen 1 firmware must provide a valid Loxone-signed chain through `jdev/sys/getcertificate`. The integration verifies it before establishing the encrypted session. That encryption protects authentication and commands. State events and some responses can travel unencrypted, so keep the Gen 1 connection on a trusted local network.
 
 ## Supported Loxone server software versions
 
@@ -159,16 +159,11 @@ This version targets modern Loxone servers (Miniserver, Miniserver Go, Miniserve
 
 ## Configuration flow
 
-The integration first asks for:
+Choose **Search the local network** to discover a Miniserver or **Enter a host and port** to connect directly. Both paths ask for your Loxone username and password. If discovery finds multiple servers, choose the one to connect.
 
-- Loxone username
-- Loxone password
+For a Miniserver Gen 1 with a custom port, select **Enter a host and port**. Enter the hostname or IP in **Host** and the configured HTTP port in **Port**, for example `7778`. Manual setup is available even when a Gen 2 Miniserver is already configured.
 
-It then scans the local network for one or more Loxone servers. If more than one is found, you choose the correct device.
-
-Intercom video uses the same credentials as the configured Loxone user by default.
-
-If automatic discovery does not complete, a manual host fallback is offered where you provide host, port, credentials, and TLS verification directly.
+On TLS-capable Miniservers, Intercom video uses the configured Loxone user by default. With Gen 1, Miniserver media requests are anonymous. A direct Intercom endpoint can use its own separate credentials.
 
 If your Intercom camera stream returns `401 Unauthorized`, open integration `Options` and set dedicated Intercom video credentials (some Intercom models use separate video-module login data).
 
@@ -233,9 +228,9 @@ Fields:
 - `entry_id` optional when only one Loxone entry exists
 - `uuid_action` parent Intercom UUID action
 - `command` supported command name:
-  - `answer` (aliases: `accept`, `answercall`, `pickup`)
+  - `answer` stops the current ringing (with aliases `accept`, `answercall`, `pickup`)
   - `playTts` (alias `tts`)
-  - `mute` (`0` unmute, `1` mute; aliases: `muteMic`, `unmute`, `unmuteMic`)
+  - `mute` controls the doorbell sound (`0` unmutes and `1` mutes, with aliases `muteMic`, `unmute`, `unmuteMic`)
   - `setAnswers` (aliases: `setanswer`, `setallanswer`)
   - `setvideosettings`, `setallvideosettings`
   - `setframerate`, `setresolution`
@@ -392,7 +387,7 @@ This integration therefore focuses on:
 
 - local push updates use `jdev/sps/enablebinstatusupdate`
 - state structure comes from `data/LoxAPP3.json`
-- setup is based on Home Assistant config flow conventions and Loxone token auth over secure WebSocket
+- setup uses Home Assistant config flows and Loxone token authentication over WSS or an encrypted Gen 1 command session
 
 ## CI
 

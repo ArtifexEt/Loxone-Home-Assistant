@@ -2,9 +2,20 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
+import hmac
+import json
+import ssl
 import sys
 import types
 import unittest
+from datetime import datetime, timedelta, timezone
+from unittest.mock import AsyncMock, Mock, call, patch
+from urllib.parse import unquote
+
+from cryptography.hazmat.primitives.asymmetric import padding, rsa
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
 from tests._loader import load_integration_module
 
@@ -149,13 +160,16 @@ class _FakeResponse:
     async def json(self, content_type=None):
         return self._payload
 
+    async def text(self):
+        return self._payload
+
 
 class _FakeSession:
     def __init__(self, responses):
         self.responses = responses
         self.urls: list[str] = []
 
-    def get(self, url, ssl=False):
+    def get(self, url, ssl=False, allow_redirects=True):
         self.urls.append(url)
         return self.responses[url]
 
@@ -267,7 +281,10 @@ class DiscoveryHelpersTests(unittest.IsolatedAsyncioTestCase):
                 "https://198.51.100.101:443/jdev/cfg/apiKey": _FakeResponse(404, {}),
                 "http://198.51.100.101:80/jdev/cfg/apiKey": _FakeResponse(
                     200,
-                    {"LL": {"value": "{'httpsStatus':0,'name':'Legacy'}"}},
+                    {"LL": {"Code": "200", "value": {
+                        "httpsStatus": 0, "name": "Legacy", "snr": "504F94000000",
+                        "version": "15.5.0.0",
+                    }}},
                 ),
             }
         )
@@ -315,8 +332,306 @@ class DiscoveryHelpersTests(unittest.IsolatedAsyncioTestCase):
         )
 
 
+class BridgeConnectionTests(unittest.IsolatedAsyncioTestCase):
+    """Verify custom-port handling during the actual bridge setup."""
+
+    host = "198.51.100.101"
+    legacy_api_url = f"http://{host}:7778/jdev/cfg/apiKey"
+    legacy_certificate_url = f"http://{host}:7778/jdev/sys/getcertificate"
+    legacy_ws_url = f"ws://{host}:7778/ws/rfc6455"
+    legacy_metadata = {"snr": "504F94000000", "version": "15.5.0.0"}
+
+    def setUp(self) -> None:
+        self.session = Mock(ws_connect=AsyncMock(), get=Mock())
+        self.probe_factory = self.enterContext(patch.object(bridge, "ClientSession"))
+        self.probe_factory.return_value.__aenter__.return_value = types.SimpleNamespace(
+            get=self.session.get
+        )
+
+    def _new_bridge(self, port=7778, *, verify_ssl=False):
+        hass = types.SimpleNamespace(
+            async_create_background_task=lambda coroutine, _name: coroutine.close(),
+        )
+        with patch.object(bridge, "async_get_clientsession", return_value=self.session):
+            return bridge.LoxoneBridge(
+                hass,
+                {
+                    "host": self.host,
+                    "port": port,
+                    "username": "loxone-user",
+                    "password": "loxone-password",
+                    "verify_ssl": verify_ssl,
+                },
+            )
+
+    def _websocket_call(self, port=7778, *, verify_ssl=False):
+        return call.ws_connect(
+            f"wss://{self.host}:{port}/ws/rfc6455",
+            protocols=("remotecontrol",),
+            ssl=None if verify_ssl else False,
+            heartbeat=None,
+        )
+
+    async def test_manual_setup_refuses_untrusted_legacy_certificate_before_ws(self):
+        for metadata in (
+            str(self.legacy_metadata),
+            {**self.legacy_metadata, "httpsStatus": 0},
+        ):
+            with self.subTest(metadata=metadata):
+                self.session.reset_mock()
+                self.probe_factory.reset_mock()
+                self.session.ws_connect.side_effect = OSError("WSS handshake failed")
+                self.session.get.return_value = _FakeResponse(
+                    200, {"LL": {"Code": "200", "value": str(metadata)}}
+                )
+                legacy_client = Mock(
+                    get=Mock(return_value=_FakeResponse(200, "untrusted certificate")),
+                    ws_connect=AsyncMock(),
+                    close=AsyncMock(),
+                )
+                self.probe_factory.side_effect = (self.probe_factory.return_value, legacy_client)
+                candidate = self._new_bridge()
+                candidate._authenticate = AsyncMock()
+
+                with self.assertRaisesRegex(bridge.LoxoneUnsupportedError, "could not be verified"):
+                    await candidate.async_initialize(probe_legacy=True)
+
+                self.assertEqual(
+                    self.session.mock_calls,
+                    [
+                        self._websocket_call(),
+                        call.get(self.legacy_api_url, ssl=False, allow_redirects=False),
+                    ],
+                )
+                legacy_client.get.assert_called_once_with(
+                    self.legacy_certificate_url, allow_redirects=False
+                )
+                legacy_client.ws_connect.assert_not_awaited()
+                legacy_client.close.assert_awaited_once()
+                candidate._authenticate.assert_not_awaited()
+
+    async def test_gen1_uses_encrypted_jwt_then_reauthenticates_after_reconnect(self):
+        serial = self.legacy_metadata["snr"]
+        token = "test.jwt.token"
+        password_key, password_salt = "aabbccdd", "testuser-salt"
+        key = rsa.generate_private_key(public_exponent=65537, key_size=1024)
+        session_keys = []
+        commands = []
+        self.session.ws_connect.side_effect = OSError("WSS handshake failed")
+        self.session.get.return_value = _FakeResponse(200, {
+            "LL": {"Code": "200", "value": str(self.legacy_metadata)}
+        })
+        candidate = self._new_bridge()
+        candidate.async_refresh_system_stats = AsyncMock()
+
+        def legacy_client(challenge: str):
+            cipher = None
+            salt = None
+
+            def encrypt_response(response: str) -> str:
+                plaintext = response.encode("utf-8")
+                plaintext += b"\0" * (-len(plaintext) % 16)
+                encryptor = cipher.encryptor()
+                return base64.b64encode(encryptor.update(plaintext) + encryptor.finalize()).decode()
+
+            async def respond(wire: str) -> None:
+                nonlocal cipher, salt
+                if wire.startswith("jdev/sys/keyexchange/"):
+                    material = key.decrypt(
+                        base64.b64decode(wire.split("/", 3)[-1], validate=True), padding.PKCS1v15()
+                    ).decode("ascii")
+                    session_keys.append(material)
+                    aes_key, iv = (bytes.fromhex(item) for item in material.split(":"))
+                    cipher = Cipher(algorithms.AES(aes_key), modes.CBC(iv))
+                    candidate._deliver_text(json.dumps({"LL": {
+                        "Code": "200", "value": encrypt_response(challenge)
+                    }}))
+                    return
+
+                prefix, encoded = wire.rsplit("/", 1)
+                self.assertIn(prefix, {"jdev/sys/enc", "jdev/sys/fenc"})
+                ciphertext = base64.b64decode(unquote(encoded), validate=True)
+                decryptor = cipher.decryptor()
+                plaintext = (decryptor.update(ciphertext) + decryptor.finalize()).rstrip(b"\0").decode()
+                if salt is None:
+                    mode, salt, command = plaintext.split("/", 2)
+                    self.assertEqual(mode, "salt")
+                else:
+                    mode, old_salt, new_salt, command = plaintext.split("/", 3)
+                    self.assertEqual(mode, "nextSalt")
+                    self.assertEqual(old_salt, salt)
+                    self.assertNotEqual(new_salt, salt)
+                    salt = new_salt
+                commands.append((prefix, command))
+
+                value = {}
+                if command == "jdev/sys/getkey2/loxone-user":
+                    value = {"key": password_key, "salt": password_salt, "hashAlg": "SHA256"}
+                elif command.startswith("jdev/sys/getjwt/"):
+                    value = {"token": token, "validUntil": "9999999999"}
+                elif command == "jdev/cfg/apiKey":
+                    value = self.legacy_metadata
+                response = json.dumps({"LL": {"Code": "200", "value": value}})
+                if command == "data/LoxAPP3.json":
+                    response = json.dumps({"msInfo": {"serialNr": serial}, "controls": {}})
+                if prefix == "jdev/sys/fenc":
+                    response = encrypt_response(response)
+                candidate._deliver_text(response)
+
+            websocket = types.SimpleNamespace(closed=False, send_str=respond, close=AsyncMock())
+            return Mock(
+                get=Mock(return_value=_FakeResponse(200, json.dumps({"LL": {
+                    "Code": "200", "value": "test PEM chain"
+                }}))),
+                ws_connect=AsyncMock(return_value=websocket),
+                close=AsyncMock(),
+            )
+
+        first_client = legacy_client("bbaa9988")
+        second_client = legacy_client("9988bbaa")
+        self.probe_factory.side_effect = (self.probe_factory.return_value, first_client, second_client)
+        with patch.object(
+            bridge.LegacySession,
+            "from_certificate_chain",
+            side_effect=lambda *_args, **_kwargs: bridge.LegacySession(key.public_key(), serial),
+        ) as verify_certificate:
+            await candidate.async_initialize(probe_legacy=True)
+            self.assertFalse(candidate.use_tls)
+            self.assertTrue(candidate.available)
+            self.assertEqual(candidate.token, token)
+            self.assertEqual(candidate.serial, serial)
+            await candidate._cleanup_connection(cancel_reconnect=False)
+            await candidate._ensure_connected()
+            await candidate.async_send_raw_command("jdev/sps/io/test/on")
+            await candidate.async_shutdown()
+
+        self.session.ws_connect.assert_awaited_once()
+        self.assertEqual(verify_certificate.call_args_list, [
+            call("test PEM chain", expected_serial=serial), call("test PEM chain", expected_serial=serial)
+        ])
+        for client in (first_client, second_client):
+            client.get.assert_called_once_with(self.legacy_certificate_url, allow_redirects=False)
+            client.ws_connect.assert_awaited_once_with(
+                self.legacy_ws_url, protocols=("remotecontrol",), ssl=False, heartbeat=None
+            )
+            client.close.assert_awaited_once()
+        self.assertEqual(len(set(session_keys)), 2)
+        password_hash = hashlib.sha256(f"loxone-password:{password_salt}".encode()).hexdigest().upper()
+        password_proof = hmac.new(bytes.fromhex(password_key), f"loxone-user:{password_hash}".encode(), "sha256").hexdigest()
+        token_proof = hmac.new(bytes.fromhex("9988bbaa"), token.encode(), "sha256").hexdigest()
+        self.assertEqual(commands[0], ("jdev/sys/enc", "jdev/sys/getkey2/loxone-user"))
+        self.assertEqual(commands[1][0], "jdev/sys/fenc")
+        self.assertTrue(commands[1][1].startswith(f"jdev/sys/getjwt/{password_proof}/loxone-user/4/"))
+        self.assertEqual(commands[2:], [
+            ("jdev/sys/enc", "data/LoxAPP3.json"),
+            ("jdev/sys/enc", "jdev/cfg/apiKey"),
+            ("jdev/sys/enc", "jdev/sps/enablebinstatusupdate"),
+            ("jdev/sys/fenc", f"authwithtoken/{token_proof}/loxone-user"),
+            ("jdev/sys/enc", "jdev/sps/enablebinstatusupdate"),
+            ("jdev/sys/enc", "jdev/sps/io/test/on"),
+        ])
+
+    async def test_http_response_must_confirm_legacy_loxone(self):
+        for status, code, value in (
+            (302, 200, self.legacy_metadata),
+            (200, 401, self.legacy_metadata),
+            (200, 200, "unrelated HTTP response"),
+            (200, 200, {"snr": "   ", "version": "15.5.0.0"}),
+            (200, 200, {"snr": "invalid", "version": "15.5.0.0"}),
+            (200, 200, {"snr": "504F94000000"}),
+            (200, 200, {**self.legacy_metadata, "version": "unknown"}),
+            (200, 200, {**self.legacy_metadata, "httpsStatus": 1}),
+        ):
+            with self.subTest(status=status, code=code, value=value):
+                self.session.reset_mock()
+                error = OSError("WSS handshake failed")
+                self.session.ws_connect.side_effect = error
+                self.session.get.return_value = _FakeResponse(
+                    status, {"LL": {"Code": code, "value": value}}
+                )
+
+                with self.assertRaises(bridge.LoxoneConnectionError) as raised:
+                    await self._new_bridge().async_initialize(probe_legacy=True)
+
+                self.assertIs(raised.exception.__cause__, error)
+                self.session.get.assert_called_once()
+
+    async def test_runtime_does_not_probe_http_after_wss_failure(self):
+        self.session.ws_connect.side_effect = OSError("WSS handshake failed")
+
+        with self.assertRaises(bridge.LoxoneConnectionError):
+            await self._new_bridge().async_initialize()
+
+        self.assertEqual(self.session.mock_calls, [self._websocket_call()])
+        self.probe_factory.assert_not_called()
+
+    async def test_certificate_verification_failure_keeps_tls_error(self):
+        error = ssl.SSLCertVerificationError("certificate verification failed")
+        self.session.ws_connect.side_effect = error
+
+        with self.assertRaises(bridge.LoxoneConnectionError) as raised:
+            await self._new_bridge(verify_ssl=True).async_initialize(probe_legacy=True)
+
+        self.assertIs(raised.exception.__cause__, error)
+        self.assertEqual(self.session.mock_calls, [self._websocket_call(verify_ssl=True)])
+
+    async def test_wss_success_on_default_or_custom_port_skips_http(self):
+        for port in (443, 7778):
+            with self.subTest(port=port):
+                self.session.reset_mock()
+                self.session.ws_connect.return_value = types.SimpleNamespace(closed=False)
+                candidate = self._new_bridge(port)
+                candidate._authenticate = AsyncMock()
+                candidate._load_structure = AsyncMock()
+                candidate._send_loxone_command = AsyncMock()
+                candidate.async_refresh_system_stats = AsyncMock()
+
+                await candidate.async_initialize(probe_legacy=True)
+
+                self.assertEqual(self.session.mock_calls, [self._websocket_call(port)])
+                candidate._authenticate.assert_awaited_once()
+                candidate._load_structure.assert_awaited_once()
+                self.assertTrue(candidate.available)
+
+    async def test_error_after_wss_upgrade_does_not_trigger_http(self):
+        self.session.ws_connect.return_value = types.SimpleNamespace(
+            closed=False, close=AsyncMock()
+        )
+        candidate = self._new_bridge()
+        error = bridge.LoxoneConnectionError("WebSocket authentication timed out")
+        candidate._authenticate = AsyncMock(side_effect=error)
+
+        with self.assertRaises(bridge.LoxoneConnectionError) as raised:
+            await candidate.async_initialize(probe_legacy=True)
+
+        self.assertIs(raised.exception, error)
+        self.assertEqual(self.session.mock_calls, [self._websocket_call()])
+
+
 class BridgeAuthHelpersTests(unittest.TestCase):
     """Verify auth helper behavior for username path handling."""
+
+    def test_token_expiry_uses_miniserver_epoch_for_numeric_values(self) -> None:
+        candidate = bridge.LoxoneBridge.__new__(bridge.LoxoneBridge)
+        now = datetime.now(timezone.utc)
+        epoch = datetime(2009, 1, 1, tzinfo=timezone.utc)
+        elapsed = int((now - epoch).total_seconds())
+
+        candidate.token_valid_until = str(elapsed + 3600)
+        self.assertFalse(candidate._token_expired())
+
+        candidate.token_valid_until = str(elapsed - 3600)
+        self.assertTrue(candidate._token_expired())
+
+    def test_token_expiry_preserves_iso_datetime_values(self) -> None:
+        candidate = bridge.LoxoneBridge.__new__(bridge.LoxoneBridge)
+        now = datetime.now(timezone.utc)
+
+        candidate.token_valid_until = (now + timedelta(hours=1)).isoformat()
+        self.assertFalse(candidate._token_expired())
+
+        candidate.token_valid_until = (now - timedelta(hours=1)).isoformat()
+        self.assertTrue(candidate._token_expired())
 
     def test_auth_path_segment_allows_special_characters(self) -> None:
         self.assertEqual(bridge._auth_path_segment("user@name!"), "user@name!")
