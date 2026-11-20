@@ -130,11 +130,13 @@ class IntercomHistoryEntry:
     selection_value: str
 
 
-def intercom_auth_credentials(bridge) -> tuple[str | None, str]:
+def intercom_auth_credentials(
+    bridge, *, allow_miniserver_fallback: bool = True
+) -> tuple[str | None, str]:
     """Return HTTP auth for the Intercom camera itself."""
     configured_username = _coerce_text(getattr(bridge, "intercom_username", None))
     configured_password = getattr(bridge, "intercom_password", None)
-    if not getattr(bridge, "use_tls", True):
+    if not allow_miniserver_fallback or not getattr(bridge, "use_tls", True):
         if configured_username is None or configured_password is None:
             return None, ""
         return configured_username, str(configured_password)
@@ -685,16 +687,21 @@ def intercom_request_auth(bridge, url: str) -> BasicAuth | None:
     """Choose credentials for a Miniserver proxy or a direct Intercom URL."""
     parsed = urlsplit(url)
     host = str(getattr(bridge, "host", "")).strip("[]").casefold()
-    if parsed.hostname == host:
-        use_tls = bool(getattr(bridge, "use_tls", True))
-        scheme, default_port = ("https", 443) if use_tls else ("http", 80)
-        if parsed.scheme != scheme or (parsed.port or default_port) != getattr(bridge, "port", 0):
-            return None
+    same_host = parsed.hostname == host
+    scheme = "https" if getattr(bridge, "use_tls", True) else "http"
+    port = parsed.port
+    if port is None:
+        port = 443 if parsed.scheme == "https" else 80
+    same_host_and_port = same_host and port == getattr(bridge, "port", 0)
+
+    if same_host_and_port and parsed.scheme == scheme:
         username, password = miniserver_auth_credentials(bridge)
-    elif "/proxy/" in parsed.path:
+    elif same_host_and_port or "/proxy/" in parsed.path:
         return None
     else:
-        username, password = intercom_auth_credentials(bridge)
+        username, password = intercom_auth_credentials(
+            bridge, allow_miniserver_fallback=not same_host
+        )
     return BasicAuth(username, password) if username is not None else None
 
 

@@ -695,6 +695,35 @@ class CameraPlatformTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(session.auth_logins, ["user"])
 
+    async def test_snapshot_uses_dedicated_credentials_on_alternate_miniserver_port(self) -> None:
+        url = "https://mini.local:8443/snapshot.jpg"
+        control = LoxoneControl(
+            uuid="intercom-uuid",
+            uuid_action="intercom-action",
+            name="Furtka",
+            type="Intercom",
+            states={},
+            details={"videoInfo": {"liveImageUrl": url}},
+        )
+        session = _FakeSession({(url, True): (200, b"snapshot"), (url, False): (401, b"")})
+        bridge = _FakeBridge([control], {}, session)
+        bridge.intercom_username = "camuser"
+        bridge.intercom_password = "campass"
+        entity = LoxoneIntercomCameraEntity(bridge, control)
+
+        self.assertEqual(await entity.async_camera_image(), b"snapshot")
+        self.assertEqual(session.auth_logins, ["camuser"])
+
+    def test_alternate_miniserver_port_requires_both_camera_credentials(self) -> None:
+        bridge = _FakeBridge([], {}, _FakeSession())
+        url = "https://mini.local:8443/snapshot.jpg"
+
+        for username, password in ((None, None), ("camuser", None), (None, "campass")):
+            with self.subTest(username=username, password=password):
+                bridge.intercom_username = username
+                bridge.intercom_password = password
+                self.assertIsNone(media_module.intercom_request_auth(bridge, url))
+
     async def test_proxy_history_urls_use_miniserver_credentials(self) -> None:
         control = LoxoneControl(
             uuid="intercom-uuid",
@@ -712,11 +741,14 @@ class CameraPlatformTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(getattr(auth, "login", None), "user")
-        self.assertIsNone(
-            media_module.intercom_request_auth(
-                bridge, "https://camera.local/proxy/device-uuid/images/1.jpg"
-            )
-        )
+        self.assertEqual(getattr(auth, "password", None), "pass")
+        for url in (
+            "https://camera.local/proxy/device-uuid/images/1.jpg",
+            "https://mini.local:8443/proxy/device-uuid/images/1.jpg",
+            "http://mini.local:443/proxy/device-uuid/images/1.jpg",
+        ):
+            with self.subTest(url=url):
+                self.assertIsNone(media_module.intercom_request_auth(bridge, url))
 
     async def test_gen1_proxy_snapshot_uses_no_auth_and_does_not_follow_redirects(self) -> None:
         url = "http://mini.local:7778/proxy/device-uuid/images/1.jpg"
