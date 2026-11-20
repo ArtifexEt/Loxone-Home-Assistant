@@ -376,7 +376,11 @@ Access/keypad events are emitted on rising edges for boolean-like states and on 
 
 ## Intercom live call scope
 
-Intercom Gen 2 uses WebRTC for live video and two-way audio in the Loxone app. Use the Loxone app or web interface for calls. The Home Assistant integration supports cameras that expose compatible HTTP media, doorbell and proximity events, text-to-speech, and available light controls. The `answer` command stops the bell, and `mute` controls the doorbell mute state. [Loxone Intercom documentation](https://www.loxone.com/enus/kb/intercom-2/) · [Network protocols](https://updatefiles.loxone.com/KnowledgeBase/Online/Common/Documents/Loxone-Required-Ports-Domains.pdf)
+On Home Assistant 2026.11 or later, a locally paired Intercom Gen 2 on an HTTPS Miniserver connection exposes a **Live** camera. It uses authenticated WebRTC for live video and can add audio when you start talking. The integration loads its optional WebRTC runtime on first use.
+
+Enable **Two-way audio** in Home Assistant Labs to get the microphone button. Use HTTPS or a supported Home Assistant companion app for microphone access. The existing **Video** camera can capture a live still from WebRTC when the Intercom provides no HTTP snapshot. Its history selection continues to use the available image URLs from Loxone. [Home Assistant camera documentation](https://www.home-assistant.io/integrations/camera/#talking-through-a-camera)
+
+The `answer` command stops the bell, and `mute` controls the doorbell mute state. [Loxone Intercom documentation](https://www.loxone.com/enus/kb/intercom-2/) · [Network protocols](https://updatefiles.loxone.com/KnowledgeBase/Online/Common/Documents/Loxone-Required-Ports-Domains.pdf)
 
 ## Development notes
 

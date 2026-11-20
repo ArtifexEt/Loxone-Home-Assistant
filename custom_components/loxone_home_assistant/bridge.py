@@ -421,6 +421,21 @@ class LoxoneBridge:
             return None
         return icon_proxy_url(self.serial, value)
 
+    def miniserver_tls_fingerprint(self) -> bytes | None:
+        """Return the SHA-256 TLS certificate fingerprint of the authenticated socket."""
+        websocket = self._ws
+        if not self.available or self._closing or not self.use_tls or websocket is None or websocket.closed:
+            return None
+
+        tls_connection = websocket.get_extra_info("ssl_object")
+        if tls_connection is None:
+            return None
+        try:
+            certificate = tls_connection.getpeercert(binary_form=True)
+        except (OSError, ValueError):
+            return None
+        return hashlib.sha256(certificate).digest() if isinstance(certificate, bytes) and certificate else None
+
     def state_value(self, state_uuid: str | None) -> Any:
         """Return the latest state value for a UUID."""
         if state_uuid is None:

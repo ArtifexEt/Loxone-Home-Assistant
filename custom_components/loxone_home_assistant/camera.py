@@ -46,6 +46,10 @@ except ImportError:  # pragma: no cover - fallback for lightweight test stubs
     web = _FallbackWeb()  # type: ignore[assignment]
 
 from homeassistant.components.camera import Camera
+try:
+    from homeassistant.components.camera import CameraEntityCapabilities
+except ImportError:
+    CameraEntityCapabilities = None
 
 try:
     from homeassistant.components.camera import CameraEntityFeature
@@ -106,11 +110,30 @@ async def async_setup_entry(
     hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
 ) -> None:
     bridge = entry_bridge(hass, entry)
-    entities = [
-        LoxoneIntercomCameraEntity(bridge, control)
-        for control in bridge.controls
-        if _is_intercom_camera_control(control)
-    ]
+    entities = []
+    loader = None
+    if CameraEntityCapabilities is not None and getattr(bridge, "use_tls", True):
+        from .intercom_webrtc_camera import (
+            IntercomRtcLoader,
+            IntercomSnapshots,
+            LoxoneIntercomWebRTCCamera,
+        )
+
+        loader = IntercomRtcLoader(hass)
+
+    for control in bridge.controls:
+        snapshots = None
+        if loader is not None and normalize_state_name(control.type) == "intercomv2":
+            device_uuid = control.details.get("deviceUuid")
+            if isinstance(device_uuid, str) and device_uuid and not control.details.get("trustMember"):
+                snapshots = IntercomSnapshots(loader, bridge, device_uuid)
+                entities.append(LoxoneIntercomWebRTCCamera(bridge, control, snapshots))
+        if snapshots is not None or _is_intercom_camera_control(control):
+            entities.append(
+                LoxoneIntercomCameraEntity(
+                    bridge, control, native_snapshot=snapshots.async_image if snapshots else None
+                )
+            )
     async_add_entities(entities)
 
 
@@ -120,13 +143,14 @@ class LoxoneIntercomCameraEntity(LoxoneEntity, Camera):
     _attr_icon = "mdi:video-wireless"
     _attr_supported_features = CAMERA_FEATURE_NONE
 
-    def __init__(self, bridge, control: LoxoneControl) -> None:
+    def __init__(self, bridge, control: LoxoneControl, *, native_snapshot=None) -> None:
         Camera.__init__(self)
         super().__init__(bridge, control, "Video")
         self._secured_details: dict[str, Any] | None = None
         self._secured_details_loaded = False
         self._secured_details_lock = asyncio.Lock()
         self._last_live_image: bytes | None = None
+        self._native_snapshot = native_snapshot
         self._attr_entity_picture = None
 
     async def stream_source(self) -> str | None:
@@ -176,7 +200,13 @@ class LoxoneIntercomCameraEntity(LoxoneEntity, Camera):
             if not selected_history:
                 self._last_live_image = image
             return image
-        return None if selected_history else self._last_live_image
+        if selected_history:
+            return None
+        if self._native_snapshot is not None:
+            image = await self._native_snapshot()
+            if image is not None:
+                self._last_live_image = image
+        return self._last_live_image
 
     async def handle_async_mjpeg_stream(self, request) -> Any:
         """Proxy the raw MJPEG stream directly from the Intercom."""

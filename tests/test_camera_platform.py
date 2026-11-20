@@ -643,6 +643,31 @@ class CameraPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status, 200)
         self.assertEqual(response.body, b"live-image")
 
+    async def test_native_frame_fallback_does_not_replace_a_selected_history_photo(self) -> None:
+        control = LoxoneControl(
+            uuid="intercom-uuid",
+            uuid_action="intercom-action",
+            name="Dzwonek",
+            type="IntercomV2",
+        )
+        historical_url = "https://mini.local/camimage/intercom-action/20260314123045"
+        session = _FakeSession({(historical_url, True): (404, b"")})
+        bridge = _FakeBridge([control], {}, session)
+        captured = []
+
+        async def snapshot():
+            captured.append(True)
+            return b"live-frame"
+
+        entity = LoxoneIntercomCameraEntity(bridge, control, native_snapshot=snapshot)
+        self.assertEqual(await entity.async_camera_image(), b"live-frame")
+
+        media_module.set_intercom_selected_history_timestamp(
+            bridge, control.uuid_action, "20260314123045"
+        )
+        self.assertIsNone(await entity.async_camera_image())
+        self.assertEqual(captured, [True])
+
     async def test_live_stream_uses_dedicated_intercom_credentials(self) -> None:
         control = LoxoneControl(
             uuid="intercom-uuid",
