@@ -10,8 +10,8 @@ from typing import Any
 from aiohttp import BasicAuth, ClientError, web
 import voluptuous as vol
 from homeassistant.components.http import HomeAssistantView
-from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant, ServiceCall
+from homeassistant.config_entries import ConfigEntry, ConfigEntryState
+from homeassistant.core import HomeAssistant, ServiceCall, callback
 from homeassistant.exceptions import (
     ConfigEntryError,
     ConfigEntryNotReady,
@@ -253,6 +253,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         raise
 
     entry.async_on_unload(entry.add_update_listener(async_reload_entry))
+
+    @callback
+    def _schedule_structure_reload() -> None:
+        if entry.state is not ConfigEntryState.LOADED or entry.setup_lock.locked():
+            return
+        _LOGGER.info("Loxone project changed. Reloading %s.", entry.title)
+        hass.config_entries.async_schedule_reload(entry.entry_id)
+
+    bridge.start_structure_monitor(_schedule_structure_reload)
     if bridge.use_loxone_icons:
         entry.async_create_background_task(
             hass, _async_prefetch_icons(hass, bridge), "loxone_prefetch_icons"
