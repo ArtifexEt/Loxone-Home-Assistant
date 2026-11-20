@@ -196,6 +196,7 @@ SYSTEM_STATS_COMMANDS: dict[str, str] = {
 SYSTEM_STATS_STATE_PREFIX = "sysdiag-"
 SYSTEM_STATS_REFRESH_SECONDS = 30
 SYSTEM_STATS_MIN_REFRESH_SECONDS = 5
+STRUCTURE_CHECK_SECONDS = 300
 
 
 class LoxoneError(Exception):
@@ -308,6 +309,8 @@ class LoxoneBridge:
         self._reader_task: asyncio.Task[None] | None = None
         self._keepalive_task: asyncio.Task[None] | None = None
         self._system_stats_task: asyncio.Task[None] | None = None
+        self._structure_task: asyncio.Task[None] | None = None
+        self._on_structure_change: Callable[[], None] | None = None
         self._reconnect_task: asyncio.Task[None] | None = None
         self._keepalive_waiter: asyncio.Future[bool] | None = None
         self._system_stats_lock = asyncio.Lock()
@@ -342,10 +345,16 @@ class LoxoneBridge:
     async def async_shutdown(self) -> None:
         """Stop tasks and close the websocket."""
         self._closing = True
+        self._on_structure_change = None
 
         await self._cleanup_connection(cancel_reconnect=True)
 
         self._mark_unavailable()
+
+    def start_structure_monitor(self, on_change: Callable[[], None]) -> None:
+        """Watch for project edits once Home Assistant has loaded the entities."""
+        self._on_structure_change = on_change
+        self._ensure_structure_task()
 
     @property
     def controls(self) -> list[LoxoneControl]:
@@ -703,6 +712,7 @@ class LoxoneBridge:
             raise
 
         self._mark_available()
+        self._ensure_structure_task()
 
     async def _exchange_legacy_key(self, session: LegacySession) -> bytes:
         try:
@@ -785,7 +795,7 @@ class LoxoneBridge:
         valid_until = token_value.get("validUntil")
         self.token_valid_until = str(valid_until) if valid_until is not None else None
 
-    async def _load_structure(self) -> None:
+    async def _async_fetch_structure_payload(self) -> Mapping[str, Any]:
         raw = await self._send_text_command("data/LoxAPP3.json", ensure_connected=False)
         try:
             structure_payload = json.loads(raw)
@@ -797,7 +807,10 @@ class LoxoneBridge:
         _raise_for_ll_error_payload(structure_payload)
         if not _is_loxapp_structure_payload(structure_payload):
             raise LoxoneConnectionError("Unexpected LoxAPP3.json payload.")
+        return structure_payload
 
+    async def _load_structure(self) -> None:
+        structure_payload = await self._async_fetch_structure_payload()
         structure = parse_structure(structure_payload)
         serial = structure.serial
         if self._legacy_session is not None:
@@ -996,6 +1009,45 @@ class LoxoneBridge:
         except asyncio.CancelledError:
             raise
 
+    def _ensure_structure_task(self) -> None:
+        on_change = self._on_structure_change
+        if self._closing or not self.available or on_change is None:
+            return
+        if self._structure_task is None or self._structure_task.done():
+            self._structure_task = self.hass.async_create_background_task(
+                self._structure_loop(on_change), "loxone_structure_monitor"
+            )
+
+    async def _structure_loop(self, on_change: Callable[[], None]) -> None:
+        while self.available:
+            changed = await self._async_structure_has_changed()
+            if not self.available or self._closing:
+                return
+            if changed:
+                on_change()
+            await asyncio.sleep(STRUCTURE_CHECK_SECONDS)
+
+    async def _async_structure_has_changed(self) -> bool:
+        loaded = _parse_structure_timestamp(self.loxapp_version)
+        if loaded is None:
+            return False
+        try:
+            response = await self._send_loxone_command(
+                "jdev/sps/LoxAPPversion3", ensure_connected=False
+            )
+            reported = _parse_structure_timestamp(response.get("value"))
+            if reported is None or reported == loaded:
+                return False
+
+            # The version command can change before the new structure is ready.
+            payload = await self._async_fetch_structure_payload()
+        except LoxoneError as err:
+            _LOGGER.debug("Could not check the Loxone project version: %s", err)
+            return False
+
+        latest = _parse_structure_timestamp(payload.get("lastModified"))
+        return latest is not None and latest != loaded
+
     def _schedule_reconnect(self) -> None:
         if self._closing or (self._reconnect_task and not self._reconnect_task.done()):
             return
@@ -1065,7 +1117,12 @@ class LoxoneBridge:
     ) -> None:
         current_task = asyncio.current_task()
 
-        for task in (self._keepalive_task, self._reader_task, self._system_stats_task):
+        for task in (
+            self._keepalive_task,
+            self._reader_task,
+            self._system_stats_task,
+            self._structure_task,
+        ):
             if task and task is not current_task:
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
@@ -1100,6 +1157,7 @@ class LoxoneBridge:
             self._reader_task = None
         self._keepalive_task = None
         self._system_stats_task = None
+        self._structure_task = None
         if cancel_reconnect:
             self._reconnect_task = None
 
@@ -1809,6 +1867,15 @@ def _is_loxapp_structure_payload(payload: Mapping[str, Any]) -> bool:
     return isinstance(payload.get("msInfo"), Mapping) and isinstance(
         payload.get("controls"), Mapping
     )
+
+
+def _parse_structure_timestamp(value: Any) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        return datetime.fromisoformat(value.strip())
+    except ValueError:
+        return None
 
 
 def _extract_software_version(payload: Mapping[str, Any]) -> str | None:
