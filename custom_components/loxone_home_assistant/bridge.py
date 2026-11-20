@@ -26,6 +26,7 @@ from homeassistant.const import CONF_HOST, CONF_PASSWORD, CONF_PORT, CONF_USERNA
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
+from .connection_config import CONNECTION_DATA_KEYS
 from .const import (
     ACCESS_DENIED_STATE_CANDIDATES,
     ACCESS_GRANTED_STATE_CANDIDATES,
@@ -53,7 +54,7 @@ from .const import (
     EVENT_INTERCOM,
     WEB_PERMISSION,
 )
-from .icons import icon_proxy_url
+from .icons import icon_proxy_url, normalize_icon_path
 from .intercom import (
     intercom_call_state_name,
     intercom_doorbell_state_name,
@@ -107,6 +108,11 @@ FILE_MESSAGE = 1
 VALUE_STATE_TABLE = 2
 TEXT_STATE_TABLE = 3
 CLOUD_DNS_HOST = "dns.loxonecloud.com"
+REMOTE_CONNECT_HOST = "connect.loxonecloud.com"
+REMOTE_CONNECT_TIMEOUT = 10
+_REMOTE_RELAY_HOST = re.compile(
+    r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.remcov3\.loxonecloud\.com"
+)
 _MAC_PLAIN_RE = re.compile(r"^[0-9A-Fa-f]{12}$")
 _MAC_SEPARATED_RE = re.compile(r"^(?:[0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}$")
 _STATE_UPDATE_CONTROL_RE = re.compile(
@@ -240,8 +246,12 @@ class LoxoneBridge:
 
     def __init__(self, hass: HomeAssistant, data: Mapping[str, Any]) -> None:
         self.hass = hass
+        self._connection_data = {key: data[key] for key in CONNECTION_DATA_KEYS if key in data}
         raw_host = str(data[CONF_HOST]).strip()
         self.host, self._ws_path_prefix = _resolve_miniserver_target(raw_host)
+        self._remote_serial = (
+            _extract_mac_from_path(self._ws_path_prefix) if self.host == CLOUD_DNS_HOST else None
+        )
         self.port: int = int(data.get(CONF_PORT, DEFAULT_PORT))
         self.username: str = data[CONF_USERNAME]
         self.password: str = data[CONF_PASSWORD]
@@ -255,8 +265,9 @@ class LoxoneBridge:
         )
         if self.intercom_password == "":
             self.intercom_password = None
-        self.verify_ssl: bool = bool(data.get(CONF_VERIFY_SSL, DEFAULT_VERIFY_SSL))
-        self.use_tls: bool = bool(data.get(CONF_USE_TLS, True))
+        remote = self._remote_serial is not None
+        self.verify_ssl: bool = remote or bool(data.get(CONF_VERIFY_SSL, DEFAULT_VERIFY_SSL))
+        self.use_tls: bool = remote or bool(data.get(CONF_USE_TLS, True))
         self.use_loxone_icons: bool = bool(
             data.get(CONF_USE_LOXONE_ICONS, DEFAULT_USE_LOXONE_ICONS)
         )
@@ -273,6 +284,7 @@ class LoxoneBridge:
         self.token_valid_until: str | None = data.get(CONF_TOKEN_VALID_UNTIL)
 
         self.structure: LoxoneStructure | None = None
+        self.icon_paths: frozenset[str] = frozenset()
         self.state_values: dict[str, Any] = {}
         self.available = False
         configured_server_model = str(
@@ -288,6 +300,7 @@ class LoxoneBridge:
             hass, verify_ssl=self.verify_ssl
         )
         self._legacy_client: ClientSession | None = None
+        self._remote_client: ClientSession | None = None
         self._legacy_session: LegacySession | None = None
         self._ws = None
         self._pending_response: asyncio.Future[str] | None = None
@@ -364,13 +377,15 @@ class LoxoneBridge:
         return self.state_values
 
     def export_runtime_data(self) -> dict[str, Any]:
-        """Return reconnect-related runtime data for config entry updates."""
+        """Persist the connection settings with the token issued for them."""
         return {
+            **self._connection_data,
             CONF_CLIENT_UUID: self.client_uuid,
             CONF_SERIAL: self.serial,
             CONF_LOXAPP_VERSION: self.loxapp_version,
             CONF_SOFTWARE_VERSION: self.software_version,
             CONF_SERVER_MODEL: self.server_model,
+            CONF_USE_TLS: self.use_tls,
             CONF_TOKEN: self.token,
             CONF_TOKEN_VALID_UNTIL: self.token_valid_until,
         }
@@ -529,10 +544,17 @@ class LoxoneBridge:
                 await self._cleanup_connection(cancel_reconnect=False)
             await self._connect(load_structure=load_structure, probe_legacy=probe_legacy)
 
-    async def _open_websocket(self, session: ClientSession, *, use_tls: bool) -> None:
+    async def _open_websocket(
+        self,
+        session: ClientSession,
+        *,
+        use_tls: bool,
+        target: tuple[str, int, str] | None = None,
+    ) -> None:
         scheme = "wss" if use_tls else "ws"
         ssl_verification = None if self.verify_ssl else False
-        url = f"{scheme}://{self.host}:{self.port}{self._ws_path_prefix}{WS_PATH}"
+        host, port, prefix = target or (self.host, self.port, self._ws_path_prefix)
+        url = f"{scheme}://{host}:{port}{prefix}{WS_PATH}"
 
         _LOGGER.debug("Connecting to Loxone websocket")
         try:
@@ -551,6 +573,37 @@ class LoxoneBridge:
             raise LoxoneConnectionError("The Loxone bridge is shutting down.")
         self._ws = websocket
         _LOGGER.debug("Loxone bridge: websocket connected")
+
+    async def _open_remote_websocket(self, serial: str) -> None:
+        from aiohttp import TraceConfig
+
+        async def reject_redirect(*_args: Any) -> None:
+            # A websocket upgrade must not redirect authentication to a different endpoint.
+            raise LoxoneConnectionError("The Loxone Remote Connect relay redirected the connection.")
+
+        trace = TraceConfig()
+        trace.on_request_redirect.append(reject_redirect)
+        client = self._remote_client = ClientSession(trace_configs=[trace])
+        try:
+            async with asyncio.timeout(REMOTE_CONNECT_TIMEOUT):
+                async with client.get(
+                    f"https://{REMOTE_CONNECT_HOST}/getip",
+                    params={"snr": serial},
+                    allow_redirects=False,
+                ) as response:
+                    if response.status != 200:
+                        raise LoxoneConnectionError(
+                            f"Loxone Remote Connect lookup failed (HTTP {response.status})."
+                        )
+                    relay = _ensure_mapping(await response.json(content_type=None)).get("url")
+        except (ClientError, TimeoutError, OSError, ValueError) as err:
+            raise LoxoneConnectionError("Could not look up the Loxone Remote Connect relay.") from err
+
+        if self._closing:
+            raise LoxoneConnectionError("The Loxone bridge is shutting down.")
+        target = _remote_relay_target(relay)
+        await self._open_websocket(client, use_tls=True, target=target)
+        self.host, self.port, self._ws_path_prefix = target
 
     async def _open_legacy_websocket(self, expected_serial: str | None) -> LegacySession:
         if "@" in self.host:
@@ -592,7 +645,9 @@ class LoxoneBridge:
     async def _connect(self, load_structure: bool, *, probe_legacy: bool = False) -> None:
         legacy_session = None
         try:
-            if self.use_tls:
+            if self._remote_serial:
+                await self._open_remote_websocket(self._remote_serial)
+            elif self.use_tls:
                 try:
                     await self._open_websocket(self._session, use_tls=True)
                 except _LoxoneWebSocketConnectionError as err:
@@ -751,6 +806,11 @@ class LoxoneBridge:
                 raise LoxoneConnectionError("The Gen1 structure does not match its certificate.")
             serial = certified_serial
         self.structure = structure
+        self.icon_paths = frozenset(
+            icon_path
+            for control in structure.controls
+            if (icon_path := normalize_icon_path(control.icon)) is not None
+        )
         self.serial = serial
         self.loxapp_version = self.structure.loxapp_version
         self.server_model = self.structure.server_model
@@ -1029,9 +1089,11 @@ class LoxoneBridge:
 
         self._ws = None
         self._legacy_session = None
-        if self._legacy_client is not None:
-            legacy_client, self._legacy_client = self._legacy_client, None
-            await legacy_client.close()
+        private_clients = (self._legacy_client, self._remote_client)
+        self._legacy_client = self._remote_client = None
+        for client in private_clients:
+            if client is not None:
+                await client.close()
         if self._reader_task is current_task:
             self._reader_task = None
         elif self._reader_task and self._reader_task.done():
@@ -1672,14 +1734,40 @@ def _resolve_miniserver_target(raw_host: str) -> tuple[str, str]:
     if parsed and parsed.hostname:
         host = parsed.hostname
         mac = _extract_mac_from_path(parsed.path)
-        if host.casefold() == CLOUD_DNS_HOST and mac:
+        if host in {CLOUD_DNS_HOST, REMOTE_CONNECT_HOST} and mac:
             return CLOUD_DNS_HOST, f"/{mac}"
-        return host, ""
+        return host, parsed.path.rstrip("/")
 
     mac = _normalize_mac(value)
     if mac:
         return CLOUD_DNS_HOST, f"/{mac}"
     return value, ""
+
+
+def _remote_relay_target(value: Any) -> tuple[str, int, str]:
+    """Validate the HTTPS/WSS relay authority and return its base path."""
+    error = "Loxone Remote Connect returned an invalid relay URL."
+    if not isinstance(value, str):
+        raise LoxoneConnectionError(error)
+    try:
+        parsed = urlsplit(value)
+        port = parsed.port
+    except ValueError as err:
+        raise LoxoneConnectionError(error) from err
+    host = parsed.hostname
+    if (
+        parsed.scheme not in {"https", "wss"}
+        or not host
+        or not _REMOTE_RELAY_HOST.fullmatch(host)
+        or port is None
+        or not 20000 <= port <= 49000
+        or parsed.username is not None
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise LoxoneConnectionError(error)
+    path = parsed.path.rstrip("/").removesuffix(WS_PATH)
+    return host, port, path
 
 
 def _extract_mac_from_path(path: str) -> str | None:

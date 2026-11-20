@@ -1,11 +1,13 @@
-"""Tests for bridge-based Miniserver system diagnostics refresh."""
+"""Tests for Miniserver bridge diagnostics and connection lifecycle."""
 
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 import types
 import unittest
+from unittest.mock import AsyncMock, patch
 
 from tests._loader import load_integration_module
 
@@ -133,6 +135,7 @@ def _install_homeassistant_stubs() -> None:
 
 _install_homeassistant_stubs()
 bridge_module = load_integration_module("custom_components.loxone_home_assistant.bridge")
+connection_config = load_integration_module("custom_components.loxone_home_assistant.connection_config")
 
 
 class BridgeSystemStatsTests(unittest.IsolatedAsyncioTestCase):
@@ -242,6 +245,112 @@ class BridgeSystemStatsTests(unittest.IsolatedAsyncioTestCase):
                 "dev/sys/cpu",
                 ensure_connected=False,
             )
+
+
+class BridgeConnectionTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        self.bridge = bridge_module.LoxoneBridge(
+            object(),
+            {"host": "miniserver.local", "username": "test", "password": "test"},
+        )
+        self.addAsyncCleanup(self.bridge.async_shutdown)
+
+    async def test_reconnect_and_command_share_one_websocket(self) -> None:
+        connect_started = asyncio.Event()
+        finish_connect = asyncio.Event()
+        websocket = types.SimpleNamespace(closed=False, close=AsyncMock())
+
+        async def connect(*, load_structure, probe_legacy=False):
+            connect_started.set()
+            await finish_connect.wait()
+            self.bridge._ws = websocket
+
+        self.bridge.structure = object()
+        self.bridge._connect = AsyncMock(side_effect=connect)
+        with patch.object(bridge_module.asyncio, "sleep", new=AsyncMock()):
+            async with asyncio.timeout(2):
+                reconnect = asyncio.create_task(self.bridge._reconnect_loop())
+                await connect_started.wait()
+                command_connect = asyncio.create_task(self.bridge._ensure_connected())
+                asyncio.get_running_loop().call_soon(finish_connect.set)
+                await asyncio.gather(reconnect, command_connect)
+
+        self.bridge._connect.assert_awaited_once()
+
+    async def test_websocket_opened_during_shutdown_is_closed(self) -> None:
+        connect_started = asyncio.Event()
+        finish_connect = asyncio.Event()
+        websocket = types.SimpleNamespace(closed=False, close=AsyncMock())
+
+        async def ws_connect(*args, **kwargs):
+            connect_started.set()
+            await finish_connect.wait()
+            return websocket
+
+        self.bridge._session = types.SimpleNamespace(ws_connect=ws_connect)
+        async with asyncio.timeout(2):
+            connection = asyncio.create_task(self.bridge._ensure_connected())
+            await connect_started.wait()
+            await self.bridge.async_shutdown()
+            finish_connect.set()
+            with self.assertRaises(bridge_module.LoxoneConnectionError):
+                await connection
+
+        websocket.close.assert_awaited_once()
+        self.assertIsNone(self.bridge._ws)
+
+    async def test_structure_sets_the_allowlist_of_configured_icon_paths(self) -> None:
+        structure = {
+            "msInfo": {"serialNr": "504f94000000", "softwareVersion": "17.3.11.12"},
+            "controls": {
+                "doorbell": {
+                    "name": "Doorbell",
+                    "type": "Pushbutton",
+                    "defaultIcon": "/IconsFilled/doorbell.svg",
+                },
+                "switch": {
+                    "name": "Switch",
+                    "type": "Switch",
+                    "defaultIcon": "https://example.test/icon.svg",
+                },
+            },
+        }
+        self.bridge._send_text_command = AsyncMock(return_value=json.dumps(structure))
+
+        await self.bridge._load_structure()
+
+        self.assertEqual(self.bridge.icon_paths, {"IconsFilled/doorbell.svg"})
+
+    def test_runtime_persists_the_fresh_token_with_edited_connection_settings(self) -> None:
+        stored = {
+            "host": "miniserver.local",
+            "port": 443,
+            "username": "old-user",
+            "password": "old-password",
+            "token": "old-token",
+            "token_valid_until": "999999999",
+        }
+        changes = {
+            "host": "new-address.local",
+            "port": 8443,
+            "username": "new-user",
+            "password": "new-password",
+        }
+
+        merged = connection_config.merge_connection_config(stored, changes)
+        bridge = bridge_module.LoxoneBridge(object(), merged)
+        self.addAsyncCleanup(bridge.async_shutdown)
+        self.assertIsNone(bridge.token)
+        self.assertIsNone(bridge.token_valid_until)
+        bridge.token = "fresh-token"
+        bridge.token_valid_until = "999999999"
+
+        exported = bridge.export_runtime_data()
+        for key, value in changes.items():
+            self.assertEqual(exported[key], value)
+        reloaded = connection_config.merge_connection_config({**stored, **exported}, changes)
+        self.assertEqual(reloaded["token"], "fresh-token")
+        self.assertEqual(reloaded["token_valid_until"], "999999999")
 
 
 if __name__ == "__main__":

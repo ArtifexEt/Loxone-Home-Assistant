@@ -127,6 +127,7 @@ class IntercomHistoryEntry:
     raw_timestamp: str
     image_url: str
     event_time: datetime | None
+    selection_value: str
 
 
 def intercom_auth_credentials(bridge) -> tuple[str | None, str]:
@@ -284,6 +285,7 @@ def intercom_history_entries(
                 raw_timestamp=raw_timestamp,
                 image_url=image_url,
                 event_time=coerce_intercom_datetime(raw_timestamp),
+                selection_value=raw_timestamp,
             )
         )
     return tuple(entries)
@@ -331,10 +333,8 @@ async def async_intercom_history_entries(
     ):
         key = _history_entry_key(event_entry)
         existing = merged.get(key)
-        if existing is None:
-            merged[key] = event_entry
-            continue
-        if existing.event_time is None and event_entry.event_time is not None:
+        # Prefer a server-provided image URL over an inferred Miniserver path.
+        if existing is None or existing.selection_value == existing.raw_timestamp:
             merged[key] = event_entry
 
     return _sorted_history_entries(merged.values())
@@ -629,14 +629,23 @@ def _history_entries_from_payload(
         image_url = event["image_url"]
         if image_url is None:
             continue
-        selection_value = _event_selection_value(event, image_url)
-        if selection_value is None:
-            continue
+        direct_value = f"{INTERCOM_HISTORY_DIRECT_URL_PREFIX}{image_url}"
+        image_timestamp = _timestamp_from_camimage_url(image_url)
+        event_time = event["timestamp"] or coerce_intercom_datetime(image_timestamp)
+        raw_timestamp = direct_value
+        if event_time is not None:
+            raw_timestamp = image_timestamp or event["raw_timestamp"]
+        selection_value = (
+            raw_timestamp
+            if image_url == intercom_history_image_url(bridge, control, raw_timestamp)
+            else direct_value
+        )
         entries.append(
             IntercomHistoryEntry(
-                raw_timestamp=selection_value,
+                raw_timestamp=raw_timestamp,
                 image_url=image_url,
-                event_time=event["timestamp"],
+                event_time=event_time,
+                selection_value=selection_value,
             )
         )
     return _sorted_history_entries(entries)
@@ -674,30 +683,19 @@ async def _async_fetch_json(bridge, url: str) -> Any | None:
 
 def intercom_request_auth(bridge, url: str) -> BasicAuth | None:
     """Choose credentials for a Miniserver proxy or a direct Intercom URL."""
-    if _is_miniserver_url(bridge, url):
+    parsed = urlsplit(url)
+    host = str(getattr(bridge, "host", "")).strip("[]").casefold()
+    if parsed.hostname == host:
+        use_tls = bool(getattr(bridge, "use_tls", True))
+        scheme, default_port = ("https", 443) if use_tls else ("http", 80)
+        if parsed.scheme != scheme or (parsed.port or default_port) != getattr(bridge, "port", 0):
+            return None
         username, password = miniserver_auth_credentials(bridge)
+    elif "/proxy/" in parsed.path:
+        return None
     else:
         username, password = intercom_auth_credentials(bridge)
-    if username is None:
-        return None
-    return BasicAuth(username, password)
-
-
-def _is_miniserver_url(bridge, url: str) -> bool:
-    parsed = urlsplit(url)
-    if not parsed.hostname:
-        return False
-    if "/proxy/" in parsed.path:
-        return True
-    if parsed.hostname != str(getattr(bridge, "host", "")):
-        return False
-
-    bridge_port = int(getattr(bridge, "port", 0) or 0)
-    if parsed.port is not None:
-        return parsed.port == bridge_port
-
-    default_port = 443 if bool(getattr(bridge, "use_tls", True)) else 80
-    return bridge_port == default_port
+    return BasicAuth(username, password) if username is not None else None
 
 
 def _resolve_url_from_payload_with_key_hints(
@@ -966,20 +964,11 @@ def _event_timestamp(event: Mapping[str, Any]) -> datetime | None:
     return coerce_intercom_datetime(timestamp_raw)
 
 
-def _event_selection_value(event: Mapping[str, Any], image_url: str) -> str | None:
-    raw_timestamp = _coerce_text(event.get("raw_timestamp"))
-    extracted = _timestamp_from_camimage_url(image_url)
-    if extracted is not None:
-        return extracted
-    if raw_timestamp is not None and coerce_intercom_datetime(raw_timestamp) is not None:
-        return raw_timestamp
-    return f"{INTERCOM_HISTORY_DIRECT_URL_PREFIX}{image_url}"
-
-
 def _timestamp_from_camimage_url(image_url: str) -> str | None:
-    if "/camimage/" not in image_url:
+    path = urlsplit(image_url).path
+    if "/camimage/" not in path:
         return None
-    candidate = image_url.rstrip("/").rsplit("/", 1)[-1]
+    candidate = path.rstrip("/").rsplit("/", 1)[-1]
     if not candidate:
         return None
     return candidate if coerce_intercom_datetime(candidate) is not None else None

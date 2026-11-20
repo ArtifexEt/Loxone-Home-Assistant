@@ -492,7 +492,7 @@ class IntercomSensorTests(unittest.IsolatedAsyncioTestCase):
             details={
                 "videoInfo": {
                     "eventHistoryUrl": "/proxy/device-uuid/history/intercom.json",
-                    "host": "mini.local",
+                    "host": "192.168.0.50",
                 }
             },
         )

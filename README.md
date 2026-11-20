@@ -154,7 +154,7 @@ TLS-capable Miniservers use secure WebSocket (WSS). Miniserver Gen 1 uses Loxone
 5. Add the integration from `Settings -> Devices & Services`.
 6. In manual host mode you can use either:
    - local host/IP (for example `192.0.2.10`), or
-   - Cloud DNS form based on MAC (`02AABBCCDDEE` or `https://dns.loxonecloud.com/02AABBCCDDEE`).
+   - Remote Connect form based on the Miniserver serial (`02AABBCCDDEE` or `https://connect.loxonecloud.com/02AABBCCDDEE`).
 
 
 ## Configuration flow
@@ -166,6 +166,8 @@ For a Miniserver Gen 1 with a custom port, select **Enter a host and port**. Ent
 On TLS-capable Miniservers, Intercom video uses the configured Loxone user by default. With Gen 1, Miniserver media requests are anonymous. A direct Intercom endpoint can use its own separate credentials.
 
 If your Intercom camera stream returns `401 Unauthorized`, open integration `Options` and set dedicated Intercom video credentials (some Intercom models use separate video-module login data).
+
+Loxone 17.3 adds optional email MFA for Miniserver users and groups. Loxone disables username/password web services for accounts covered by that policy. Check the account and group policy when HTTP media requests stop authenticating after an upgrade. [Loxone Config changelog](https://www.loxone.com/enen/support/changelog-config/)
 
 After successful connection and validation, the final step asks for startup options:
 
@@ -305,7 +307,7 @@ cards:
       - button.furtka_send_tts
 ```
 
-Live Intercom video is exposed as a native camera MJPEG stream. History images are built
+The camera can show a live JPEG or MJPEG feed when the controller provides a compatible HTTP endpoint. History images are built
 from `lastBellEvents` and fetched from Miniserver `camimage/{uuidAction}/{timestamp}`.
 The `select.<name>_history_photo` entity is enabled by default so you can switch the camera
 preview between `Live` and historical snapshots. When the Intercom also exposes an
@@ -374,14 +376,7 @@ Access/keypad events are emitted on rising edges for boolean-like states and on 
 
 ## Intercom live call scope
 
-Home Assistant can reliably expose the intercom video stream and control/state/event automation, but full two-way live audio/video calling UX depends on vendor-specific mobile apps and codecs that are not standardized in HA entities.
-
-This integration therefore focuses on:
-
-- live video preview (`camera`)
-- ring/call/proximity event and state automation
-- TTS command dispatch
-- intercom light control (when the block publishes compatible states)
+Intercom Gen 2 uses WebRTC for live video and two-way audio in the Loxone app. Use the Loxone app or web interface for calls. The Home Assistant integration supports cameras that expose compatible HTTP media, doorbell and proximity events, text-to-speech, and available light controls. The `answer` command stops the bell, and `mute` controls the doorbell mute state. [Loxone Intercom documentation](https://www.loxone.com/enus/kb/intercom-2/) · [Network protocols](https://updatefiles.loxone.com/KnowledgeBase/Online/Common/Documents/Loxone-Required-Ports-Domains.pdf)
 
 ## Development notes
 

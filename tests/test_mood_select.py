@@ -153,6 +153,7 @@ def _install_homeassistant_stubs() -> None:
 _install_homeassistant_stubs()
 models = load_integration_module("custom_components.loxone_home_assistant.models")
 select_module = load_integration_module("custom_components.loxone_home_assistant.select")
+media_module = load_integration_module("custom_components.loxone_home_assistant.intercom_media")
 LoxoneControl = models.LoxoneControl
 LoxoneMoodSelectEntity = select_module.LoxoneMoodSelectEntity
 LoxoneRadioOutputSelectEntity = select_module.LoxoneRadioOutputSelectEntity
@@ -385,6 +386,37 @@ class MoodSelectTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             bridge._intercom_selected_history_timestamps["intercom-action"],  # noqa: SLF001
             "20260314153000",
+        )
+
+    async def test_intercom_history_selection_prefers_server_image_for_same_timestamp(self) -> None:
+        timestamp = "20260314153000"
+        history_url = "https://intercom.local/history/entries.json"
+        image_url = "https://intercom.local/jpg/history/visitor.jpg?size=full"
+        intercom = LoxoneControl(
+            uuid="intercom-uuid",
+            uuid_action="intercom-action",
+            name="Dzwonek",
+            type="IntercomV2",
+            states={"lastBellEvents": "state-events"},
+            details={"videoInfo": {"eventHistoryUrl": history_url}},
+        )
+        session = _FakeHistorySession(
+            {history_url: {"events": [{"timestamp": timestamp, "imageUrl": image_url}]}}
+        )
+        bridge = _FakeBridge([intercom], {"state-events": timestamp}, session=session)
+        entity = LoxoneIntercomHistorySelectEntity(bridge, intercom)
+
+        await entity.async_update()
+
+        self.assertEqual(len(entity._attr_options), 2)
+        await entity.async_select_option(entity._attr_options[1])
+        self.assertEqual(entity.extra_state_attributes["selected_timestamp"], timestamp)
+        selected_value = media_module.intercom_selected_history_timestamp(
+            bridge, intercom.uuid_action
+        )
+        self.assertEqual(
+            media_module.intercom_history_image_url(bridge, intercom, selected_value),
+            image_url,
         )
 
 

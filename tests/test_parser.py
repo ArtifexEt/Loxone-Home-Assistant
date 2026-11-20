@@ -172,6 +172,10 @@ class ParseStructureTests(unittest.TestCase):
             "/dev/secured-stream.mjpg",
         )
 
+        payload["controls"]["intercom-1"]["securedDetails"] = True
+        control = parse_structure(payload).controls_by_action["action-intercom"]
+        self.assertIs(control.details["securedDetails"], True)
+
     def test_parse_structure_merges_event_uuids_into_runtime_state_map(self) -> None:
         payload = {
             "msInfo": {

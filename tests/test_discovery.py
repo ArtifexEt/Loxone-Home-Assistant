@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import hmac
@@ -348,7 +349,7 @@ class BridgeConnectionTests(unittest.IsolatedAsyncioTestCase):
             get=self.session.get
         )
 
-    def _new_bridge(self, port=7778, *, verify_ssl=False):
+    def _new_bridge(self, port=7778, *, host=None, verify_ssl=False):
         hass = types.SimpleNamespace(
             async_create_background_task=lambda coroutine, _name: coroutine.close(),
         )
@@ -356,7 +357,7 @@ class BridgeConnectionTests(unittest.IsolatedAsyncioTestCase):
             return bridge.LoxoneBridge(
                 hass,
                 {
-                    "host": self.host,
+                    "host": host or self.host,
                     "port": port,
                     "username": "loxone-user",
                     "password": "loxone-password",
@@ -592,6 +593,144 @@ class BridgeConnectionTests(unittest.IsolatedAsyncioTestCase):
                 candidate._authenticate.assert_awaited_once()
                 candidate._load_structure.assert_awaited_once()
                 self.assertTrue(candidate.available)
+
+    async def test_direct_websocket_preserves_configured_path_and_port(self):
+        candidate = self._new_bridge(host=f"https://{self.host}/loxone/")
+
+        await candidate._open_websocket(self.session, use_tls=True)
+
+        self.session.ws_connect.assert_awaited_once_with(
+            f"wss://{self.host}:7778/loxone/ws/rfc6455",
+            protocols=("remotecontrol",),
+            ssl=False,
+            heartbeat=None,
+        )
+        self.probe_factory.assert_not_called()
+        self.assertEqual(
+            candidate.resolve_http_url("/camimage/control/time"),
+            f"https://{self.host}:7778/loxone/camimage/control/time",
+        )
+
+    async def test_remote_aliases_resolve_and_use_verified_relay_for_websocket_and_media(self):
+        relay = "eu1.remcov3.loxonecloud.com:32123"
+        trace = types.SimpleNamespace(on_request_redirect=[])
+        self.enterContext(
+            patch.object(sys.modules["aiohttp"], "TraceConfig", return_value=trace, create=True)
+        )
+        for host in (
+            "504F94000000",
+            "https://dns.loxonecloud.com/50:4F:94:00:00:00",
+            "connect.loxonecloud.com/504F94000000",
+        ):
+            with self.subTest(host=host):
+                websocket = types.SimpleNamespace(closed=False, close=AsyncMock())
+                response = _FakeResponse(200, None)
+                response.json = AsyncMock(return_value={"url": f"https://{relay}/hub/"})
+                remote_client = Mock(
+                    get=Mock(return_value=response),
+                    ws_connect=AsyncMock(return_value=websocket),
+                    close=AsyncMock(),
+                )
+                self.probe_factory.return_value = remote_client
+                candidate = self._new_bridge(host=host)
+                candidate._authenticate = AsyncMock()
+                candidate._load_structure = AsyncMock()
+                candidate._send_loxone_command = AsyncMock()
+                candidate.async_refresh_system_stats = AsyncMock()
+
+                await candidate.async_initialize(probe_legacy=True)
+
+                remote_client.get.assert_called_once_with(
+                    "https://connect.loxonecloud.com/getip",
+                    params={"snr": "504F94000000"},
+                    allow_redirects=False,
+                )
+                response.json.assert_awaited_once_with(content_type=None)
+                remote_client.ws_connect.assert_awaited_once_with(
+                    f"wss://{relay}/hub/ws/rfc6455",
+                    protocols=("remotecontrol",),
+                    ssl=None,
+                    heartbeat=None,
+                )
+                candidate._authenticate.assert_awaited_once()
+                self.assertTrue(candidate.verify_ssl)
+                self.assertEqual(
+                    candidate.resolve_http_url("camimage/control/time"),
+                    f"https://{relay}/hub/camimage/control/time",
+                )
+                await candidate.async_shutdown()
+                remote_client.close.assert_awaited_once()
+        self.assertEqual(self.session.mock_calls, [])
+
+    async def test_remote_connect_does_not_authenticate_on_invalid_relay_or_redirect(self):
+        trace = types.SimpleNamespace(on_request_redirect=[])
+        self.enterContext(
+            patch.object(sys.modules["aiohttp"], "TraceConfig", return_value=trace, create=True)
+        )
+
+        async def redirect(*_args, **_kwargs):
+            await trace.on_request_redirect[-1](None, None, None)
+
+        for location, error in (
+            ("https://eu.remcov3.loxonecloud.com.example.net:32123", "invalid relay URL"),
+            ("https://eu.remcov3.loxonecloud.com:32123", "redirected"),
+        ):
+            with self.subTest(location=location):
+                remote_client = Mock(
+                    get=Mock(return_value=_FakeResponse(200, {"url": location})),
+                    ws_connect=AsyncMock(side_effect=redirect),
+                    close=AsyncMock(),
+                )
+                self.probe_factory.return_value = remote_client
+                candidate = self._new_bridge(host="504F94000000")
+                candidate._authenticate = AsyncMock()
+
+                with self.assertRaisesRegex(bridge.LoxoneConnectionError, error):
+                    await candidate.async_initialize(probe_legacy=True)
+
+                candidate._authenticate.assert_not_awaited()
+                remote_client.close.assert_awaited_once()
+        self.assertEqual(self.session.mock_calls, [])
+
+    async def test_remote_connect_closes_client_when_lookup_is_cancelled_or_shutdown(self):
+        trace = types.SimpleNamespace(on_request_redirect=[])
+        self.enterContext(
+            patch.object(sys.modules["aiohttp"], "TraceConfig", return_value=trace, create=True)
+        )
+        for shutdown in (False, True):
+            with self.subTest(shutdown=shutdown):
+                reading = asyncio.Event()
+                release = asyncio.Event()
+
+                async def read_json(**_kwargs):
+                    reading.set()
+                    await release.wait()
+                    return {"url": "https://eu1.remcov3.loxonecloud.com:32123"}
+
+                response = _FakeResponse(200, None)
+                response.json = read_json
+                remote_client = Mock(
+                    get=Mock(return_value=response), ws_connect=AsyncMock(), close=AsyncMock()
+                )
+                self.probe_factory.return_value = remote_client
+                candidate = self._new_bridge(host="504F94000000")
+                candidate._authenticate = AsyncMock()
+                connect = asyncio.create_task(candidate.async_initialize())
+                await asyncio.wait_for(reading.wait(), timeout=1)
+
+                if shutdown:
+                    await candidate.async_shutdown()
+                    release.set()
+                    with self.assertRaisesRegex(bridge.LoxoneConnectionError, "shutting down"):
+                        await connect
+                else:
+                    connect.cancel()
+                    with self.assertRaises(asyncio.CancelledError):
+                        await connect
+
+                remote_client.ws_connect.assert_not_awaited()
+                remote_client.close.assert_awaited_once()
+                candidate._authenticate.assert_not_awaited()
 
     async def test_error_after_wss_upgrade_does_not_trigger_http(self):
         self.session.ws_connect.return_value = types.SimpleNamespace(

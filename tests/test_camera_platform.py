@@ -585,6 +585,64 @@ class CameraPlatformTests(unittest.IsolatedAsyncioTestCase):
             expected_snapshot_url,
         )
 
+    async def test_camera_retries_secured_details_after_connection_failure(self) -> None:
+        control = LoxoneControl(
+            uuid="intercom-uuid",
+            uuid_action="intercom-action",
+            name="Dzwonek",
+            type="Intercom",
+            details={"securedDetails": True},
+        )
+        bridge = _FakeBridge([control], {}, _FakeSession())
+        responses = iter((None, {"value": {"videoInfo": {"alertImage": "/dev/alert.jpg"}}}))
+
+        async def send_action(_uuid_action, _command):
+            response = next(responses)
+            if response is None:
+                raise TimeoutError
+            return response
+
+        bridge.async_send_action = send_action
+        self.assertTrue(camera_module._is_intercom_camera_control(control))
+        entity = LoxoneIntercomCameraEntity(bridge, control)
+
+        self.assertIsNone(await entity.async_camera_image())
+        self.assertEqual(await entity.async_camera_image(), b"default-image")
+
+    async def test_camera_rejects_html_and_keeps_history_out_of_live_cache(self) -> None:
+        control = LoxoneControl(
+            uuid="intercom-uuid",
+            uuid_action="intercom-action",
+            name="Dzwonek",
+            type="IntercomV2",
+            details={"videoInfo": {"alertImage": "/dev/live.jpg"}},
+        )
+        live_url = "https://mini.local/dev/live.jpg"
+        history_path = "https://mini.local/camimage/intercom-action/"
+        session = _FakeSession(
+            {
+                (live_url, True): (200, b"live-image"),
+                (history_path + "20260314123045", True): (200, b"history-image"),
+                (history_path + "20260314123100", True): (200, b"<html>Login</html>", "text/html"),
+            }
+        )
+        bridge = _FakeBridge([control], {}, session)
+        entity = LoxoneIntercomCameraEntity(bridge, control)
+        self.assertEqual(await entity.async_camera_image(), b"live-image")
+
+        media_module.set_intercom_selected_history_timestamp(bridge, control.uuid_action, "20260314123045")
+        self.assertEqual(await entity.async_camera_image(), b"history-image")
+
+        media_module.set_intercom_selected_history_timestamp(bridge, control.uuid_action, "20260314123100")
+        self.assertIsNone(await entity.async_camera_image())
+
+        media_module.set_intercom_selected_history_timestamp(bridge, control.uuid_action, None)
+        session.responses[(live_url, True)] = (503, b"")
+        self.assertEqual(await entity.async_camera_image(), b"live-image")
+        response = await entity.handle_async_mjpeg_stream(request=None)
+        self.assertEqual(response.status, 200)
+        self.assertEqual(response.body, b"live-image")
+
     async def test_live_stream_uses_dedicated_intercom_credentials(self) -> None:
         control = LoxoneControl(
             uuid="intercom-uuid",
@@ -650,10 +708,15 @@ class CameraPlatformTests(unittest.IsolatedAsyncioTestCase):
         bridge.intercom_username = "camuser"
         bridge.intercom_password = "campass"
         auth = media_module.intercom_request_auth(
-            bridge, "https://camera.local/proxy/device-uuid/images/1.jpg"
+            bridge, "https://mini.local/proxy/device-uuid/images/1.jpg"
         )
 
         self.assertEqual(getattr(auth, "login", None), "user")
+        self.assertIsNone(
+            media_module.intercom_request_auth(
+                bridge, "https://camera.local/proxy/device-uuid/images/1.jpg"
+            )
+        )
 
     async def test_gen1_proxy_snapshot_uses_no_auth_and_does_not_follow_redirects(self) -> None:
         url = "http://mini.local:7778/proxy/device-uuid/images/1.jpg"
