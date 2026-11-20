@@ -26,6 +26,8 @@ If the button does not open the flow directly, use `Settings -> Devices & Servic
 - connects locally over WebSocket using WSS or Loxone command encryption
 - imports the Loxone structure from `LoxAPP3.json`
 - keeps two-way state sync between Home Assistant and Loxone
+- checks for project changes after reconnecting to the Miniserver and every five minutes while connected,
+  then reloads the integration to discover new controls and update existing entities
 - exposes common Loxone blocks as Home Assistant entities
 - exposes Intercom/IntercomV2 (and DoorController/DoorStation variants) as dedicated doorbell entities:
   - camera stream + snapshot preview when available
