@@ -57,6 +57,7 @@ from .intercom import (
     is_intercom_control,
     resolve_intercom_command,
 )
+from .intercom_gallery import async_setup_intercom_gallery
 from .media_player import build_audio_tts_command, resolve_audio_tts_target_uuid_action
 from .models import LoxoneControl
 from .runtime import bridges_by_entry_id, remove_entry_bridge, set_entry_bridge
@@ -169,6 +170,7 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
     if not hass.data[DOMAIN].get(DATA_ICON_VIEW_REGISTERED):
         hass.http.register_view(LoxoneIconProxyView())
         hass.data[DOMAIN][DATA_ICON_VIEW_REGISTERED] = True
+    await async_setup_intercom_gallery(hass)
 
     if not hass.services.has_service(DOMAIN, SERVICE_SEND_COMMAND):
         hass.services.async_register(

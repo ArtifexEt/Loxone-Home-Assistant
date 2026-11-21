@@ -16,7 +16,7 @@ from typing import Any
 from urllib.parse import quote
 from uuid import NAMESPACE_URL, uuid5
 
-from .intercom_signaling import IntercomSignaling, IntercomSignalingError
+from .intercom_signaling import IntercomSignaling, IntercomSignalingError, async_get_scoped_archive_photo
 from .models import LoxoneControl
 
 GEN2_ARCHIVE_SELECTION_PREFIX = "gen2:"
@@ -24,6 +24,7 @@ _LOGGER = logging.getLogger(__name__)
 _ARCHIVE_LIMIT = 100
 _ARCHIVE_TIMEOUT = 15
 _ARCHIVE_REFRESH_INTERVAL = 25
+_THUMBNAIL_DOWNLOAD_LIMIT = 3
 _PHOTO_CACHE_INTERVAL = 15
 _LATEST_TIMESTAMP = 253_402_300_799  # Last second representable by Python datetime.
 _LOXONE_EPOCH = 1_230_768_000
@@ -42,20 +43,35 @@ class IntercomArchiveEntry:
         return f"{GEN2_ARCHIVE_SELECTION_PREFIX}{self.timestamp}"
 
 
+@dataclass(frozen=True, slots=True)
+class _ActivityPhotos:
+    image: str
+    thumbnail: str | None
+
+    @property
+    def preview_paths(self) -> tuple[str, ...]:
+        if self.thumbnail and self.thumbnail != self.image:
+            return self.thumbnail, self.image
+        return (self.image,)
+
+
 @dataclass(slots=True)
 class _ArchiveCache:
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     refreshed_for: tuple[Any, Any] | None = None
     next_refresh: float = 0
     entries: tuple[IntercomArchiveEntry, ...] = ()
+    paths: dict[int, _ActivityPhotos] = field(default_factory=dict, repr=False)
     photo_timestamp: int | None = None
     photo_expires_at: float = 0
-    photo: bytes | None = None
+    photo: bytes | None = field(default=None, repr=False)
 
 
 @dataclass(slots=True)
 class _ArchiveAccess:
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    thumbnail_slots: asyncio.Semaphore = field(default_factory=lambda: asyncio.Semaphore(_THUMBNAIL_DOWNLOAD_LIMIT))
+    legacy_thumbnail_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     expires_at: float = 0
     token: str | None = field(default=None, repr=False)
 
@@ -88,8 +104,9 @@ async def async_gen2_archive_entries(bridge, control: LoxoneControl) -> tuple[In
             async with asyncio.timeout(_ARCHIVE_TIMEOUT), _archive_connection(bridge, control) as signaling:
                 paths = await _async_activity_paths(signaling)
         except (IntercomSignalingError, OSError, TimeoutError):
-            pass
+            cache.paths.clear()
         else:
+            cache.paths = paths
             cache.entries = _entries_from_paths(paths)
         cache.next_refresh = monotonic() + _ARCHIVE_REFRESH_INTERVAL
         cache.refreshed_for = hint
@@ -100,9 +117,7 @@ async def async_gen2_archive_image(bridge, control: LoxoneControl, selection_val
     """Fetch the selected photo with a fresh private activity path and session token."""
     if not is_gen2_archive_control(bridge, control):
         return None
-    if not selection_value.startswith(GEN2_ARCHIVE_SELECTION_PREFIX):
-        return None
-    timestamp = _coerce_timestamp(selection_value[len(GEN2_ARCHIVE_SELECTION_PREFIX) :])
+    timestamp = _selection_timestamp(selection_value)
     if timestamp is None:
         return None
 
@@ -115,11 +130,12 @@ async def async_gen2_archive_image(bridge, control: LoxoneControl, selection_val
         try:
             async with asyncio.timeout(_ARCHIVE_TIMEOUT), _archive_connection(bridge, control) as signaling:
                 paths = await _async_activity_paths(signaling)
+                cache.paths = paths
                 cache.entries = _entries_from_paths(paths)
                 cache.next_refresh = monotonic() + _ARCHIVE_REFRESH_INTERVAL
                 cache.refreshed_for = hint
-                path = paths.get(timestamp)
-                photo = await _async_download_photo(bridge, signaling, path) if path is not None else None
+                activity = paths.get(timestamp)
+                photo = await _async_download_photo(bridge, signaling, activity.image) if activity else None
         except (IntercomSignalingError, OSError, TimeoutError):
             photo = None
 
@@ -127,6 +143,42 @@ async def async_gen2_archive_image(bridge, control: LoxoneControl, selection_val
         cache.photo_expires_at = monotonic() + _PHOTO_CACHE_INTERVAL
         cache.photo = photo
         return photo
+
+
+async def async_gen2_archive_thumbnail(bridge, control: LoxoneControl, selection_value: str) -> bytes | None:
+    """Fetch one private activity preview through the authenticated Miniserver."""
+    if not is_gen2_archive_control(bridge, control) or not getattr(bridge, "token", None):
+        return None
+    timestamp = _selection_timestamp(selection_value)
+    if timestamp is None:
+        return None
+
+    access = _archive_access(bridge)
+    try:
+        async with asyncio.timeout(_ARCHIVE_TIMEOUT), access.thumbnail_slots:
+            await async_gen2_archive_entries(bridge, control)
+            activity = _archive_cache(bridge, control).paths.get(timestamp)
+            if activity is None:
+                return None
+
+            token = await _async_archive_token(bridge)
+            if token is not None:
+                for path in activity.preview_paths:
+                    photo = await async_get_scoped_archive_photo(bridge, control.details["deviceUuid"], path, token)
+                    if photo is not None:
+                        return photo
+
+            # Challenge authentication requires a live signaling session. Keep at
+            # most one gallery challenge active on each Miniserver at a time.
+            async with access.legacy_thumbnail_lock, _archive_connection(bridge, control) as signaling:
+                paths = await _async_activity_paths(signaling)
+                if (activity := paths.get(timestamp)) is not None:
+                    for path in activity.preview_paths:
+                        if (photo := await signaling.async_get_archive_photo(path)) is not None:
+                            return photo
+    except (IntercomSignalingError, OSError, TimeoutError):
+        pass
+    return None
 
 
 async def _async_download_photo(bridge, signaling: IntercomSignaling, path: str) -> bytes | None:
@@ -144,9 +196,7 @@ async def _async_archive_token(bridge) -> str | None:
     username = getattr(bridge, "username", None)
     if send is None or not client_uuid or not isinstance(username, str):
         return None
-    access = getattr(bridge, "_intercom_archive_access", None)
-    if access is None:
-        access = bridge._intercom_archive_access = _ArchiveAccess()
+    access = _archive_access(bridge)
 
     async with access.lock:
         if monotonic() < access.expires_at:
@@ -213,6 +263,13 @@ def _archive_token_payload(token: Any) -> Mapping[str, Any] | None:
     return claims
 
 
+def _archive_access(bridge) -> _ArchiveAccess:
+    access = getattr(bridge, "_intercom_archive_access", None)
+    if access is None:
+        access = bridge._intercom_archive_access = _ArchiveAccess()
+    return access
+
+
 def _archive_cache(bridge, control: LoxoneControl) -> _ArchiveCache:
     archives = getattr(bridge, "_intercom_archive_cache", None)
     if archives is None:
@@ -242,7 +299,7 @@ async def _archive_connection(bridge, control: LoxoneControl) -> AsyncIterator[I
         await signaling.async_close()
 
 
-async def _async_activity_paths(signaling: IntercomSignaling) -> dict[int, str]:
+async def _async_activity_paths(signaling: IntercomSignaling) -> dict[int, _ActivityPhotos]:
     # The modern vendor command includes its activity response format version.
     try:
         records = await signaling.async_request("getLastActivities", [0, _ARCHIVE_LIMIT, 2])
@@ -259,13 +316,22 @@ async def _async_activity_paths(signaling: IntercomSignaling) -> dict[int, str]:
             continue
         timestamp = _coerce_timestamp(item.get("date"))
         path = item.get("imagePath")
-        if timestamp is not None and isinstance(path, str) and path:
-            paths.setdefault(timestamp, path)
+        if timestamp is not None and isinstance(path, str) and 0 < len(path) <= 4096:
+            thumbnail = item.get("thumbPath")
+            if not isinstance(thumbnail, str) or not 0 < len(thumbnail) <= 4096:
+                thumbnail = None
+            paths.setdefault(timestamp, _ActivityPhotos(path, thumbnail))
     return paths
 
 
-def _entries_from_paths(paths: dict[int, str]) -> tuple[IntercomArchiveEntry, ...]:
+def _entries_from_paths(paths: dict[int, _ActivityPhotos]) -> tuple[IntercomArchiveEntry, ...]:
     return tuple(IntercomArchiveEntry(timestamp) for timestamp in sorted(paths, reverse=True))
+
+
+def _selection_timestamp(selection_value: str) -> int | None:
+    if selection_value.startswith(GEN2_ARCHIVE_SELECTION_PREFIX):
+        return _coerce_timestamp(selection_value[len(GEN2_ARCHIVE_SELECTION_PREFIX) :])
+    return None
 
 
 def _coerce_timestamp(value: Any) -> int | None:

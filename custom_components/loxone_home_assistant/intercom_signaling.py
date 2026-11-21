@@ -71,6 +71,29 @@ def intercom_websocket_url(bridge: LoxoneBridge, device_uuid: str) -> str:
     return urlunsplit(("wss", parsed.netloc, parsed.path, "", ""))
 
 
+def _intercom_proxy_tls(bridge: LoxoneBridge) -> bool | Fingerprint:
+    from aiohttp import Fingerprint
+
+    if bridge.verify_ssl:
+        return True
+    fingerprint = bridge.miniserver_tls_fingerprint()
+    if fingerprint is None:
+        raise IntercomSignalingError("The authenticated Miniserver TLS certificate is unavailable.")
+    return Fingerprint(fingerprint)
+
+
+async def async_get_scoped_archive_photo(
+    bridge: LoxoneBridge, device_uuid: str, image_path: str, token: str
+) -> bytes | None:
+    """Download an archive JPEG using a scoped token without opening signaling."""
+    from homeassistant.helpers.aiohttp_client import async_get_clientsession
+
+    proxy_url = intercom_websocket_url(bridge, device_uuid)
+    tls = _intercom_proxy_tls(bridge)
+    client = async_get_clientsession(bridge.hass, verify_ssl=bridge.verify_ssl)
+    return await _async_download_archive_photo(client, proxy_url, tls, image_path, token)
+
+
 class IntercomSignaling:
     """One authenticated Intercom WebSocket and its in-flight JSON-RPC requests."""
 
@@ -95,19 +118,14 @@ class IntercomSignaling:
     @classmethod
     async def async_connect(cls, bridge: LoxoneBridge, device_uuid: str) -> IntercomSignaling:
         """Open the Miniserver proxy and answer the Intercom's authentication challenge."""
-        from aiohttp import ClientError, ClientSession, Fingerprint, TraceConfig
+        from aiohttp import ClientError, ClientSession, TraceConfig
 
         url = intercom_websocket_url(bridge, device_uuid)
         token = bridge.token
         if not isinstance(token, str) or not token:
             raise IntercomSignalingError("No authenticated Miniserver token is available.")
 
-        tls: bool | Fingerprint = True
-        if not bridge.verify_ssl:
-            fingerprint = bridge.miniserver_tls_fingerprint()
-            if fingerprint is None:
-                raise IntercomSignalingError("The authenticated Miniserver TLS certificate is unavailable.")
-            tls = Fingerprint(fingerprint)
+        tls = _intercom_proxy_tls(bridge)
 
         async def reject_redirect(*_args: Any) -> None:
             raise IntercomSignalingError("The Intercom proxy redirected the connection.")
@@ -207,38 +225,10 @@ class IntercomSignaling:
 
     async def async_get_archive_photo(self, image_path: str, *, auth_token: str | None = None) -> bytes | None:
         """Download a private archive JPEG over the authenticated proxy origin."""
-        from aiohttp import ClientError
-        from yarl import URL
-
         token = self._photo_token if auth_token is None else auth_token
         if self._closed or token is None:
             return None
-        url = _archive_photo_url(self._proxy_url, image_path, token)
-        if url is None:
-            _LOGGER.debug("Rejected an invalid Loxone Intercom archive photo path")
-            return None
-
-        try:
-            async with asyncio.timeout(_REQUEST_TIMEOUT), self._client.get(
-                URL(url, encoded=True), ssl=self._tls, allow_redirects=False
-            ) as response:
-                if response.status != 200:
-                    _LOGGER.debug("Loxone Intercom archive photo HTTP status %d", response.status)
-                    return None
-                if response.content_type not in {"image/jpeg", "image/jpg", "application/octet-stream"}:
-                    _LOGGER.debug("Loxone Intercom archive photo response did not contain a JPEG")
-                    return None
-                if (response.content_length or 0) > _MAX_PHOTO_BYTES:
-                    return None
-                photo = bytearray()
-                async for chunk in response.content.iter_chunked(64 * 1024):
-                    if len(photo) + len(chunk) > _MAX_PHOTO_BYTES:
-                        return None
-                    photo.extend(chunk)
-                return bytes(photo) if photo.startswith(b"\xff\xd8") else None
-        except (ClientError, OSError, RuntimeError, TimeoutError, ValueError):
-            _LOGGER.debug("Loxone Intercom archive photo request failed")
-            return None
+        return await _async_download_archive_photo(self._client, self._proxy_url, self._tls, image_path, token)
 
     async def async_add_ice_candidate(
         self, candidate: str, sdp_mline_index: int, sdp_mid: str | None = None
@@ -342,6 +332,40 @@ class IntercomSignaling:
         if self._notifications.full():
             self._notifications.get_nowait()
         self._notifications.put_nowait(None)
+
+
+async def _async_download_archive_photo(
+    client: ClientSession, proxy_url: str, tls: bool | Fingerprint, image_path: str, token: str
+) -> bytes | None:
+    from aiohttp import ClientError
+    from yarl import URL
+
+    url = _archive_photo_url(proxy_url, image_path, token)
+    if url is None:
+        _LOGGER.debug("Rejected an invalid Loxone Intercom archive photo path")
+        return None
+
+    try:
+        async with asyncio.timeout(_REQUEST_TIMEOUT), client.get(
+            URL(url, encoded=True), ssl=tls, allow_redirects=False
+        ) as response:
+            if response.status != 200:
+                _LOGGER.debug("Loxone Intercom archive photo HTTP status %d", response.status)
+                return None
+            if response.content_type not in {"image/jpeg", "image/jpg", "application/octet-stream"}:
+                _LOGGER.debug("Loxone Intercom archive photo response did not contain a JPEG")
+                return None
+            if (response.content_length or 0) > _MAX_PHOTO_BYTES:
+                return None
+            photo = bytearray()
+            async for chunk in response.content.iter_chunked(64 * 1024):
+                if len(photo) + len(chunk) > _MAX_PHOTO_BYTES:
+                    return None
+                photo.extend(chunk)
+            return bytes(photo) if photo.startswith(b"\xff\xd8") else None
+    except (ClientError, OSError, RuntimeError, TimeoutError, ValueError):
+        _LOGGER.debug("Loxone Intercom archive photo request failed")
+        return None
 
 
 def _archive_photo_url(proxy_url: str, image_path: str, token: str) -> str | None:

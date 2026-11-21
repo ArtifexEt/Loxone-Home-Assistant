@@ -269,7 +269,7 @@ data:
   arguments: "Leave package at box/Call owner"
 ```
 
-## Intercom UI in Home Assistant (live video + TTS)
+## Intercom UI in Home Assistant
 
 Use parent Intercom `uuid_action` (you can copy it from any Intercom entity attributes, for example `camera.<name>_video`).
 
@@ -312,10 +312,22 @@ cards:
 ```
 
 The camera can show a live JPEG or MJPEG feed when the controller provides a compatible HTTP endpoint.
+
+### Intercom Gen 2 photo gallery
+
 For a locally paired Intercom Gen 2, the integration reads the native activity archive through the authenticated Miniserver connection.
-On controllers that publish `lastBellEvents`, legacy photos are fetched from Miniserver `camimage/{uuidAction}/{timestamp}`.
-The `select.<name>_history_photo` entity switches the **Video** camera between `Live` and the available photos.
-Put that selector and the **Video** camera on a dashboard to browse the archive. Home Assistant serves the image through its camera proxy and keeps the original media URLs internal.
+
+1. In **Settings → Dashboards → Resources**, add `/loxone_home_assistant/intercom-gallery.js` as a **JavaScript module**. Enable Advanced Mode in your Home Assistant profile if Resources is hidden.
+2. Add a manual card to your dashboard and select the Intercom's **Video** camera in the `entity` field.
+
+```yaml
+type: custom:loxone-intercom-gallery
+entity: camera.furtka_video
+```
+
+Click or tap a thumbnail to open the full photo. Home Assistant serves the photos to users with read access to that camera. Loxone media URLs and credentials stay inside the integration.
+
+The `select.<name>_history_photo` entity also lets you switch the **Video** camera between `Live` and the available photos. This selector supports legacy controllers that publish `lastBellEvents`.
 
 ## Audio TTS UI in Home Assistant
 

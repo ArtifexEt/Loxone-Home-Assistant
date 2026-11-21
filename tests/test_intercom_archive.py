@@ -6,10 +6,11 @@ import asyncio
 import base64
 import hmac
 import json
+import sys
 import unittest
 from importlib import import_module
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, call, patch
+from unittest.mock import AsyncMock, Mock, call, patch
 
 from tests._loader import load_integration_module
 
@@ -38,10 +39,11 @@ class Gen2ArchiveTests(unittest.IsolatedAsyncioTestCase):
             type="IntercomV2", details={"deviceUuid": DEVICE_UUID},
         )
         self.photo_path = f"/snapshots/example/bell/{NEWER}.jpg?signature=test"
+        self.thumb_path = f"/snapshots/example/bell/{NEWER}-thumb.jpg?signature=test"
         self.session = SimpleNamespace(
             async_request=AsyncMock(return_value=[
                 {"date": OLDER, "imagePath": "snapshots/older.jpg"},
-                {"date": NEWER, "imagePath": self.photo_path},
+                {"date": NEWER, "imagePath": self.photo_path, "thumbPath": self.thumb_path},
                 {"date": NEWER, "imagePath": "duplicate.jpg"},
                 {"date": True, "imagePath": "invalid.jpg"},
                 {"date": "1800000099", "error": {"invalid": True}, "imagePath": "partial.jpg"},
@@ -145,6 +147,69 @@ class Gen2ArchiveTests(unittest.IsolatedAsyncioTestCase):
         )
         self.session.async_get_archive_photo.assert_awaited_once_with(self.photo_path)
 
+    async def test_thumbnails_share_metadata_and_token_and_prefer_native_previews(self) -> None:
+        token = _test_jwt({"msSerial": "000000000001", "tokenRights": 0})
+        self.bridge.client_uuid = "test-client"
+        self.bridge.username = "test user"
+        self.bridge.async_send_raw_command = AsyncMock(side_effect=[
+            {"value": "00000000"},
+            {"value": {"token": token}},
+        ])
+        download = self.enterContext(patch.object(archive, "async_get_scoped_archive_photo", AsyncMock(return_value=JPEG)))
+
+        self.assertEqual(await asyncio.gather(*(
+            archive.async_gen2_archive_thumbnail(self.bridge, self.control, f"gen2:{timestamp}")
+            for timestamp in (NEWER, OLDER)
+        )), [JPEG, JPEG])
+
+        self.connect.assert_awaited_once()
+        self.assertEqual(self.bridge.async_send_raw_command.await_count, 2)
+        self.session.async_get_archive_photo.assert_not_awaited()
+        download.assert_has_awaits([
+            call(self.bridge, DEVICE_UUID, self.thumb_path, token),
+            call(self.bridge, DEVICE_UUID, "snapshots/older.jpg", token),
+        ], any_order=True)
+        self.assertNotIn("signature", repr(archive._archive_cache(self.bridge, self.control)))
+
+    async def test_missing_scoped_preview_falls_back_to_the_full_photo_without_signaling(self) -> None:
+        token = _test_jwt({"msSerial": "000000000001", "tokenRights": 0})
+        self.enterContext(patch.object(archive, "_async_archive_token", AsyncMock(return_value=token)))
+        download = self.enterContext(patch.object(
+            archive, "async_get_scoped_archive_photo", AsyncMock(side_effect=[None, JPEG])
+        ))
+
+        self.assertEqual(await archive.async_gen2_archive_thumbnail(
+            self.bridge, self.control, f"gen2:{NEWER}"
+        ), JPEG)
+
+        self.connect.assert_awaited_once()
+        download.assert_has_awaits([
+            call(self.bridge, DEVICE_UUID, self.thumb_path, token),
+            call(self.bridge, DEVICE_UUID, self.photo_path, token),
+        ])
+
+    async def test_legacy_thumbnails_use_a_new_session_for_challenge_authentication(self) -> None:
+        self.session.async_get_archive_photo.side_effect = [None, JPEG]
+
+        self.assertEqual(await archive.async_gen2_archive_thumbnail(
+            self.bridge, self.control, f"gen2:{NEWER}"
+        ), JPEG)
+
+        self.assertEqual(self.connect.await_count, 2)
+        self.assertEqual(self.session.async_close.await_count, 2)
+        self.session.async_get_archive_photo.assert_has_awaits([call(self.thumb_path), call(self.photo_path)])
+
+    async def test_invalid_and_unknown_thumbnail_ids_never_download_a_photo(self) -> None:
+        download = self.enterContext(patch.object(archive, "async_get_scoped_archive_photo", AsyncMock()))
+        self.assertIsNone(await archive.async_gen2_archive_thumbnail(
+            self.bridge, self.control, "gen2:https://example.invalid/test.jpg"
+        ))
+        self.connect.assert_not_awaited()
+        self.assertIsNone(await archive.async_gen2_archive_thumbnail(self.bridge, self.control, "gen2:1"))
+        self.connect.assert_awaited_once()
+        download.assert_not_awaited()
+        self.session.async_get_archive_photo.assert_not_awaited()
+
     async def test_does_not_accept_a_token_with_broad_rights(self) -> None:
         self.assertIsNone(archive._archive_token_payload(_test_jwt({
             "msSerial": "000000000001", "tokenRights": 4,
@@ -208,6 +273,29 @@ class ArchiveDownloadTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("HTTP status 401", logs.output[0])
         self.assertNotIn(token, logs.output[0])
         self.assertNotIn("example.invalid", logs.output[0])
+
+    async def test_scoped_photo_keeps_local_origin_and_pins_the_authenticated_certificate(self) -> None:
+        digest = bytes(range(32))
+        bridge = SimpleNamespace(
+            hass=object(), host="example.invalid", port=8443, verify_ssl=False,
+            resolve_http_url=lambda path: f"https://example.invalid:8443/base{path}",
+            miniserver_tls_fingerprint=lambda: digest,
+        )
+        get_client = Mock(return_value=SimpleNamespace(get=self._get))
+        fingerprint = Mock(return_value=self.tls)
+        with patch.dict(sys.modules, {
+            "aiohttp": SimpleNamespace(ClientError=type("ClientError", (Exception,), {}), Fingerprint=fingerprint),
+            "homeassistant.helpers.aiohttp_client": SimpleNamespace(async_get_clientsession=get_client),
+        }):
+            self.assertEqual(await signaling.async_get_scoped_archive_photo(
+                bridge, DEVICE_UUID, "photo.jpg", "synthetic-photo-token"
+            ), JPEG)
+
+        get_client.assert_called_once_with(bridge.hass, verify_ssl=False)
+        fingerprint.assert_called_once_with(digest)
+        [(url, request)] = self.calls
+        self.assertEqual(url, f"https://example.invalid:8443/base/proxy/{DEVICE_UUID}/photo.jpg?autht=synthetic-photo-token")
+        self.assertEqual(request, {"ssl": self.tls, "allow_redirects": False})
 
     async def test_external_and_traversal_paths_are_rejected(self) -> None:
         for path in (
