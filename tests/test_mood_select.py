@@ -259,7 +259,7 @@ class MoodSelectTests(unittest.IsolatedAsyncioTestCase):
         entity = LoxoneMoodSelectEntity(bridge, controller)
 
         self.assertEqual(entity.current_option, "Evening")
-        self.assertEqual(entity._attr_options[0], "Off")
+        self.assertEqual(entity.options[0], "Off")
 
     async def test_select_option_sends_change_to_command(self) -> None:
         controller = self._controller()
@@ -287,7 +287,7 @@ class MoodSelectTests(unittest.IsolatedAsyncioTestCase):
         bridge = _FakeBridge([controller], {"state-moods": "55"})
         entity = LoxoneMoodSelectEntity(bridge, controller)
 
-        self.assertEqual(entity._attr_options, ["Off", "Reading", "Evening"])
+        self.assertEqual(entity.options, ["Off", "Reading", "Evening"])
         self.assertEqual(entity.current_option, "Evening")
 
     async def test_radio_select_maps_outputs_and_reset_command(self) -> None:
@@ -310,6 +310,51 @@ class MoodSelectTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             bridge.commands,
             [("radio-action", "1"), ("radio-action", "reset")],
+        )
+
+    async def test_radio_select_uses_documented_all_off_and_keeps_equal_labels(self) -> None:
+        radio = LoxoneControl(
+            uuid="radio-uuid",
+            uuid_action="radio-action",
+            name="Radio",
+            type="Radio",
+            states={"activeOutput": "state-output"},
+            details={"allOff": "Silence", "outputs": {"1": "Room", "5": "Room"}},
+        )
+        bridge = _FakeBridge([radio], {"state-output": 5})
+        entity = LoxoneRadioOutputSelectEntity(bridge, radio)
+
+        self.assertEqual(entity._attr_options, ["Silence", "Room", "Room (5)"])
+        self.assertEqual(entity.current_option, "Room (5)")
+        await entity.async_select_option("Room (5)")
+        await entity.async_select_option("Silence")
+        self.assertEqual(bridge.commands, [("radio-action", "5"), ("radio-action", "reset")])
+
+    async def test_ventilation_select_uses_original_timer_profile_index(self) -> None:
+        ventilation = LoxoneControl(
+            uuid="vent-uuid",
+            uuid_action="vent-action",
+            name="Ventilation",
+            type="Ventilation",
+            states={"activeTimerProfile": "profile"},
+            details={
+                "timerProfiles": [
+                    None,
+                    {"name": "Boost", "interval": 3600, "speed": {"value": 70}, "defaultMode": 0},
+                ],
+            },
+        )
+        bridge = _FakeBridge([ventilation], {"profile": 1})
+        entity = select_module.LoxoneVentilationTimerSelect(
+            bridge, ventilation, select_module._ventilation_profiles(ventilation)
+        )
+
+        self.assertEqual(entity._attr_options, ["Automatic", "Boost"])
+        self.assertEqual(entity.current_option, "Boost")
+        await entity.async_select_option("Boost")
+        await entity.async_select_option("Automatic")
+        self.assertEqual(
+            bridge.commands, [("vent-action", "setTimer/3600/70/0/1"), ("vent-action", "setTimer/0")]
         )
 
     async def test_intercom_history_select_exposes_old_photos_as_options(self) -> None:

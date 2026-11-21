@@ -44,11 +44,6 @@
         "name": "Oświetlenie"
       }
     },
-    "number": {
-      "intercom_tts_volume": {
-        "name": "Głośność komunikatu"
-      }
-    },
     "select": {
       "intercom_history_photo": {
         "name": "Zdjęcie z historii"
@@ -90,11 +85,10 @@
       },
       "finish": {
         "title": "Dodatkowe opcje instalacji",
-        "description": "Wyszukiwanie i logowanie zostały zakończone. Ustaw opcjonalne zachowanie encji oświetlenia i automatyzacji.",
+        "description": "Wybierz, które elementy sterowania oświetleniem i obrazy encji pojawią się w Home Assistant.",
         "data": {
           "enable_light_mood_select": "Wystaw selektor nastroju LightController",
           "expose_controller_child_lights": "Wystaw indywidualne światła w LightController",
-          "auto_create_automations": "Automatycznie dodawaj sugerowane automatyzacje",
           "use_loxone_icons": "Używaj ikon Loxone jako obrazków encji"
         },
         "data_description": {
@@ -159,10 +153,8 @@
           "intercom_username": "Login wideo interkomu (opcjonalnie)",
           "intercom_password": "Hasło wideo interkomu (opcjonalnie, zostaw puste, aby zachować obecne)",
           "verify_ssl": "Weryfikuj certyfikat TLS",
-          "scan_timeout": "Limit czasu wyszukiwania (sekundy)",
           "enable_light_mood_select": "Wystaw selektor nastroju LightController",
           "expose_controller_child_lights": "Wystaw indywidualne światła w LightController",
-          "auto_create_automations": "Automatycznie dodawaj sugerowane automatyzacje",
           "use_loxone_icons": "Używaj ikon Loxone jako obrazków encji",
           "intercom_language": "Język domofonu"
         },

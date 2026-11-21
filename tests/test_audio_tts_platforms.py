@@ -6,7 +6,7 @@ import sys
 import types
 import unittest
 
-from tests._loader import load_integration_module
+from tests._loader import install_media_player_stubs, load_integration_module
 
 
 def _install_homeassistant_stubs() -> None:
@@ -35,44 +35,7 @@ def _install_homeassistant_stubs() -> None:
         module.DOMAIN = domain
         sys.modules[f"homeassistant.components.{module_name}"] = module
 
-    media_player = sys.modules["homeassistant.components.media_player"]
-
-    class MediaPlayerEntity:
-        pass
-
-    class MediaPlayerDeviceClass:
-        SPEAKER = "speaker"
-
-    class MediaPlayerState:
-        OFF = "off"
-        IDLE = "idle"
-        PAUSED = "paused"
-        PLAYING = "playing"
-
-    class MediaPlayerEntityFeature:
-        PAUSE = 1 << 0
-        PLAY = 1 << 1
-        STOP = 1 << 2
-        NEXT_TRACK = 1 << 3
-        PREVIOUS_TRACK = 1 << 4
-        VOLUME_SET = 1 << 5
-        VOLUME_STEP = 1 << 6
-        TURN_ON = 1 << 7
-        TURN_OFF = 1 << 8
-        SELECT_SOURCE = 1 << 9
-        PLAY_MEDIA = 1 << 10
-        SHUFFLE_SET = 1 << 11
-        REPEAT_SET = 1 << 12
-        SEEK = 1 << 13
-
-    class MediaType:
-        MUSIC = "music"
-
-    media_player.MediaPlayerEntity = MediaPlayerEntity
-    media_player.MediaPlayerDeviceClass = MediaPlayerDeviceClass
-    media_player.MediaPlayerState = MediaPlayerState
-    media_player.MediaPlayerEntityFeature = MediaPlayerEntityFeature
-    media_player.MediaType = MediaType
+    install_media_player_stubs()
 
     text = sys.modules["homeassistant.components.text"]
 
@@ -178,13 +141,8 @@ class _FakeBridge:
 
 
 class _FakeConfigEntry:
-    def __init__(self, entry_id: str) -> None:
-        self.entry_id = entry_id
-
-
-class _FakeHass:
-    def __init__(self, entry_id: str, bridge, domain: str) -> None:
-        self.data = {domain: {"bridges": {entry_id: bridge}}}
+    def __init__(self, bridge: _FakeBridge) -> None:
+        self.runtime_data = bridge
 
 
 _install_homeassistant_stubs()
@@ -218,12 +176,11 @@ class AudioTtsHelperPlatformTests(unittest.IsolatedAsyncioTestCase):
             type="IntercomV2",
         )
         bridge = _FakeBridge([audio_zone, intercom], {"state-volume": 35})
-        entry = _FakeConfigEntry("entry-1")
-        hass = _FakeHass(entry.entry_id, bridge, const.DOMAIN)
+        entry = _FakeConfigEntry(bridge)
         entities: list = []
 
         await text_module.async_setup_entry(
-            hass,
+            object(),
             entry,
             lambda new_entities: entities.extend(new_entities),
         )
@@ -248,15 +205,17 @@ class AudioTtsHelperPlatformTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(intercom_entity._attr_native_max, 255)
 
-    async def test_number_platform_adds_audio_tts_volume_helper(self) -> None:
+    async def test_number_platform_only_adds_volume_helper_for_audio_zones(self) -> None:
         audio_zone = self._audio_zone()
-        bridge = _FakeBridge([audio_zone], {"state-volume": 35})
-        entry = _FakeConfigEntry("entry-1")
-        hass = _FakeHass(entry.entry_id, bridge, const.DOMAIN)
+        intercom = LoxoneControl(
+            uuid="intercom-uuid", uuid_action="intercom-action", name="Intercom", type="IntercomV2"
+        )
+        bridge = _FakeBridge([audio_zone, intercom], {"state-volume": 35})
+        entry = _FakeConfigEntry(bridge)
         entities: list = []
 
         await number_module.async_setup_entry(
-            hass,
+            object(),
             entry,
             lambda new_entities: entities.extend(new_entities),
         )
@@ -266,6 +225,7 @@ class AudioTtsHelperPlatformTests(unittest.IsolatedAsyncioTestCase):
             for entity in entities
             if isinstance(entity, number_module.LoxoneAudioTtsVolumeEntity)
         ]
+        self.assertEqual(entities, tts_entities)
         self.assertEqual(len(tts_entities), 1)
         tts_entity = tts_entities[0]
         self.assertEqual(tts_entity.native_value, 35.0)
@@ -273,6 +233,53 @@ class AudioTtsHelperPlatformTests(unittest.IsolatedAsyncioTestCase):
         await tts_entity.async_set_native_value(75)
 
         self.assertEqual(tts_entity.native_value, 75.0)
+
+    async def test_original_music_server_minimum_volume_is_writable(self) -> None:
+        zone = self._audio_zone()
+        zone.type = "AudioZone"
+        zone.states["ttsVolume"] = "minimum-tts-volume"
+
+        modern = self._audio_zone()
+        modern.uuid_action = "audio-v2-action"
+        modern.states["ttsVolume"] = "minimum-tts-volume"
+        bridge = _FakeBridge([zone, modern], {"minimum-tts-volume": 0})
+        commands = []
+
+        async def send(uuid_action, command):
+            commands.append((uuid_action, command))
+
+        bridge.async_send_action = send
+        entities = []
+        await number_module.async_setup_entry(object(), _FakeConfigEntry(bridge), entities.extend)
+
+        volumes = [entity for entity in entities if isinstance(entity, number_module.LoxoneMusicServerVolumeEntity)]
+        self.assertEqual(len(volumes), 1)
+        self.assertEqual(volumes[0].native_value, 0)
+        await volumes[0].async_set_native_value(24)
+        self.assertEqual(commands, [("audio-action", "ttsvolume/24")])
+
+    async def test_value_selector_uses_live_range_and_preserves_zero(self) -> None:
+        control = LoxoneControl(
+            uuid="selector-uuid",
+            uuid_action="selector-action",
+            name="Temperature offset",
+            type="ValueSelector",
+            states={"min": "min", "max": "max", "step": "step", "value": "value"},
+        )
+        bridge = _FakeBridge(
+            [control], {"min": -6, "max": 0, "step": 0.5, "value": -2}
+        )
+        entry = _FakeConfigEntry(bridge)
+        entities = []
+
+        await number_module.async_setup_entry(object(), entry, entities.extend)
+
+        self.assertEqual(len(entities), 1)
+        number = entities[0]
+        self.assertEqual(number.native_value, -2)
+        self.assertEqual(number.native_min_value, -6)
+        self.assertEqual(number.native_max_value, 0)
+        self.assertEqual(number.native_step, 0.5)
 
 
 if __name__ == "__main__":

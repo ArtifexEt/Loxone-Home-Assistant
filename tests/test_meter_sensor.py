@@ -45,7 +45,9 @@ def _install_homeassistant_stubs() -> None:
 
     class SensorDeviceClass:
         ENERGY = "energy"
+        ENERGY_STORAGE = "energy_storage"
         POWER = "power"
+        VOLUME_FLOW_RATE = "volume_flow_rate"
 
     sensor.SensorEntity = SensorEntity
     sensor.SensorStateClass = SensorStateClass
@@ -175,7 +177,7 @@ class MeterSensorTests(unittest.TestCase):
         entity = LoxoneMeterSensor(bridge, control, "actual")
 
         self.assertEqual(entity.native_unit_of_measurement, "kWh")
-        self.assertEqual(entity.device_class, sensor_module.SensorDeviceClass.ENERGY)
+        self.assertIsNone(entity.device_class)
 
     def test_webpage_sensor_exposes_url_from_details(self) -> None:
         control = LoxoneControl(
@@ -224,7 +226,7 @@ class MeterSensorTests(unittest.TestCase):
         entity = LoxonePrimarySensor(bridge, control)
 
         self.assertEqual(entity.native_unit_of_measurement, "kWh")
-        self.assertEqual(entity.device_class, sensor_module.SensorDeviceClass.ENERGY)
+        self.assertIsNone(entity.device_class)
         self.assertEqual(
             entity.state_class,
             sensor_module.SensorStateClass.MEASUREMENT,
@@ -256,10 +258,8 @@ class MeterSensorSetupTests(unittest.IsolatedAsyncioTestCase):
             },
             controls=[control],
         )
-        hass = types.SimpleNamespace(
-            data={sensor_module.DOMAIN: {"bridges": {"entry-id": bridge}}}
-        )
-        entry = types.SimpleNamespace(entry_id="entry-id")
+        hass = types.SimpleNamespace(data={})
+        entry = types.SimpleNamespace(entry_id="entry-id", runtime_data=bridge)
         entities: list = []
 
         await sensor_module.async_setup_entry(
@@ -301,10 +301,8 @@ class MeterSensorSetupTests(unittest.IsolatedAsyncioTestCase):
             },
         )
         bridge = _FakeBridge({"state-total": 99.5}, controls=[control])
-        hass = types.SimpleNamespace(
-            data={sensor_module.DOMAIN: {"bridges": {"entry-id": bridge}}}
-        )
-        entry = types.SimpleNamespace(entry_id="entry-id")
+        hass = types.SimpleNamespace(data={})
+        entry = types.SimpleNamespace(entry_id="entry-id", runtime_data=bridge)
         entities: list = []
 
         await sensor_module.async_setup_entry(
@@ -322,6 +320,52 @@ class MeterSensorSetupTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(entity.device_class, sensor_module.SensorDeviceClass.ENERGY)
         self.assertEqual(entity.native_unit_of_measurement, "kWh")
         self.assertEqual(entity.native_value, 99.5)
+
+
+class MeterProtocolMappingTests(unittest.TestCase):
+    def test_storage_meter_keeps_directional_totals_separate_and_uses_storage_format(self) -> None:
+        states = ("actual", "total", "totalNeg", "totalNegDay", "storage")
+        control = LoxoneControl(
+            uuid="meter", uuid_action="meter-action", name="Battery", type="Meter",
+            states={name: name for name in states},
+            details={
+                "actualFormat": "%.1f kW",
+                "totalFormat": "%.0f Wh",
+                "totalFormatNeg": "%.3f kWh",
+                "storageFormat": "%.1f kWh",
+            },
+        )
+        bridge = _FakeBridge(
+            {"actual": -2.5, "total": 900, "totalNeg": 2, "totalNegDay": 0.25, "storage": 4.5}
+        )
+        entities = {entity._state_name: entity for entity in sensor_module._build_meter_sensors(bridge, control)}
+        self.assertEqual(set(entities), set(states))
+        self.assertEqual(entities["actual"].native_value, -2.5)
+        self.assertEqual(entities["total"].native_unit_of_measurement, "Wh")
+        self.assertEqual(entities["totalNegDay"]._attr_native_unit_of_measurement, "kWh")
+        self.assertEqual(entities["totalNegDay"]._attr_state_class, "total_increasing")
+        self.assertEqual(entities["storage"]._attr_device_class, "energy_storage")
+        self.assertEqual(entities["storage"]._attr_state_class, "measurement")
+
+    def test_reverse_only_meter_does_not_invent_primary_channels(self) -> None:
+        control = LoxoneControl(
+            uuid="meter", uuid_action="meter-action", name="Export", type="Meter",
+            states={"totalNeg": "export"}, details={"totalFormatNeg": "%.3f kWh"},
+        )
+        bridge = _FakeBridge({"export": 9.57})
+        [entity] = sensor_module._build_meter_sensors(bridge, control)
+        self.assertEqual(entity.native_value, 9.57)
+        self.assertTrue(entity._attr_unique_id.endswith(":reverse_total"))
+
+    def test_flow_format_preserves_exponent_in_cubic_metres(self) -> None:
+        control = LoxoneControl(
+            uuid="meter", uuid_action="meter-action", name="Flow", type="Meter",
+            states={"actual": "flow"}, details={"actualFormat": "%.1f m3/h"},
+        )
+        bridge = _FakeBridge({"flow": 16.5})
+        [entity] = sensor_module._build_meter_sensors(bridge, control)
+        self.assertEqual(entity.native_unit_of_measurement, "m³/h")
+        self.assertEqual(entity.device_class, "volume_flow_rate")
 
 
 if __name__ == "__main__":

@@ -44,11 +44,6 @@
         "name": "Light"
       }
     },
-    "number": {
-      "intercom_tts_volume": {
-        "name": "TTS volume"
-      }
-    },
     "select": {
       "intercom_history_photo": {
         "name": "History photo"
@@ -90,11 +85,10 @@
       },
       "finish": {
         "title": "Additional setup options",
-        "description": "Discovery and authentication are complete. Configure optional light and automation behavior for this installation.",
+        "description": "Choose which Loxone lighting controls and entity pictures appear in Home Assistant.",
         "data": {
           "enable_light_mood_select": "Expose LightController mood selector",
           "expose_controller_child_lights": "Expose individual lights inside LightController",
-          "auto_create_automations": "Automatically add suggested automations",
           "use_loxone_icons": "Use Loxone icons as entity pictures"
         },
         "data_description": {
@@ -159,10 +153,8 @@
           "intercom_username": "Intercom video username (optional)",
           "intercom_password": "Intercom video password (optional, leave empty to keep current)",
           "verify_ssl": "Verify TLS certificate",
-          "scan_timeout": "Discovery timeout (seconds)",
           "enable_light_mood_select": "Expose LightController mood selector",
           "expose_controller_child_lights": "Expose individual lights inside LightController",
-          "auto_create_automations": "Automatically add suggested automations",
           "use_loxone_icons": "Use Loxone icons as entity pictures",
           "intercom_language": "Intercom language"
         },

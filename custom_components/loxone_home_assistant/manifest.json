@@ -13,8 +13,9 @@
     "custom_components.loxone_home_assistant"
   ],
   "requirements": ["cryptography>=44.0.0"],
-  "version": "0.1.0",
+  "version": "0.2.0",
   "dependencies": [
+    "http",
     "network",
     "panel_custom",
     "stream"

@@ -5,26 +5,22 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+from functools import partial
 from typing import Any
 
-from aiohttp import BasicAuth, ClientError, web
 import voluptuous as vol
-from homeassistant.components.http import HomeAssistantView
+from aiohttp import BasicAuth, ClientError, web
+from homeassistant.components.http import KEY_HASS, HomeAssistantView
 from homeassistant.config_entries import ConfigEntry, ConfigEntryState
-from homeassistant.core import HomeAssistant, ServiceCall, callback
+from homeassistant.core import HomeAssistant, ServiceCall, SupportsResponse, callback
 from homeassistant.exceptions import (
     ConfigEntryError,
     ConfigEntryNotReady,
-    HomeAssistantError,
     ServiceValidationError,
 )
-from homeassistant.helpers import config_validation as cv, device_registry as dr
+from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.translation import async_get_translations
-
-try:
-    from homeassistant.core import SupportsResponse
-except ImportError:  # pragma: no cover - compatibility for lightweight test stubs
-    SupportsResponse = None  # type: ignore[assignment]
 
 from .bridge import (
     LoxoneAuthenticationError,
@@ -34,14 +30,14 @@ from .bridge import (
 )
 from .connection_config import merge_connection_config
 from .const import (
-    DATA_BRIDGES,
     DOMAIN,
     MANUFACTURER,
+    MEDIA_PLAYER_CONTROL_TYPES,
     PLATFORMS,
+    SERVICE_ATTR_ARGUMENTS,
     SERVICE_ATTR_COMMAND,
     SERVICE_ATTR_ENTRY_ID,
     SERVICE_ATTR_FUNCTION,
-    SERVICE_ATTR_ARGUMENTS,
     SERVICE_ATTR_MESSAGE,
     SERVICE_ATTR_UUID_ACTION,
     SERVICE_ATTR_VOLUME,
@@ -59,9 +55,9 @@ from .intercom import (
     resolve_intercom_command,
 )
 from .intercom_gallery import async_setup_intercom_gallery
-from .media_player import build_audio_tts_command, resolve_audio_tts_target_uuid_action
+from .media_player import async_send_audio_tts, build_audio_tts_command
 from .models import LoxoneControl
-from .runtime import bridges_by_entry_id, remove_entry_bridge, set_entry_bridge
+from .runtime import bridges_by_entry_id, entry_bridge
 from .server_model import DEFAULT_SERVER_MODEL
 
 _LOGGER = logging.getLogger(__name__)
@@ -111,21 +107,6 @@ DATA_ICON_CACHE = "icon_cache"
 DATA_ICON_VIEW_REGISTERED = "icon_view_registered"
 
 
-def _command_service_register_kwargs() -> dict[str, Any]:
-    """Return kwargs enabling optional service responses when supported by HA."""
-    if SupportsResponse is None:
-        return {}
-    return {"supports_response": SupportsResponse.OPTIONAL}
-
-
-def _service_validation_exception(message: str) -> Exception:
-    """Build a validation error compatible with multiple HA core versions."""
-    try:
-        return ServiceValidationError(message)
-    except TypeError:
-        return HomeAssistantError(message)
-
-
 class LoxoneIconProxyView(HomeAssistantView):
     """Serve configured Loxone icons in dashboard image elements."""
 
@@ -135,11 +116,7 @@ class LoxoneIconProxyView(HomeAssistantView):
     requires_auth = False
 
     async def get(self, request: web.Request, serial: str, icon_key: str) -> web.Response:
-        hass = getattr(self, "hass", None) or request.app.get("hass")
-        if hass is None:
-            _LOGGER.error("Icon proxy request received without Home Assistant context.")
-            return web.Response(status=500)
-
+        hass = request.app[KEY_HASS]
         bridge = _resolve_bridge_for_serial(hass, serial)
         if bridge is None or not bridge.use_loxone_icons:
             return web.Response(status=404)
@@ -165,66 +142,42 @@ class LoxoneIconProxyView(HomeAssistantView):
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:
     """Set up the integration namespace."""
     del config
-    hass.data.setdefault(DOMAIN, {})
-    hass.data[DOMAIN].setdefault(DATA_BRIDGES, {})
-    hass.data[DOMAIN].setdefault(DATA_ICON_CACHE, {})
-    if not hass.data[DOMAIN].get(DATA_ICON_VIEW_REGISTERED):
+    domain_data = hass.data.setdefault(DOMAIN, {})
+    if not domain_data.get(DATA_ICON_VIEW_REGISTERED):
         hass.http.register_view(LoxoneIconProxyView())
-        hass.data[DOMAIN][DATA_ICON_VIEW_REGISTERED] = True
+        domain_data[DATA_ICON_VIEW_REGISTERED] = True
     await async_setup_intercom_gallery(hass)
 
-    if not hass.services.has_service(DOMAIN, SERVICE_SEND_COMMAND):
-        hass.services.async_register(
-            DOMAIN,
-            SERVICE_SEND_COMMAND,
-            _make_send_command_handler(hass),
-            schema=SEND_COMMAND_SCHEMA,
-            **_command_service_register_kwargs(),
-        )
-
-    if not hass.services.has_service(DOMAIN, SERVICE_SEND_RAW_COMMAND):
-        hass.services.async_register(
-            DOMAIN,
-            SERVICE_SEND_RAW_COMMAND,
-            _make_send_raw_command_handler(hass),
-            schema=SEND_RAW_COMMAND_SCHEMA,
-            **_command_service_register_kwargs(),
-        )
-
-    if not hass.services.has_service(DOMAIN, SERVICE_SEND_TTS):
-        hass.services.async_register(
-            DOMAIN,
-            SERVICE_SEND_TTS,
-            _make_send_tts_handler(hass),
-            schema=SEND_TTS_SCHEMA,
-            **_command_service_register_kwargs(),
-        )
-
-    if not hass.services.has_service(DOMAIN, SERVICE_CALL_INTERCOM_FUNCTION):
-        hass.services.async_register(
-            DOMAIN,
+    services = (
+        (SERVICE_SEND_COMMAND, _async_handle_send_command, SEND_COMMAND_SCHEMA),
+        (SERVICE_SEND_RAW_COMMAND, _async_handle_send_raw_command, SEND_RAW_COMMAND_SCHEMA),
+        (SERVICE_SEND_TTS, _async_handle_send_tts, SEND_TTS_SCHEMA),
+        (
             SERVICE_CALL_INTERCOM_FUNCTION,
-            _make_call_intercom_function_handler(hass),
-            schema=CALL_INTERCOM_FUNCTION_SCHEMA,
-            **_command_service_register_kwargs(),
-        )
-    if not hass.services.has_service(DOMAIN, SERVICE_CALL_INTERCOM_COMMAND):
+            _async_handle_call_intercom_function,
+            CALL_INTERCOM_FUNCTION_SCHEMA,
+        ),
+        (
+            SERVICE_CALL_INTERCOM_COMMAND,
+            _async_handle_call_intercom_command,
+            CALL_INTERCOM_COMMAND_SCHEMA,
+        ),
+    )
+    for service, handler, schema in services:
+        if hass.services.has_service(DOMAIN, service):
+            continue
         hass.services.async_register(
             DOMAIN,
-            SERVICE_CALL_INTERCOM_COMMAND,
-            _make_call_intercom_command_handler(hass),
-            schema=CALL_INTERCOM_COMMAND_SCHEMA,
-            **_command_service_register_kwargs(),
+            service,
+            partial(handler, hass),
+            schema=schema,
+            supports_response=SupportsResponse.OPTIONAL,
         )
-
     return True
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up a config entry."""
-    hass.data.setdefault(DOMAIN, {})
-    hass.data[DOMAIN].setdefault(DATA_BRIDGES, {})
-
     bridge = None
     try:
         bridge = LoxoneBridge(hass, merge_connection_config(entry.data, entry.options))
@@ -235,7 +188,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             )
         bridge.miniserver_device_id = _async_register_miniserver_device(hass, entry, bridge)
 
-        set_entry_bridge(hass, entry, bridge)
+        entry.runtime_data = bridge
         await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
         data = {**entry.data, **bridge.export_runtime_data()}
@@ -247,7 +200,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             )
     except (Exception, asyncio.CancelledError) as err:
         if bridge is not None:
-            remove_entry_bridge(hass, entry)
+            if getattr(entry, "runtime_data", None) is bridge:
+                del entry.runtime_data
             await bridge.async_shutdown()
         if isinstance(err, LoxoneConnectionError):
             raise ConfigEntryNotReady(str(err)) from err
@@ -281,10 +235,9 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if not await hass.config_entries.async_unload_platforms(entry, PLATFORMS):
         return False
 
-    bridge = remove_entry_bridge(hass, entry)
-    if bridge is not None:
-        await bridge.async_shutdown()
-        _clear_cached_bridge_icons(hass, bridge.serial)
+    bridge = entry_bridge(entry)
+    await bridge.async_shutdown()
+    _clear_cached_bridge_icons(hass, bridge.serial)
 
     return True
 
@@ -312,23 +265,23 @@ async def _async_handle_send_tts(hass: HomeAssistant, call: ServiceCall) -> dict
     uuid_action = call.data[SERVICE_ATTR_UUID_ACTION]
     message = str(call.data[SERVICE_ATTR_MESSAGE]).strip()
     if not message:
-        raise _service_validation_exception("TTS message cannot be empty.")
+        raise ServiceValidationError("TTS message cannot be empty.")
 
     volume = call.data.get(SERVICE_ATTR_VOLUME)
     target_control = bridge.control_for_uuid_action(uuid_action)
-    target_uuid_action = uuid_action
 
-    if target_control is not None and is_intercom_control(target_control):
-        command = build_intercom_tts_command(message)
-    else:
-        command = build_audio_tts_command(message, volume)
-        if target_control is not None:
-            target_uuid_action = resolve_audio_tts_target_uuid_action(bridge, target_control)
+    if target_control is not None and target_control.type in MEDIA_PLAYER_CONTROL_TYPES:
+        return await async_send_audio_tts(bridge, target_control, message, volume)
 
+    command = (
+        build_intercom_tts_command(message)
+        if target_control is not None and is_intercom_control(target_control)
+        else build_audio_tts_command(message, volume)
+    )
     if command is None:
-        raise _service_validation_exception("TTS message cannot be empty.")
+        raise ServiceValidationError("TTS message cannot be empty.")
 
-    return await bridge.async_send_action(target_uuid_action, command)
+    return await bridge.async_send_action(uuid_action, command)
 
 
 async def _async_handle_call_intercom_function(
@@ -338,15 +291,15 @@ async def _async_handle_call_intercom_function(
     intercom_uuid_action = call.data[SERVICE_ATTR_UUID_ACTION]
     selector = str(call.data[SERVICE_ATTR_FUNCTION]).strip()
     if not selector:
-        raise _service_validation_exception("Intercom function selector cannot be empty.")
+        raise ServiceValidationError("Intercom function selector cannot be empty.")
 
     intercom_control = bridge.control_for_uuid_action(intercom_uuid_action)
     if intercom_control is None:
-        raise _service_validation_exception(
+        raise ServiceValidationError(
             f"Unknown intercom uuid_action: {intercom_uuid_action}"
         )
     if not is_intercom_control(intercom_control):
-        raise _service_validation_exception(
+        raise ServiceValidationError(
             f"Control {intercom_uuid_action} is not recognized as an intercom."
         )
 
@@ -356,7 +309,7 @@ async def _async_handle_call_intercom_function(
         if control.parent_uuid_action == intercom_control.uuid_action
     ]
     if not available_controls:
-        raise _service_validation_exception(
+        raise ServiceValidationError(
             f"Intercom {intercom_uuid_action} has no mapped child functions."
         )
 
@@ -366,7 +319,7 @@ async def _async_handle_call_intercom_function(
     )
     if selected_control is None:
         available_labels = ", ".join(control.name for control in available_controls)
-        raise _service_validation_exception(
+        raise ServiceValidationError(
             f"Unknown intercom function '{selector}'. Available: {available_labels}."
         )
 
@@ -385,11 +338,11 @@ async def _async_handle_call_intercom_command(
     intercom_uuid_action = call.data[SERVICE_ATTR_UUID_ACTION]
     intercom_control = bridge.control_for_uuid_action(intercom_uuid_action)
     if intercom_control is None:
-        raise _service_validation_exception(
+        raise ServiceValidationError(
             f"Unknown intercom uuid_action: {intercom_uuid_action}"
         )
     if not is_intercom_control(intercom_control):
-        raise _service_validation_exception(
+        raise ServiceValidationError(
             f"Control {intercom_uuid_action} is not recognized as an intercom."
         )
 
@@ -399,44 +352,9 @@ async def _async_handle_call_intercom_command(
             call.data.get(SERVICE_ATTR_ARGUMENTS),
         )
     except ValueError as err:
-        raise _service_validation_exception(str(err)) from err
+        raise ServiceValidationError(str(err)) from err
 
     return await bridge.async_send_action(intercom_control.uuid_action, resolved_command)
-
-
-def _make_send_command_handler(hass: HomeAssistant):
-    async def handler(call: ServiceCall) -> dict[str, Any]:
-        return await _async_handle_send_command(hass, call)
-
-    return handler
-
-
-def _make_send_raw_command_handler(hass: HomeAssistant):
-    async def handler(call: ServiceCall) -> dict[str, Any]:
-        return await _async_handle_send_raw_command(hass, call)
-
-    return handler
-
-
-def _make_send_tts_handler(hass: HomeAssistant):
-    async def handler(call: ServiceCall) -> dict[str, Any]:
-        return await _async_handle_send_tts(hass, call)
-
-    return handler
-
-
-def _make_call_intercom_function_handler(hass: HomeAssistant):
-    async def handler(call: ServiceCall) -> dict[str, Any]:
-        return await _async_handle_call_intercom_function(hass, call)
-
-    return handler
-
-
-def _make_call_intercom_command_handler(hass: HomeAssistant):
-    async def handler(call: ServiceCall) -> dict[str, Any]:
-        return await _async_handle_call_intercom_command(hass, call)
-
-    return handler
 
 
 def _select_intercom_function_control(
@@ -496,7 +414,7 @@ def _resolve_bridge(hass: HomeAssistant, call: ServiceCall) -> LoxoneBridge:
     if entry_id:
         bridge = bridges.get(entry_id)
         if bridge is None:
-            raise _service_validation_exception(
+            raise ServiceValidationError(
                 f"Unknown or unloaded Loxone entry_id: {entry_id}"
             )
         return bridge
@@ -504,11 +422,11 @@ def _resolve_bridge(hass: HomeAssistant, call: ServiceCall) -> LoxoneBridge:
     if len(bridges) == 1:
         return next(iter(bridges.values()))
     if not bridges:
-        raise _service_validation_exception(
+        raise ServiceValidationError(
             "No configured Loxone entries are currently loaded."
         )
 
-    raise _service_validation_exception(
+    raise ServiceValidationError(
         "More than one Loxone entry exists. Please provide entry_id."
     )
 
@@ -542,38 +460,23 @@ def _resolve_bridge_for_serial(hass: HomeAssistant, serial: str) -> LoxoneBridge
 
 
 def _icon_cache(hass: HomeAssistant) -> dict[str, dict[str, tuple[str, bytes]]]:
-    hass.data.setdefault(DOMAIN, {})
-    domain_data = hass.data[DOMAIN]
-    domain_data.setdefault(DATA_ICON_CACHE, {})
-    return domain_data[DATA_ICON_CACHE]
+    return hass.data[DOMAIN].setdefault(DATA_ICON_CACHE, {})
 
 
 def _cached_icon_payload(
     hass: HomeAssistant, serial: str, icon_path: str
 ) -> tuple[str, bytes] | None:
-    serial_cache = _icon_cache(hass).get(str(serial))
-    if not isinstance(serial_cache, dict):
-        return None
-    payload = serial_cache.get(icon_path)
-    if not isinstance(payload, tuple) or len(payload) != 2:
-        return None
-    content_type, body = payload
-    if not isinstance(content_type, str) or not isinstance(body, bytes):
-        return None
-    return content_type, body
+    return _icon_cache(hass).get(serial, {}).get(icon_path)
 
 
 def _store_cached_icon_payload(
     hass: HomeAssistant, serial: str, icon_path: str, payload: tuple[str, bytes]
 ) -> None:
-    cache = _icon_cache(hass)
-    serial_key = str(serial)
-    serial_cache = cache.setdefault(serial_key, {})
-    serial_cache[icon_path] = payload
+    _icon_cache(hass).setdefault(serial, {})[icon_path] = payload
 
 
 def _clear_cached_bridge_icons(hass: HomeAssistant, serial: str) -> None:
-    _icon_cache(hass).pop(str(serial), None)
+    _icon_cache(hass).pop(serial, None)
 
 
 def _icon_web_response(payload: tuple[str, bytes]) -> web.Response:

@@ -179,8 +179,9 @@ class _FakeBridge:
 
 
 class _FakeConfigEntry:
-    def __init__(self, entry_id: str) -> None:
+    def __init__(self, entry_id: str, bridge: _FakeBridge) -> None:
         self.entry_id = entry_id
+        self.runtime_data = bridge
         self.options = {}
 
 
@@ -218,7 +219,7 @@ class IntercomSensorTests(unittest.IsolatedAsyncioTestCase):
             "state-device": 1.0,
         }
         bridge = _FakeBridge([control], values)
-        entry = _FakeConfigEntry("entry-1")
+        entry = _FakeConfigEntry("entry-1", bridge)
         hass = _FakeHass(entry.entry_id, bridge, const.DOMAIN)
         entities = []
         await sensor_module.async_setup_entry(hass, entry, entities.extend)
@@ -250,7 +251,7 @@ class IntercomSensorTests(unittest.IsolatedAsyncioTestCase):
             details={"deviceUuid": "00000000-0000-4000-8000-000000000001"},
         )
         bridge = _FakeBridge([control], {"state-bell": False})
-        entry = _FakeConfigEntry("entry-1")
+        entry = _FakeConfigEntry("entry-1", bridge)
         entities = []
         await sensor_module.async_setup_entry(
             _FakeHass(entry.entry_id, bridge, const.DOMAIN), entry, entities.extend
@@ -291,7 +292,7 @@ class IntercomSensorTests(unittest.IsolatedAsyncioTestCase):
             {"state-events": "20260313090000|20260314112000"},
             session=_FakeSession(),
         )
-        entry = _FakeConfigEntry("entry-1")
+        entry = _FakeConfigEntry("entry-1", bridge)
         hass = _FakeHass(entry.entry_id, bridge, const.DOMAIN)
         entities: list = []
 
@@ -342,7 +343,7 @@ class IntercomSensorTests(unittest.IsolatedAsyncioTestCase):
             },
             session=_FakeSession(),
         )
-        entry = _FakeConfigEntry("entry-1")
+        entry = _FakeConfigEntry("entry-1", bridge)
         hass = _FakeHass(entry.entry_id, bridge, const.DOMAIN)
         entities: list = []
 
@@ -378,7 +379,7 @@ class IntercomSensorTests(unittest.IsolatedAsyncioTestCase):
             {"state-history-date": "20260314123045"},
             session=_FakeSession(),
         )
-        entry = _FakeConfigEntry("entry-1")
+        entry = _FakeConfigEntry("entry-1", bridge)
         hass = _FakeHass(entry.entry_id, bridge, const.DOMAIN)
         entities: list = []
 
@@ -425,7 +426,7 @@ class IntercomSensorTests(unittest.IsolatedAsyncioTestCase):
                 }
             ),
         )
-        entry = _FakeConfigEntry("entry-1")
+        entry = _FakeConfigEntry("entry-1", bridge)
         hass = _FakeHass(entry.entry_id, bridge, const.DOMAIN)
         entities: list = []
 
@@ -484,7 +485,7 @@ class IntercomSensorTests(unittest.IsolatedAsyncioTestCase):
                 }
             ),
         )
-        entry = _FakeConfigEntry("entry-1")
+        entry = _FakeConfigEntry("entry-1", bridge)
         hass = _FakeHass(entry.entry_id, bridge, const.DOMAIN)
         entities: list = []
 
@@ -542,7 +543,7 @@ class IntercomSensorTests(unittest.IsolatedAsyncioTestCase):
                 }
             ),
         )
-        entry = _FakeConfigEntry("entry-1")
+        entry = _FakeConfigEntry("entry-1", bridge)
         hass = _FakeHass(entry.entry_id, bridge, const.DOMAIN)
         entities: list = []
 
@@ -563,6 +564,26 @@ class IntercomSensorTests(unittest.IsolatedAsyncioTestCase):
             "https://192.0.2.50/jpg/history/20260312083000.jpg",
         )
         self.assertEqual(attrs["history_timestamps"], ["20260312083000"])
+
+    async def test_history_image_inherits_the_archive_scheme(self) -> None:
+        archive = "http://camera.local/history.json"
+        control = LoxoneControl(
+            uuid="intercom-uuid",
+            uuid_action="intercom-action",
+            name="Doorbell",
+            type="Intercom",
+            details={"eventHistoryUrl": archive},
+        )
+        session = _FakeSession({
+            archive: {"events": [
+                {"timestamp": "20260314123045", "image": "//camera.local/photo.jpg"},
+                {"timestamp": "20260313123045", "image": "//other.example/photo.jpg"},
+            ]}
+        })
+        bridge = _FakeBridge([control], {}, session)
+        entity = sensor_module.LoxoneIntercomHistorySensor(bridge, control, None)
+
+        self.assertEqual(await self._history_image_urls(entity), ["http://camera.local/photo.jpg"])
 
     async def test_history_sensor_keeps_proxy_prefix_for_root_relative_images(self) -> None:
         control = LoxoneControl(
@@ -587,14 +608,18 @@ class IntercomSensorTests(unittest.IsolatedAsyncioTestCase):
                         "events": [
                             {
                                 "timestamp": "20260314123045",
-                                "thumbPath": "/images/history/20260314123045_thumb.jpg",
+                                "thumbPath": "/images/history/20260314123045_thumb.jpg?size=small",
+                            },
+                            {
+                                "timestamp": "20260313123045",
+                                "imagePath": "/camimage/intercom-action/20260313123045",
                             }
                         ]
                     }
                 }
             ),
         )
-        entry = _FakeConfigEntry("entry-1")
+        entry = _FakeConfigEntry("entry-1", bridge)
         hass = _FakeHass(entry.entry_id, bridge, const.DOMAIN)
         entities: list = []
 
@@ -609,7 +634,10 @@ class IntercomSensorTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             await self._history_image_urls(history_entity),
-            ["https://mini.local/proxy/device-uuid/images/history/20260314123045_thumb.jpg"],
+            [
+                "https://mini.local/proxy/device-uuid/images/history/20260314123045_thumb.jpg?size=small",
+                "https://mini.local/camimage/intercom-action/20260313123045",
+            ],
         )
 
     async def test_history_uses_proxied_images_and_ignores_unrelated_urls(self) -> None:
@@ -726,7 +754,7 @@ class IntercomSensorTests(unittest.IsolatedAsyncioTestCase):
             path=("Dzwonek", "Schemat systemu Dzwonek"),
         )
         bridge = _FakeBridge([intercom, webpage], {}, session=None)
-        entry = _FakeConfigEntry("entry-1")
+        entry = _FakeConfigEntry("entry-1", bridge)
         hass = _FakeHass(entry.entry_id, bridge, const.DOMAIN)
         entities: list = []
 

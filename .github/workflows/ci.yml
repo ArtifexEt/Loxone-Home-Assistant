@@ -53,6 +53,7 @@ jobs:
         run: |
           python -m json.tool hacs.json > /dev/null
           python -m json.tool custom_components/loxone_home_assistant/manifest.json > /dev/null
+          python -m json.tool custom_components/loxone_home_assistant/translations/de.json > /dev/null
           python -m json.tool custom_components/loxone_home_assistant/translations/en.json > /dev/null
           python -m json.tool custom_components/loxone_home_assistant/translations/pl.json > /dev/null
 
@@ -63,6 +64,7 @@ jobs:
 
           modules = [
               "custom_components.loxone_home_assistant",
+              "custom_components.loxone_home_assistant.alarm_control_panel",
               "custom_components.loxone_home_assistant.binary_sensor",
               "custom_components.loxone_home_assistant.bridge",
               "custom_components.loxone_home_assistant.button",
@@ -72,11 +74,15 @@ jobs:
               "custom_components.loxone_home_assistant.const",
               "custom_components.loxone_home_assistant.cover",
               "custom_components.loxone_home_assistant.entity",
+              "custom_components.loxone_home_assistant.intercom_archive",
+              "custom_components.loxone_home_assistant.intercom_gallery",
               "custom_components.loxone_home_assistant.light",
               "custom_components.loxone_home_assistant.media_player",
               "custom_components.loxone_home_assistant.models",
               "custom_components.loxone_home_assistant.number",
               "custom_components.loxone_home_assistant.parser",
+              "custom_components.loxone_home_assistant.remote",
+              "custom_components.loxone_home_assistant.select",
               "custom_components.loxone_home_assistant.sensor",
               "custom_components.loxone_home_assistant.switch",
               "custom_components.loxone_home_assistant.text",

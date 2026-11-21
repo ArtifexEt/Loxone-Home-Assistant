@@ -118,6 +118,11 @@ class _FakeResponse:
         self.status = status
         self._payload = payload
         self.content = _FakeStreamContent(payload)
+        self.content_type = (
+            content_type.split(";", 1)[0].lower()
+            if content_type
+            else "application/octet-stream"
+        )
         self.headers = {}
         if content_type is not None:
             self.headers["Content-Type"] = content_type
@@ -235,8 +240,9 @@ class _FakeBridge:
 
 
 class _FakeConfigEntry:
-    def __init__(self, entry_id: str) -> None:
+    def __init__(self, entry_id: str, bridge: _FakeBridge) -> None:
         self.entry_id = entry_id
+        self.runtime_data = bridge
 
 
 class _FakeHass:
@@ -300,7 +306,7 @@ class CameraPlatformTests(unittest.IsolatedAsyncioTestCase):
             details={},
         )
         bridge = _FakeBridge([intercom, empty_intercom, switch], {}, _FakeSession())
-        entry = _FakeConfigEntry("entry-1")
+        entry = _FakeConfigEntry("entry-1", bridge)
         hass = _FakeHass(entry.entry_id, bridge, const.DOMAIN)
         entities: list = []
 
@@ -322,7 +328,7 @@ class CameraPlatformTests(unittest.IsolatedAsyncioTestCase):
             details={},
         )
         bridge = _FakeBridge([history_only], {"state-events": "20260314123045"}, _FakeSession())
-        entry = _FakeConfigEntry("entry-1")
+        entry = _FakeConfigEntry("entry-1", bridge)
         hass = _FakeHass(entry.entry_id, bridge, const.DOMAIN)
         entities: list = []
 
@@ -343,7 +349,7 @@ class CameraPlatformTests(unittest.IsolatedAsyncioTestCase):
             states={},
             details={
                 "videoInfo": {
-                    "streamUrl": "/dev/video.mjpg",
+                    "streamUrl": "http://remoteConnect/dev/video.mjpg",
                     "liveImageUrl": "/dev/live.jpg",
                 }
             },
@@ -371,6 +377,7 @@ class CameraPlatformTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(image, b"image-bytes")
         self.assertEqual(session.calls, [(expected_snapshot_url, True)])
+        self.assertEqual(bridge.action_calls, [])
 
     async def test_camera_resolves_live_urls_from_intercom_address(self) -> None:
         control = LoxoneControl(
@@ -407,6 +414,29 @@ class CameraPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(entity._stream_url(), expected_stream_url)
         self.assertEqual(entity._snapshot_url(), expected_snapshot_url)
         self.assertEqual(await entity.async_camera_image(), b"external-live")
+
+    async def test_camera_skips_an_invalid_stream_url_and_resolves_clouddns(self) -> None:
+        control = LoxoneControl(
+            uuid="intercom-uuid",
+            uuid_action="intercom-action",
+            name="Furtka",
+            type="Intercom",
+            details={
+                "videoInfo": {
+                    "streamUrl": "https://camera.local:bad/video.mjpg",
+                    "streamUrlIntern": "http://cloudDNS:8080/video.mjpg",
+                }
+            },
+        )
+        bridge = _FakeBridge([control], {}, _FakeSession())
+
+        entity = LoxoneIntercomCameraEntity(bridge, control)
+
+        self.assertEqual(
+            entity._stream_url(),
+            "http://mini.local:8080/video.mjpg",
+        )
+        self.assertNotIn("stream_url", entity.extra_state_attributes)
 
     async def test_camera_extracts_first_jpeg_frame_from_mjpeg_stream(self) -> None:
         control = LoxoneControl(
@@ -626,7 +656,7 @@ class CameraPlatformTests(unittest.IsolatedAsyncioTestCase):
         )
         session = _FakeSession()
         bridge = _FakeBridge([control], {}, session)
-        entry = _FakeConfigEntry("entry-1")
+        entry = _FakeConfigEntry("entry-1", bridge)
         hass = _FakeHass(entry.entry_id, bridge, const.DOMAIN)
         entities = []
         await camera_module.async_setup_entry(hass, entry, entities.extend)
@@ -654,16 +684,19 @@ class CameraPlatformTests(unittest.IsolatedAsyncioTestCase):
             states={"lastBellEvents": "state-events"},
             details={"securedDetails": True},
         )
-        expected_snapshot_url = "https://mini.local/dev/secured-alert.jpg"
+        expected_snapshot_url = "http://camera.local/dev/secured-alert.jpg"
+        session = _FakeSession({(expected_snapshot_url, True): (200, b"secured-alert")})
         bridge = _FakeBridge(
             [control],
             {"state-events": "20260314123045"},
-            _FakeSession({(expected_snapshot_url, True): (200, b"secured-alert")}),
+            session,
             secured_details_by_uuid_action={
                 "door-controller-action": {
                     "videoInfo": {
                         "streamUrl": "/dev/secured-stream.mjpg",
-                        "alertImage": "/dev/secured-alert.jpg",
+                        "alertImage": expected_snapshot_url,
+                        "user": "camera-user",
+                        "pass": "camera-password",
                     }
                 }
             },
@@ -673,6 +706,7 @@ class CameraPlatformTests(unittest.IsolatedAsyncioTestCase):
         image = await entity.async_camera_image()
 
         self.assertEqual(image, b"secured-alert")
+        self.assertEqual(session.auth_logins, ["camera-user"])
         self.assertEqual(
             bridge.action_calls,
             [("door-controller-action", "securedDetails")],

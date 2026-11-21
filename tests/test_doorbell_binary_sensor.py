@@ -117,17 +117,6 @@ class _FakeBridge:
         return self._values.get(control.state_uuid(state_name))
 
 
-class _FakeConfigEntry:
-    def __init__(self, entry_id: str) -> None:
-        self.entry_id = entry_id
-        self.options = {}
-
-
-class _FakeHass:
-    def __init__(self, entry_id: str, bridge, domain: str) -> None:
-        self.data = {domain: {"bridges": {entry_id: bridge}}}
-
-
 _install_homeassistant_stubs()
 models = load_integration_module("custom_components.loxone_home_assistant.models")
 const = load_integration_module("custom_components.loxone_home_assistant.const")
@@ -158,8 +147,8 @@ class DoorbellBinarySensorTests(unittest.IsolatedAsyncioTestCase):
                 "state-bell": 1,
             },
         )
-        entry = _FakeConfigEntry("entry-1")
-        hass = _FakeHass(entry.entry_id, bridge, const.DOMAIN)
+        entry = types.SimpleNamespace(entry_id="entry-1", runtime_data=bridge, options={})
+        hass = types.SimpleNamespace(data={})
         entities = []
 
         await binary_sensor_module.async_setup_entry(
@@ -192,8 +181,8 @@ class DoorbellBinarySensorTests(unittest.IsolatedAsyncioTestCase):
                 "state-alarm": 1,
             },
         )
-        entry = _FakeConfigEntry("entry-1")
-        hass = _FakeHass(entry.entry_id, bridge, const.DOMAIN)
+        entry = types.SimpleNamespace(entry_id="entry-1", runtime_data=bridge, options={})
+        hass = types.SimpleNamespace(data={})
         entities = []
 
         await binary_sensor_module.async_setup_entry(
@@ -230,8 +219,8 @@ class DoorbellBinarySensorTests(unittest.IsolatedAsyncioTestCase):
                 "state-call": 1,
             },
         )
-        entry = _FakeConfigEntry("entry-1")
-        hass = _FakeHass(entry.entry_id, bridge, const.DOMAIN)
+        entry = types.SimpleNamespace(entry_id="entry-1", runtime_data=bridge, options={})
+        hass = types.SimpleNamespace(data={})
         entities = []
 
         await binary_sensor_module.async_setup_entry(

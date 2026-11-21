@@ -59,6 +59,7 @@ def _install_homeassistant_stubs() -> None:
         DURATION = "duration"
         ENERGY = "energy"
         POWER = "power"
+        TIMESTAMP = "timestamp"
 
     sensor.SensorEntity = SensorEntity
     sensor.SensorStateClass = SensorStateClass
@@ -183,10 +184,8 @@ class PowerSupplyPlatformTests(unittest.IsolatedAsyncioTestCase):
                 "state-charging": 1,
             },
         )
-        hass = types.SimpleNamespace(
-            data={const_module.DOMAIN: {"bridges": {"entry-id": bridge}}}
-        )
-        entry = types.SimpleNamespace(entry_id="entry-id")
+        hass = types.SimpleNamespace(data={})
+        entry = types.SimpleNamespace(entry_id="entry-id", runtime_data=bridge)
 
         entities: list = []
 
@@ -229,10 +228,8 @@ class PowerSupplyPlatformTests(unittest.IsolatedAsyncioTestCase):
                 "state-charging": 0,
             },
         )
-        hass = types.SimpleNamespace(
-            data={const_module.DOMAIN: {"bridges": {"entry-id": bridge}}}
-        )
-        entry = types.SimpleNamespace(entry_id="entry-id")
+        hass = types.SimpleNamespace(data={})
+        entry = types.SimpleNamespace(entry_id="entry-id", runtime_data=bridge)
 
         entities: list = []
 
@@ -274,10 +271,8 @@ class PowerSupplyPlatformTests(unittest.IsolatedAsyncioTestCase):
                 "state-charging": 1,
             },
         )
-        hass = types.SimpleNamespace(
-            data={const_module.DOMAIN: {"bridges": {"entry-id": bridge}}}
-        )
-        entry = types.SimpleNamespace(entry_id="entry-id")
+        hass = types.SimpleNamespace(data={})
+        entry = types.SimpleNamespace(entry_id="entry-id", runtime_data=bridge)
 
         entities: list = []
 
@@ -310,10 +305,8 @@ class PowerSupplyPlatformTests(unittest.IsolatedAsyncioTestCase):
                 "state-charging": 0,
             },
         )
-        hass = types.SimpleNamespace(
-            data={const_module.DOMAIN: {"bridges": {"entry-id": bridge}}}
-        )
-        entry = types.SimpleNamespace(entry_id="entry-id")
+        hass = types.SimpleNamespace(data={})
+        entry = types.SimpleNamespace(entry_id="entry-id", runtime_data=bridge)
 
         entities: list = []
 
@@ -324,6 +317,42 @@ class PowerSupplyPlatformTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(entities), 1)
         self.assertFalse(entities[0].is_on)
+
+    def test_power_unit_distinguishes_charge_level_deadline_and_power(self) -> None:
+        control = self._build_control(
+            type="PowerUnit",
+            states={
+                "batteryStateOfCharge": "battery",
+                "supplyTimeRemaining": "deadline",
+                "outputPower": "total",
+                "CP1": "output-one",
+            },
+        )
+        values = {"battery": 72, "deadline": 1_700_000_000, "total": 0.138, "output-one": 0.064}
+        bridge = _FakeBridge([control], values)
+        entities = sensor_module._build_control_sensor_entities(bridge, control)
+        by_id = {entity._attr_unique_id.rsplit(":", 1)[-1]: entity for entity in entities}
+        deadline = by_id["remaining_time"]
+        self.assertEqual(deadline._attr_device_class, "timestamp")
+        self.assertEqual(deadline.native_value.isoformat(), "2023-11-14T22:13:20+00:00")
+        self.assertEqual(by_id["output_1_power"]._attr_native_unit_of_measurement, "kW")
+        self.assertEqual(by_id["output_power"].native_value, 0.138)
+        self.assertEqual(binary_sensor_module._build_control_binary_entities(bridge, control), [])
+        values["deadline"] = 0
+        self.assertIsNone(deadline.native_value)
+
+    def test_power_unit_status_and_fuses_use_individual_bits(self) -> None:
+        control = self._build_control(
+            type="PowerUnit",
+            states={"deviceInfo": "status", "fuse": "fuses"},
+            details={"supplyMode": 1, "Outputs": ["Main (1)", "", "Fan (3)"]},
+        )
+        bridge = _FakeBridge([control], {"status": (1 << 9), "fuses": (1 << 2)})
+        entities = binary_sensor_module._build_control_binary_entities(bridge, control)
+        by_id = {entity._attr_unique_id.rsplit(":", 1)[-1]: entity.is_on for entity in entities}
+        self.assertEqual(
+            by_id, {"overcurrent": False, "overheating": True, "fuse_1_tripped": False, "fuse_3_tripped": True}
+        )
 
     async def test_text_state_history_is_compacted_to_latest_entry(self) -> None:
         history_value = "|".join(
@@ -342,10 +371,8 @@ class PowerSupplyPlatformTests(unittest.IsolatedAsyncioTestCase):
             states={"value": "state-history"},
         )
         bridge = _FakeBridge([control], {"state-history": history_value})
-        hass = types.SimpleNamespace(
-            data={const_module.DOMAIN: {"bridges": {"entry-id": bridge}}}
-        )
-        entry = types.SimpleNamespace(entry_id="entry-id")
+        hass = types.SimpleNamespace(data={})
+        entry = types.SimpleNamespace(entry_id="entry-id", runtime_data=bridge)
         entities: list = []
 
         await sensor_module.async_setup_entry(hass, entry, lambda new: entities.extend(new))

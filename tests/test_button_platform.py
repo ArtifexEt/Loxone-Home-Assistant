@@ -8,7 +8,7 @@ import types
 import unittest
 from unittest.mock import Mock
 
-from tests._loader import load_integration_module
+from tests._loader import install_media_player_stubs, load_integration_module
 
 
 def _install_homeassistant_stubs() -> None:
@@ -52,44 +52,7 @@ def _install_homeassistant_stubs() -> None:
 
     button.ButtonEntity = ButtonEntity
 
-    media_player = sys.modules["homeassistant.components.media_player"]
-
-    class MediaPlayerEntity:
-        pass
-
-    class MediaPlayerDeviceClass:
-        SPEAKER = "speaker"
-
-    class MediaPlayerState:
-        OFF = "off"
-        IDLE = "idle"
-        PAUSED = "paused"
-        PLAYING = "playing"
-
-    class MediaPlayerEntityFeature:
-        PAUSE = 1 << 0
-        PLAY = 1 << 1
-        STOP = 1 << 2
-        NEXT_TRACK = 1 << 3
-        PREVIOUS_TRACK = 1 << 4
-        VOLUME_SET = 1 << 5
-        VOLUME_STEP = 1 << 6
-        TURN_ON = 1 << 7
-        TURN_OFF = 1 << 8
-        SELECT_SOURCE = 1 << 9
-        PLAY_MEDIA = 1 << 10
-        SHUFFLE_SET = 1 << 11
-        REPEAT_SET = 1 << 12
-        SEEK = 1 << 13
-
-    class MediaType:
-        MUSIC = "music"
-
-    media_player.MediaPlayerEntity = MediaPlayerEntity
-    media_player.MediaPlayerDeviceClass = MediaPlayerDeviceClass
-    media_player.MediaPlayerState = MediaPlayerState
-    media_player.MediaPlayerEntityFeature = MediaPlayerEntityFeature
-    media_player.MediaType = MediaType
+    install_media_player_stubs()
 
     const = types.ModuleType("homeassistant.const")
 
@@ -174,30 +137,6 @@ def _install_homeassistant_stubs() -> None:
     entity.EntityCategory = EntityCategory
     sys.modules["homeassistant.helpers.entity"] = entity
 
-    aiohttp = types.ModuleType("aiohttp")
-
-    class ClientError(Exception):
-        pass
-
-    class ClientSession:
-        pass
-
-    class WSMessage:
-        pass
-
-    class WSMsgType:
-        BINARY = 2
-        TEXT = 1
-        CLOSE = 8
-        CLOSED = 257
-        ERROR = 258
-
-    aiohttp.ClientError = ClientError
-    aiohttp.ClientSession = ClientSession
-    aiohttp.WSMessage = WSMessage
-    aiohttp.WSMsgType = WSMsgType
-    sys.modules["aiohttp"] = aiohttp
-
 
 class _FakeBridge:
     serial = "1234567890"
@@ -230,10 +169,11 @@ class _FakeBridge:
 
 
 class _FakeConfigEntry:
-    def __init__(self, entry_id: str) -> None:
+    def __init__(self, entry_id: str, bridge) -> None:
         self.entry_id = entry_id
         self.state = button_module.ConfigEntryState.LOADED
         self.setup_lock = asyncio.Lock()
+        self.runtime_data = bridge
 
 
 class _FakeHass:
@@ -263,7 +203,7 @@ class ButtonPlatformTests(unittest.IsolatedAsyncioTestCase):
             states={"active": "state-active"},
         )
         bridge = _FakeBridge([push_button])
-        entry = _FakeConfigEntry("entry-1")
+        entry = _FakeConfigEntry("entry-1", bridge)
         hass = _FakeHass(entry.entry_id, bridge, const.DOMAIN)
         entities: list = []
 
@@ -286,7 +226,7 @@ class ButtonPlatformTests(unittest.IsolatedAsyncioTestCase):
             refresh_calls.append(bool(force))
 
         bridge.async_refresh_system_stats = async_refresh_system_stats
-        entry = _FakeConfigEntry("entry-1")
+        entry = _FakeConfigEntry("entry-1", bridge)
         hass = _FakeHass(entry.entry_id, bridge, const.DOMAIN)
         entities: list = []
 
@@ -309,9 +249,8 @@ class ButtonPlatformTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_refresh_entities_schedules_only_its_miniserver_entry_when_idle(self) -> None:
         bridge = _FakeBridge([])
-        entry = _FakeConfigEntry("entry-1")
+        entry = _FakeConfigEntry("entry-1", bridge)
         hass = _FakeHass(entry.entry_id, bridge, const.DOMAIN)
-        hass.data[const.DOMAIN]["bridges"]["other-entry"] = _FakeBridge([])
         reload_entry = Mock()
         hass.config_entries = types.SimpleNamespace(async_schedule_reload=reload_entry)
         entities: list = []
@@ -348,7 +287,7 @@ class ButtonPlatformTests(unittest.IsolatedAsyncioTestCase):
             },
         )
         bridge = _FakeBridge([intercom])
-        entry = _FakeConfigEntry("entry-1")
+        entry = _FakeConfigEntry("entry-1", bridge)
         hass = _FakeHass(entry.entry_id, bridge, const.DOMAIN)
         entities: list = []
 
@@ -396,7 +335,7 @@ class ButtonPlatformTests(unittest.IsolatedAsyncioTestCase):
             },
         )
         bridge = _FakeBridge([legacy_intercom])
-        entry = _FakeConfigEntry("entry-1")
+        entry = _FakeConfigEntry("entry-1", bridge)
         hass = _FakeHass(entry.entry_id, bridge, const.DOMAIN)
         entities: list = []
 
@@ -442,7 +381,7 @@ class ButtonPlatformTests(unittest.IsolatedAsyncioTestCase):
             },
         )
         bridge = _FakeBridge([intercom])
-        entry = _FakeConfigEntry("entry-1")
+        entry = _FakeConfigEntry("entry-1", bridge)
         hass = _FakeHass(entry.entry_id, bridge, const.DOMAIN)
         entities: list = []
 
@@ -464,9 +403,9 @@ class ButtonPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(bridge.commands, [])
 
         intercom_module.set_intercom_tts_message(bridge, "intercom-action", "Test message")
-        intercom_module.set_intercom_tts_volume(bridge, "intercom-action", 75)
 
         self.assertNotIn("intercom_tts_message", tts_button.extra_state_attributes)
+        self.assertNotIn("intercom_tts_volume", tts_button.extra_state_attributes)
         await tts_button.async_press()
         self.assertEqual(
             bridge.commands,
@@ -492,7 +431,7 @@ class ButtonPlatformTests(unittest.IsolatedAsyncioTestCase):
             values={"state-volume": 35},
             media_servers={"audio-action": media_server},
         )
-        entry = _FakeConfigEntry("entry-1")
+        entry = _FakeConfigEntry("entry-1", bridge)
         hass = _FakeHass(entry.entry_id, bridge, const.DOMAIN)
         entities: list = []
 
@@ -510,7 +449,8 @@ class ButtonPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(tts_buttons), 1)
         tts_button = tts_buttons[0]
 
-        await tts_button.async_press()
+        with self.assertRaises(media_player_module.ServiceValidationError):
+            await tts_button.async_press()
         self.assertEqual(bridge.commands, [])
 
         media_player_module.set_audio_tts_message(bridge, audio_zone, "Alarm test")
@@ -518,7 +458,7 @@ class ButtonPlatformTests(unittest.IsolatedAsyncioTestCase):
         await tts_button.async_press()
         self.assertEqual(
             bridge.commands,
-            [("media-server-action", "tts/Alarm test/35")],
+            [("audio-action", "tts/Alarm%20test/35")],
         )
 
 

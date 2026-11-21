@@ -58,8 +58,12 @@ class IntercomGalleryTests(unittest.IsolatedAsyncioTestCase):
         self.enterContext(patch.object(gallery.er, "async_get", return_value=SimpleNamespace(
             async_get=self.registry.get,
         )))
+        self.loaded_entries = [SimpleNamespace(entry_id=ENTRY_ID, runtime_data=self.bridge)]
         self.hass = SimpleNamespace(
-            data={gallery.DOMAIN: {"bridges": {ENTRY_ID: self.bridge}}},
+            data={gallery.DOMAIN: {}},
+            config_entries=SimpleNamespace(
+                async_loaded_entries=lambda domain: self.loaded_entries if domain == gallery.DOMAIN else [],
+            ),
             http=SimpleNamespace(async_register_static_paths=AsyncMock(), register_view=Mock()),
         )
         self.read = Mock(return_value=True)
@@ -130,7 +134,7 @@ class IntercomGalleryTests(unittest.IsolatedAsyncioTestCase):
         self.entries.assert_not_awaited()
 
     async def test_gallery_reports_an_entry_reload_as_temporarily_unavailable(self) -> None:
-        self.hass.data[gallery.DOMAIN]["bridges"].clear()
+        self.loaded_entries.clear()
         with self.assertRaises(gallery.web.HTTPServiceUnavailable):
             await self.view.get(self._request(), CAMERA_ID)
         self.entries.assert_not_awaited()

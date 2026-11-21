@@ -47,7 +47,7 @@ class StructureRefreshTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             send.await_args_list,
             [
-                call(VERSION_COMMAND, ensure_connected=False),
+                call(VERSION_COMMAND, ensure_connected=False, encrypt_response=False),
                 call(STRUCTURE_COMMAND, ensure_connected=False),
             ],
         )
@@ -62,7 +62,9 @@ class StructureRefreshTests(unittest.IsolatedAsyncioTestCase):
 
                 self.assertFalse(await self.bridge._async_structure_has_changed())
 
-                send.assert_awaited_once_with(VERSION_COMMAND, ensure_connected=False)
+                send.assert_awaited_once_with(
+                    VERSION_COMMAND, ensure_connected=False, encrypt_response=False
+                )
 
     async def test_missing_baseline_does_not_query_the_miniserver(self) -> None:
         self.bridge.loxapp_version = ""

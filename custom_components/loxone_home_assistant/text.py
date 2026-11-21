@@ -2,18 +2,16 @@
 
 from __future__ import annotations
 
-from homeassistant.components.text import TextEntity
-try:
-    from homeassistant.components.text import TextMode
-except ImportError:  # pragma: no cover - compatibility for lightweight test stubs
-    TextMode = None  # type: ignore[assignment]
+from urllib.parse import quote
+
+from homeassistant.components.text import TextEntity, TextMode
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import MAX_LENGTH_STATE_STATE
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import INTERCOM_CONTROL_TYPES, MEDIA_PLAYER_CONTROL_TYPES, TEXT_CONTROL_TYPES
-from .entity import LoxoneEntity, normalize_state_name
+from .const import TEXT_CONTROL_TYPES
+from .entity import LoxoneEntity, is_audio_tts_control, is_intercom_tts_control
 from .intercom import (
     intercom_tts_message,
     set_intercom_tts_message,
@@ -23,18 +21,12 @@ from .media_player import (
     set_audio_tts_message,
 )
 from .runtime import entry_bridge
-INTERCOM_TTS_CONTROL_TYPES_NORMALIZED = {
-    normalize_state_name(value) for value in INTERCOM_CONTROL_TYPES
-}
-AUDIO_TTS_CONTROL_TYPES_NORMALIZED = {
-    normalize_state_name(value) for value in MEDIA_PLAYER_CONTROL_TYPES
-}
 
 
 async def async_setup_entry(
     hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
 ) -> None:
-    bridge = entry_bridge(hass, entry)
+    bridge = entry_bridge(entry)
     entities: list[TextEntity] = [
         LoxoneTextEntity(bridge, control)
         for control in bridge.controls
@@ -43,12 +35,12 @@ async def async_setup_entry(
     entities.extend(
         LoxoneIntercomTtsMessageEntity(bridge, control)
         for control in bridge.controls
-        if _supports_intercom_tts_controls(control)
+        if is_intercom_tts_control(control)
     )
     entities.extend(
         LoxoneAudioTtsMessageEntity(bridge, control)
         for control in bridge.controls
-        if _supports_audio_tts_controls(control)
+        if is_audio_tts_control(control)
     )
     async_add_entities(entities)
 
@@ -62,7 +54,7 @@ class LoxoneTextEntity(LoxoneEntity, TextEntity):
         return "" if value is None else str(value)
 
     async def async_set_value(self, value: str) -> None:
-        await self.bridge.async_send_action(self.control.uuid_action, value)
+        await self.bridge.async_send_action(self.control.uuid_action, quote(value, safe=""))
 
 
 class LoxoneIntercomTtsMessageEntity(LoxoneEntity, TextEntity):
@@ -70,8 +62,7 @@ class LoxoneIntercomTtsMessageEntity(LoxoneEntity, TextEntity):
 
     _attr_icon = "mdi:message-text"
     _attr_native_max = MAX_LENGTH_STATE_STATE
-    if TextMode is not None:
-        _attr_mode = TextMode.TEXT
+    _attr_mode = TextMode.TEXT
 
     def __init__(self, bridge, control) -> None:
         super().__init__(bridge, control, "TTS Message")
@@ -91,8 +82,7 @@ class LoxoneAudioTtsMessageEntity(LoxoneEntity, TextEntity):
 
     _attr_icon = "mdi:message-text"
     _attr_native_max = 120
-    if TextMode is not None:
-        _attr_mode = TextMode.TEXT
+    _attr_mode = TextMode.TEXT
 
     def __init__(self, bridge, control) -> None:
         super().__init__(bridge, control, "TTS Message")
@@ -104,11 +94,3 @@ class LoxoneAudioTtsMessageEntity(LoxoneEntity, TextEntity):
     async def async_set_value(self, value: str) -> None:
         set_audio_tts_message(self.bridge, self.control, value)
         self.async_write_ha_state()
-
-
-def _supports_intercom_tts_controls(control) -> bool:
-    return normalize_state_name(control.type) in INTERCOM_TTS_CONTROL_TYPES_NORMALIZED
-
-
-def _supports_audio_tts_controls(control) -> bool:
-    return normalize_state_name(control.type) in AUDIO_TTS_CONTROL_TYPES_NORMALIZED

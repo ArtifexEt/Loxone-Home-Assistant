@@ -2,20 +2,11 @@
 
 from __future__ import annotations
 
-import sys
 from dataclasses import dataclass, field
 from typing import Any
 
 
-if sys.version_info >= (3, 10):
-    def slotted_dataclass(cls):
-        return dataclass(slots=True)(cls)
-else:
-    def slotted_dataclass(cls):
-        return dataclass(cls)
-
-
-@slotted_dataclass
+@dataclass(slots=True)
 class LoxoneControl:
     """Representation of one Loxone control or sub-control."""
 
@@ -46,7 +37,7 @@ class LoxoneControl:
         return self.states.get(name)
 
 
-@slotted_dataclass
+@dataclass(slots=True)
 class LoxoneStateRef:
     """Back-reference from a state UUID to its owning control."""
 
@@ -56,7 +47,7 @@ class LoxoneStateRef:
     state_name: str
 
 
-@slotted_dataclass
+@dataclass(slots=True)
 class LoxoneMediaServer:
     """Representation of one Loxone media server."""
 
@@ -65,9 +56,10 @@ class LoxoneMediaServer:
     host: str | None = None
     mac: str | None = None
     states: dict[str, str] = field(default_factory=dict)
+    server_type: int | None = None
 
 
-@slotted_dataclass
+@dataclass(slots=True)
 class LoxoneStructure:
     """Parsed Loxone structure."""
 
@@ -79,4 +71,3 @@ class LoxoneStructure:
     controls_by_action: dict[str, LoxoneControl]
     states: dict[str, LoxoneStateRef]
     media_servers_by_uuid_action: dict[str, LoxoneMediaServer] = field(default_factory=dict)
-    operating_modes: dict[str, str] = field(default_factory=dict)
