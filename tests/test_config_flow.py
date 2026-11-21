@@ -60,6 +60,7 @@ def _install_homeassistant_stubs() -> None:
 
     config_entries = types.ModuleType("homeassistant.config_entries")
     config_entries.ConfigFlowResult = dict
+    config_entries.ConfigEntry = object
 
     class ConfigFlow:
         def __init_subclass__(cls, **kwargs):
@@ -82,9 +83,6 @@ def _install_homeassistant_stubs() -> None:
             return None
 
     class OptionsFlow:
-        def __init__(self, config_entry=None) -> None:
-            self.config_entry = config_entry
-
         def async_show_form(self, **kwargs):
             return kwargs
 
@@ -101,6 +99,7 @@ def _install_homeassistant_stubs() -> None:
         return func
 
     core.callback = callback
+    core.HomeAssistant = object
     sys.modules["homeassistant.core"] = core
 
 
@@ -178,7 +177,7 @@ def _install_config_flow_dependency_stubs() -> None:
 
     async def async_discover_miniservers(hass, timeout):
         del hass, timeout
-        return types.SimpleNamespace(devices=[], legacy_found=False)
+        return []
 
     bridge.DiscoveryResult = DiscoveryResult
     bridge.LoxoneAuthenticationError = LoxoneAuthenticationError
@@ -188,71 +187,6 @@ def _install_config_flow_dependency_stubs() -> None:
     bridge.LoxoneVersionUnsupportedError = LoxoneVersionUnsupportedError
     bridge.async_discover_miniservers = async_discover_miniservers
     sys.modules["custom_components.loxone_home_assistant.bridge"] = bridge
-
-    runtime = types.ModuleType("custom_components.loxone_home_assistant.runtime")
-
-    def entry_bridge(hass, entry):
-        runtime_data = getattr(entry, "runtime_data", None)
-        if runtime_data is not None:
-            return runtime_data
-        for domain_data in getattr(hass, "data", {}).values():
-            if not isinstance(domain_data, dict):
-                continue
-            bridges = domain_data.get("bridges")
-            if isinstance(bridges, dict) and entry.entry_id in bridges:
-                return bridges[entry.entry_id]
-        return None
-
-    def set_entry_bridge(hass, entry, bridge):
-        data = getattr(hass, "data", None)
-        if not isinstance(data, dict):
-            return None
-        for domain_data in data.values():
-            if not isinstance(domain_data, dict):
-                continue
-            bridges = domain_data.setdefault("bridges", {})
-            if isinstance(bridges, dict):
-                bridges[entry.entry_id] = bridge
-                setattr(entry, "runtime_data", bridge)
-                return None
-        return None
-
-    def remove_entry_bridge(hass, entry):
-        runtime_data = getattr(entry, "runtime_data", None)
-        if runtime_data is not None:
-            setattr(entry, "runtime_data", None)
-        data = getattr(hass, "data", None)
-        if not isinstance(data, dict):
-            return runtime_data
-        for domain_data in data.values():
-            if not isinstance(domain_data, dict):
-                continue
-            bridges = domain_data.get("bridges")
-            if isinstance(bridges, dict):
-                removed = bridges.pop(entry.entry_id, None)
-                if removed is not None:
-                    return removed
-        return runtime_data
-
-    def bridges_by_entry_id(hass):
-        result = {}
-        for domain_data in getattr(hass, "data", {}).values():
-            if not isinstance(domain_data, dict):
-                continue
-            bridges = domain_data.get("bridges")
-            if isinstance(bridges, dict):
-                result.update(bridges)
-        return result
-
-    def runtime_bridge(config_entry):
-        return getattr(config_entry, "runtime_data", None)
-
-    runtime.entry_bridge = entry_bridge
-    runtime.set_entry_bridge = set_entry_bridge
-    runtime.remove_entry_bridge = remove_entry_bridge
-    runtime.bridges_by_entry_id = bridges_by_entry_id
-    runtime.runtime_bridge = runtime_bridge
-    sys.modules["custom_components.loxone_home_assistant.runtime"] = runtime
 
     versioning = types.ModuleType("custom_components.loxone_home_assistant.versioning")
     versioning.MIN_SUPPORTED_VERSION = (10, 2)
@@ -342,6 +276,7 @@ class ConfigFlowFormTests(unittest.TestCase):
         self.assertEqual(defaults["enable_light_mood_select"], True)
         self.assertEqual(defaults["expose_controller_child_lights"], True)
         self.assertEqual(defaults["use_loxone_icons"], False)
+        self.assertNotIn("auto_create_automations", defaults)
 
 
 class ConnectionConfigFlowTests(unittest.IsolatedAsyncioTestCase):
@@ -385,7 +320,7 @@ class ConnectionConfigFlowTests(unittest.IsolatedAsyncioTestCase):
         result = config_flow.DiscoveryResult(
             host="miniserver.local", port=80, use_tls=False, label="Workshop"
         )
-        discovery = AsyncMock(return_value=types.SimpleNamespace(devices=[result], legacy_found=True))
+        discovery = AsyncMock(return_value=[result])
 
         with (
             patch.object(config_flow, "async_discover_miniservers", discovery),
@@ -437,7 +372,8 @@ class ConnectionConfigFlowTests(unittest.IsolatedAsyncioTestCase):
                     },
                     options={"use_tls": old_tls},
                 )
-                flow = config_flow.LoxoneCommunityOptionsFlow(config_entry)
+                flow = config_flow.LoxoneCommunityOptionsFlow()
+                flow.config_entry = config_entry
                 flow.hass = object()
                 bridge = _connected_bridge(use_tls=new_tls)
 
@@ -455,7 +391,8 @@ class ConnectionConfigFlowTests(unittest.IsolatedAsyncioTestCase):
             data={"host": "miniserver.local", "port": 443, "username": "loxone", "password": "test"},
             options={"intercom_language": "pl"},
         )
-        flow = config_flow.LoxoneCommunityOptionsFlow(entry)
+        flow = config_flow.LoxoneCommunityOptionsFlow()
+        flow.config_entry = entry
         flow.hass = types.SimpleNamespace(data={})
 
         form = await flow.async_step_init()
@@ -484,7 +421,8 @@ class ConnectionConfigFlowTests(unittest.IsolatedAsyncioTestCase):
             },
             options={"password": "updated-password", "intercom_password": "updated-intercom"},
         )
-        flow = config_flow.LoxoneCommunityOptionsFlow(config_entry)
+        flow = config_flow.LoxoneCommunityOptionsFlow()
+        flow.config_entry = config_entry
         flow.hass = object()
         with patch.object(config_flow, "LoxoneBridge", return_value=_connected_bridge(use_tls=True)) as factory:
             result = await flow.async_step_init({"password": "", "intercom_password": ""})
@@ -516,7 +454,8 @@ class ConnectionConfigFlowTests(unittest.IsolatedAsyncioTestCase):
                     },
                     options={},
                 )
-                flow = config_flow.LoxoneCommunityOptionsFlow(config_entry)
+                flow = config_flow.LoxoneCommunityOptionsFlow()
+                flow.config_entry = config_entry
                 flow.hass = object()
                 bridge = _connected_bridge(use_tls=True)
                 with patch.object(config_flow, "LoxoneBridge", return_value=bridge) as factory:

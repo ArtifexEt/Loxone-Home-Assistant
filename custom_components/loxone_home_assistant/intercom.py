@@ -6,7 +6,7 @@ import json
 import re
 from collections.abc import Mapping, Sequence
 from typing import Any
-from urllib.parse import quote, urlsplit
+from urllib.parse import SplitResult, quote, urlsplit
 
 from .const import (
     DOORBELL_STATE_CANDIDATES,
@@ -100,12 +100,11 @@ _ADDRESS_DETAIL_PATHS = (
     "securedDetails.videoInfo.host",
     "securedDetails.videoInfo.hostname",
 )
-_MAC_HEX_CHARS = set("0123456789abcdefABCDEF")
 _NON_ALNUM_RE = re.compile(r"[^a-z0-9]+")
 
 _INTERCOM_COMMAND_SPECS: dict[str, tuple[int, int | None, tuple[int, ...]]] = {
     "answer": (0, 0, ()),
-    "playTts": (1, 1, ()),
+    "playTts": (1, 1, (0,)),
     "mute": (1, 1, (0,)),
     "setAnswers": (1, None, ()),
     "setallvideosettings": (4, 4, (0, 1, 2, 3)),
@@ -115,25 +114,20 @@ _INTERCOM_COMMAND_SPECS: dict[str, tuple[int, int | None, tuple[int, ...]]] = {
     "getnumberbellimages": (0, 0, ()),
     "setnumberbellimages": (1, 1, (0,)),
 }
-_INTERCOM_COMMAND_ALIASES: dict[str, str] = {}
-for _canonical in _INTERCOM_COMMAND_SPECS:
-    _INTERCOM_COMMAND_ALIASES[_NON_ALNUM_RE.sub("", _canonical.casefold())] = _canonical
-_INTERCOM_COMMAND_ALIASES.update(
-    {
-        "accept": "answer",
-        "answercall": "answer",
-        "pickup": "answer",
-        "tts": "playTts",
-        "playtts": "playTts",
-        "mutemic": "mute",
-        "microphonemute": "mute",
-        "unmute": "mute",
-        "unmutemic": "mute",
-        "microphoneunmute": "mute",
-        "setanswer": "setAnswers",
-        "setallanswer": "setAnswers",
-    }
-)
+_INTERCOM_COMMAND_ALIASES = {
+    **{command.casefold(): command for command in _INTERCOM_COMMAND_SPECS},
+    "accept": "answer",
+    "answercall": "answer",
+    "pickup": "answer",
+    "tts": "playTts",
+    "mutemic": "mute",
+    "microphonemute": "mute",
+    "unmute": "mute",
+    "unmutemic": "mute",
+    "microphoneunmute": "mute",
+    "setanswer": "setAnswers",
+    "setallanswer": "setAnswers",
+}
 _INTERCOM_COMMAND_ALIAS_DEFAULT_ARGUMENTS: dict[str, tuple[str, ...]] = {
     "mutemic": ("1",),
     "microphonemute": ("1",),
@@ -142,18 +136,16 @@ _INTERCOM_COMMAND_ALIAS_DEFAULT_ARGUMENTS: dict[str, tuple[str, ...]] = {
     "microphoneunmute": ("0",),
 }
 INTERCOM_DEFAULT_TTS_MESSAGE = ""
-INTERCOM_DEFAULT_TTS_VOLUME = 60
+
 
 def is_intercom_control(control: LoxoneControl) -> bool:
     """Return True when a control looks like an intercom/door station."""
     normalized_type = normalize_state_name(control.type)
-    if normalized_type in INTERCOM_TYPE_HINTS_NORMALIZED:
-        return True
-    if any(hint in normalized_type for hint in INTERCOM_TYPE_HINTS_NORMALIZED):
-        return True
-
     normalized_name = normalize_state_name(control.name)
-    if any(hint in normalized_name for hint in INTERCOM_TYPE_HINTS_NORMALIZED):
+    if any(
+        hint in normalized_type or hint in normalized_name
+        for hint in INTERCOM_TYPE_HINTS_NORMALIZED
+    ):
         return True
 
     normalized_states = {normalize_state_name(name) for name in control.states}
@@ -182,7 +174,7 @@ def is_intercom_control(control: LoxoneControl) -> bool:
         return True
 
     return any(
-        _nested_detail_value(control.details, detail_path) is not None
+        intercom_detail_value(control.details, detail_path) is not None
         for detail_path in (
             "videoInfo.streamUrl",
             "securedDetails.videoInfo.streamUrl",
@@ -206,11 +198,9 @@ def resolve_intercom_command(command: str, arguments: Any = None) -> str:
             f"Unsupported intercom command '{raw_command}'. Available: {available}."
         )
 
-    resolved_arguments = _coerce_intercom_arguments(canonical_command, arguments)
-    if not resolved_arguments:
-        default_arguments = _INTERCOM_COMMAND_ALIAS_DEFAULT_ARGUMENTS.get(normalized_command)
-        if default_arguments is not None:
-            resolved_arguments = list(default_arguments)
+    resolved_arguments = _coerce_intercom_arguments(
+        canonical_command, arguments
+    ) or _INTERCOM_COMMAND_ALIAS_DEFAULT_ARGUMENTS.get(normalized_command, ())
 
     min_args, max_args, numeric_indexes = _INTERCOM_COMMAND_SPECS[canonical_command]
     if len(resolved_arguments) < min_args:
@@ -223,8 +213,6 @@ def resolve_intercom_command(command: str, arguments: Any = None) -> str:
         )
 
     for index in numeric_indexes:
-        if index >= len(resolved_arguments):
-            continue
         try:
             int(resolved_arguments[index], 10)
         except ValueError as err:
@@ -232,9 +220,11 @@ def resolve_intercom_command(command: str, arguments: Any = None) -> str:
                 f"Argument {index + 1} for '{canonical_command}' must be an integer."
             ) from err
 
-    if canonical_command in {"mute", "setvideosettings", "setframerate", "setresolution"}:
-        if int(resolved_arguments[0], 10) not in {0, 1}:
-            raise ValueError(f"Argument 1 for '{canonical_command}' must be 0 or 1.")
+    if (
+        canonical_command in {"mute", "setvideosettings", "setframerate", "setresolution"}
+        and int(resolved_arguments[0], 10) not in {0, 1}
+    ):
+        raise ValueError(f"Argument 1 for '{canonical_command}' must be 0 or 1.")
 
     encoded_arguments = [
         quote(argument, safe="(),:%._-") for argument in resolved_arguments
@@ -250,9 +240,6 @@ def _coerce_intercom_arguments(command: str, arguments: Any) -> list[str]:
 
     if isinstance(arguments, str):
         raw = arguments.strip()
-        if not raw:
-            return []
-
         if command in {
             "setAnswers",
             "setallvideosettings",
@@ -260,22 +247,19 @@ def _coerce_intercom_arguments(command: str, arguments: Any) -> list[str]:
             "setframerate",
             "setresolution",
         }:
-            return _clean_intercom_argument_list(raw.split("/"))
-        return [raw]
+            arguments = raw.split("/")
+        else:
+            arguments = (raw,)
+    elif not isinstance(arguments, Sequence):
+        arguments = (arguments,)
 
-    if isinstance(arguments, Sequence):
-        return _clean_intercom_argument_list(arguments)
-
-    return _clean_intercom_argument_list((arguments,))
-
-
-def _clean_intercom_argument_list(arguments: Sequence[Any]) -> list[str]:
-    cleaned: list[str] = []
-    for value in arguments:
-        text = str(value).strip()
-        if not text:
-            continue
-        cleaned.append(text)
+    cleaned = [str(value).strip() if value is not None else "" for value in arguments]
+    if command != "setAnswers":
+        return [value for value in cleaned if value]
+    while cleaned and not cleaned[-1]:
+        cleaned.pop()
+    if "" in cleaned:
+        raise ValueError("Command 'setAnswers' cannot skip an answer index.")
     return cleaned
 
 
@@ -327,10 +311,6 @@ def intercom_mute_state_name(control: LoxoneControl) -> str | None:
     return first_matching_state_name(control, ("muted",))
 
 
-def intercom_last_bell_events_state_name(control: LoxoneControl) -> str | None:
-    return first_matching_state_name(control, ("lastBellEvents",))
-
-
 def intercom_last_bell_timestamp_state_name(control: LoxoneControl) -> str | None:
     return first_matching_state_name(control, ("lastBellTimestamp",))
 
@@ -347,17 +327,19 @@ def resolve_intercom_http_url(
     address_value: Any = None,
 ) -> str | None:
     """Resolve an Intercom media URL using the explicit device address."""
-    text = _coerce_text(value)
-    if text is None:
+    if not isinstance(value, str) or not (text := value.strip()):
         return None
 
-    if _is_absolute_http_url(text) or text.startswith("//"):
-        return bridge.resolve_http_url(text)
+    parts = split_intercom_url(text)
+    if parts is None:
+        return None
+    if parts.scheme or parts.netloc:
+        return _resolve_absolute_media_url(bridge, parts)
 
     if not _looks_like_urlish_relative(text):
         return None
 
-    if text.lstrip("/").startswith(("camimage/", "proxy/")):
+    if parts.path.lstrip("/").startswith(("camimage/", "proxy/")):
         return bridge.resolve_http_url(text)
 
     intercom_base_url = _intercom_base_url(
@@ -366,9 +348,24 @@ def resolve_intercom_http_url(
         address_value=address_value,
     )
     if intercom_base_url is not None:
-        return _build_absolute_url(intercom_base_url, text)
+        return f"{intercom_base_url}/{text.lstrip('/')}"
 
     return bridge.resolve_http_url(text)
+
+
+def _resolve_absolute_media_url(bridge, parts: SplitResult) -> str | None:
+    if parts.scheme not in {"", "http", "https"} or not parts.hostname:
+        return None
+    if parts.hostname == "remoteconnect":
+        if not bridge.use_tls:
+            return None
+        return bridge.resolve_http_url(parts._replace(scheme="", netloc="").geturl())
+    if parts.hostname == "clouddns":
+        host = str(bridge.host).strip("[]")
+        host = f"[{host}]" if ":" in host else host
+        port = f":{parts.port}" if parts.port is not None else ""
+        parts = parts._replace(netloc=f"{host}{port}")
+    return bridge.resolve_http_url(parts.geturl())
 
 
 def intercom_boolean_state_roles(control: LoxoneControl) -> dict[str, str]:
@@ -409,7 +406,7 @@ def is_intercom_system_schema_webpage(
     if any(hint in path_text for hint in ("intercom", "dzwonek", "wideodomofon", "door")):
         return True
 
-    url = _coerce_text(_mapping_get_case_insensitive(control.details, "url"))
+    url = _coerce_text(intercom_mapping_value(control.details, "url"))
     if url is not None and any(
         hint in url.casefold() for hint in ("intercom", "door", "doorbell", "dzwonek")
     ):
@@ -451,7 +448,7 @@ def _intercom_base_url(bridge, control: LoxoneControl, *, address_value: Any = N
 
     for detail_path in _ADDRESS_DETAIL_PATHS:
         from_details = _base_url_from_value(
-            _nested_detail_value(control.details, detail_path),
+            intercom_detail_value(control.details, detail_path),
             default_scheme=default_scheme,
         )
         if from_details is not None:
@@ -461,9 +458,6 @@ def _intercom_base_url(bridge, control: LoxoneControl, *, address_value: Any = N
 
 
 def _base_url_from_value(value: Any, *, default_scheme: str) -> str | None:
-    if value is None:
-        return None
-
     if isinstance(value, Mapping):
         for key in (
             "url",
@@ -476,7 +470,7 @@ def _base_url_from_value(value: Any, *, default_scheme: str) -> str | None:
             "deviceAddress",
             "value",
         ):
-            nested = _mapping_get_case_insensitive(value, key)
+            nested = intercom_mapping_value(value, key)
             from_nested = _base_url_from_value(nested, default_scheme=default_scheme)
             if from_nested is not None:
                 return from_nested
@@ -513,46 +507,34 @@ def _base_url_from_value(value: Any, *, default_scheme: str) -> str | None:
         host_candidate = raw.rsplit("@", 1)[-1]
         return _base_url_from_value(host_candidate, default_scheme=default_scheme)
 
+    explicit = "://" in raw or raw.startswith("//")
     if raw.startswith("//"):
-        parsed = urlsplit(f"{default_scheme}:{raw}")
-        if parsed.hostname is None:
-            return None
-        port_part = f":{parsed.port}" if parsed.port else ""
-        return f"{default_scheme}://{parsed.hostname}{port_part}"
+        raw = f"{default_scheme}:{raw}"
+    elif not explicit:
+        raw = f"{default_scheme}://{raw}"
 
-    parsed_raw = urlsplit(raw)
-    if parsed_raw.scheme in {"http", "https"} and parsed_raw.hostname:
-        port_part = f":{parsed_raw.port}" if parsed_raw.port else ""
-        return f"{parsed_raw.scheme}://{parsed_raw.hostname}{port_part}"
-
-    if raw.startswith("/"):
+    parts = split_intercom_url(raw)
+    if parts is None or parts.scheme not in {"http", "https"} or not parts.hostname:
         return None
-
-    host_part = raw.split("/", 1)[0]
-    parsed_host = urlsplit(f"{default_scheme}://{host_part}")
-    host = parsed_host.hostname
-    if host is None or not _is_likely_host(host):
+    if not explicit and not _is_likely_host(parts.hostname):
         return None
-    port_part = f":{parsed_host.port}" if parsed_host.port else ""
-    return f"{default_scheme}://{host}{port_part}"
+    host = f"[{parts.hostname}]" if ":" in parts.hostname else parts.hostname
+    port = f":{parts.port}" if parts.port is not None else ""
+    return f"{parts.scheme}://{host}{port}"
 
 
 def _is_likely_host(value: str) -> bool:
-    candidate = value.strip().strip("[]")
-    if not candidate:
-        return False
-    if candidate.casefold() == "localhost":
-        return True
-    if ":" in candidate:
-        return True
-    if "." in candidate:
-        return True
-    return False
+    return value == "localhost" or ":" in value or "." in value
 
 
-def _is_absolute_http_url(value: str) -> bool:
-    parsed = urlsplit(value)
-    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+def split_intercom_url(value: str) -> SplitResult | None:
+    """Split a firmware-provided URL, validating its optional port."""
+    try:
+        parts = urlsplit(value)
+        _ = parts.port
+    except ValueError:
+        return None
+    return parts
 
 
 def _looks_like_urlish_relative(value: str) -> bool:
@@ -563,8 +545,6 @@ def _looks_like_urlish_relative(value: str) -> bool:
         return True
 
     normalized = stripped.casefold()
-    if normalized.startswith(("dev/", "jdev/", "api/", "rest/")):
-        return True
     if "/" in stripped:
         return True
 
@@ -592,22 +572,18 @@ def _looks_like_urlish_relative(value: str) -> bool:
     )
 
 
-def _build_absolute_url(base_url: str, path_or_url: str) -> str:
-    parsed_base = urlsplit(base_url)
-    path = path_or_url if path_or_url.startswith("/") else f"/{path_or_url}"
-    return f"{parsed_base.scheme}://{parsed_base.netloc}{path}"
-
-
-def _nested_detail_value(details: Mapping[str, Any], path: str) -> Any:
+def intercom_detail_value(details: Any, path: str) -> Any:
+    """Read a dotted path in a firmware details object."""
     current: Any = details
     for part in path.split("."):
         if not isinstance(current, Mapping):
             return None
-        current = _mapping_get_case_insensitive(current, part)
+        current = intercom_mapping_value(current, part)
     return current
 
 
-def _mapping_get_case_insensitive(mapping: Mapping[str, Any], key: str) -> Any:
+def intercom_mapping_value(mapping: Mapping[str, Any], key: str) -> Any:
+    """Read a field across variants in spelling and case."""
     if key in mapping:
         return mapping[key]
 
@@ -619,9 +595,7 @@ def _mapping_get_case_insensitive(mapping: Mapping[str, Any], key: str) -> Any:
 
 
 def _coerce_text(value: Any) -> str | None:
-    if value is None:
-        return None
-    text = str(value).strip()
+    text = str(value).strip() if value is not None else ""
     return text or None
 
 
@@ -635,28 +609,6 @@ def set_intercom_tts_message(bridge, uuid_action: str, value: Any) -> str:
     text = str(value or "")
     _intercom_tts_message_store(bridge)[uuid_action] = text
     return text
-
-
-def intercom_tts_volume(bridge, uuid_action: str) -> int:
-    store = _intercom_tts_volume_store(bridge)
-    raw = store.get(uuid_action, INTERCOM_DEFAULT_TTS_VOLUME)
-    try:
-        volume = int(raw)
-    except (TypeError, ValueError):
-        volume = INTERCOM_DEFAULT_TTS_VOLUME
-    clamped = max(0, min(100, volume))
-    store[uuid_action] = clamped
-    return clamped
-
-
-def set_intercom_tts_volume(bridge, uuid_action: str, value: Any) -> int:
-    try:
-        volume = int(float(value))
-    except (TypeError, ValueError):
-        volume = INTERCOM_DEFAULT_TTS_VOLUME
-    clamped = max(0, min(100, volume))
-    _intercom_tts_volume_store(bridge)[uuid_action] = clamped
-    return clamped
 
 
 def build_intercom_tts_command(message: Any, volume: Any = None) -> str | None:
@@ -677,13 +629,4 @@ def _intercom_tts_message_store(bridge) -> dict[str, str]:
         return store
     created: dict[str, str] = {}
     setattr(bridge, "_intercom_tts_messages", created)
-    return created
-
-
-def _intercom_tts_volume_store(bridge) -> dict[str, int]:
-    store = getattr(bridge, "_intercom_tts_volumes", None)
-    if isinstance(store, dict):
-        return store
-    created: dict[str, int] = {}
-    setattr(bridge, "_intercom_tts_volumes", created)
     return created

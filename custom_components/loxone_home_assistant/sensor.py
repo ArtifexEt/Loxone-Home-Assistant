@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
-from datetime import datetime, timezone
 import re
+from collections.abc import Mapping
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+from math import isfinite
 from typing import Any
 
 from homeassistant.components.sensor import SensorDeviceClass, SensorEntity, SensorStateClass
@@ -41,8 +43,10 @@ from .const import (
 )
 from .entity import (
     LoxoneEntity,
-    control_primary_state,
+    coerce_bool,
     coerce_float,
+    control_entity_unique_id,
+    control_primary_state,
     first_matching_state_name,
     infer_unit,
     miniserver_device_info,
@@ -107,6 +111,8 @@ METER_TOTAL_STATE_CANDIDATES = (
 )
 POWER_SUPPLY_KIND_BATTERY = "battery_level"
 POWER_SUPPLY_KIND_REMAINING_TIME = "remaining_time"
+LOXONE_TIME_EPOCH = datetime(2009, 1, 1, tzinfo=UTC)
+UNIX_TIME_EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 PRESENCE_KIND_ILLUMINANCE = "illuminance"
 PRESENCE_KIND_SOUND_LEVEL = "sound_level"
 CLIMATE_OVERRIDE_ENTRIES_STATE_CANDIDATES = ("overrideEntries",)
@@ -254,6 +260,126 @@ TIMESTAMP_STATE_KEYS = {
 STATE_HISTORY_SEPARATOR = "|"
 STATE_DETAIL_SEPARATOR = "\x14"
 STATE_CONTROL_CHAR_RE = re.compile(r"[\x00-\x1f]+")
+
+
+@dataclass(frozen=True, slots=True)
+class _Reading:
+    label: str
+    unit: str | None = None
+    device_class: str | None = None
+    cumulative: bool = False
+
+
+_PRIMARY_READINGS = {
+    "Fronius": ("prodCurr", "consCurr", "gridCurr", "batteryCurr", "prodTotal"),
+    "Heatmixer": ("tempTarget", "tempActual"),
+    "Hourcounter": ("total",),
+    "InfoOnlyAnalog": ("value",),
+    "InfoOnlyText": ("text", "value"),
+    "TextState": ("text", "value"),
+}
+_NUMERIC_READINGS = {
+    "EnergyManager": {
+        "currentPower": _Reading("Current power"),
+        "currentBat": _Reading("Current battery input"),
+    },
+    "Fronius": {
+        "prodCurr": _Reading("Production power", "kW", "POWER"),
+        "consCurr": _Reading("Consumption power", "kW", "POWER"),
+        "gridCurr": _Reading("Grid power", "kW", "POWER"),
+        "batteryCurr": _Reading("Battery power", "kW", "POWER"),
+        "stateOfCharge": _Reading("Battery level", "%", "BATTERY"),
+        "prodCurrDay": _Reading("Production today", "kWh", "ENERGY", cumulative=True),
+        "prodCurrMonth": _Reading("Production this month", "kWh", "ENERGY", cumulative=True),
+        "prodCurrYear": _Reading("Production this year", "kWh", "ENERGY", cumulative=True),
+        "prodTotal": _Reading("Production total", "kWh", "ENERGY", cumulative=True),
+        "consCurrDay": _Reading("Consumption today", "kWh", "ENERGY", cumulative=True),
+    },
+    "Heatmixer": {
+        "tempActual": _Reading("Actual temperature", None, "TEMPERATURE"),
+        "tempTarget": _Reading("Target temperature", None, "TEMPERATURE"),
+    },
+    "Hourcounter": {
+        "total": _Reading("Runtime", "s", "DURATION", cumulative=True),
+        "remaining": _Reading("Maintenance remaining", "s", "DURATION"),
+        "maintenanceInterval": _Reading("Maintenance interval", "s", "DURATION"),
+        "overdueSince": _Reading("Maintenance overdue duration", "s", "DURATION"),
+    },
+    "PresenceDetector": {
+        "time": _Reading("Overrun time", "s", "DURATION"),
+    },
+    "WindowMonitor": {
+        "numOpen": _Reading("Open"),
+        "numClosed": _Reading("Closed"),
+        "numTilted": _Reading("Tilted"),
+        "numOffline": _Reading("Offline"),
+        "numLocked": _Reading("Locked"),
+        "numUnlocked": _Reading("Unlocked"),
+    },
+    "EnergyManager2": {
+        "Gpwr": _Reading("Grid power", "kW", "POWER"),
+        "Spwr": _Reading("Storage power", "kW", "POWER"),
+        "Ppwr": _Reading("Production power", "kW", "POWER"),
+        "Ssoc": _Reading("Storage charge", "%", "BATTERY"),
+        "MinSoc": _Reading("Minimum storage charge", "%"),
+        "MaxSpwr": _Reading("Maximum storage power", "kW", "POWER"),
+    },
+    "PowerUnit": {
+        "outputPower": _Reading("Output power", "kW", "POWER"),
+        **{
+            f"CP{output}": _Reading(f"Output {output} power", "kW", "POWER")
+            for output in range(1, 8)
+        },
+    },
+    "Ventilation": {
+        "speed": _Reading("Ventilation speed", "%"),
+        "humidityIndoor": _Reading("Indoor humidity", "%", "HUMIDITY"),
+        "humidityMax": _Reading("Maximum humidity", "%", "HUMIDITY"),
+        "airQualityIndoor": _Reading("Indoor air quality", "ppm"),
+        "airQualityMax": _Reading("Maximum air quality", "ppm"),
+        "temperatureIndoor": _Reading("Indoor temperature", None, "TEMPERATURE"),
+        "temperatureOutdoor": _Reading("Outdoor temperature", None, "TEMPERATURE"),
+        "temperatureTarget": _Reading("Target temperature", None, "TEMPERATURE"),
+        "frostTemp": _Reading("Frost protection temperature", None, "TEMPERATURE"),
+    },
+}
+_METER_EXTRA_READINGS = {
+    "totalNeg": "Reverse total",
+    "totalDay": "Total today",
+    "totalWeek": "Total this week",
+    "totalMonth": "Total this month",
+    "totalYear": "Total this year",
+    "totalNegDay": "Reverse total today",
+    "totalNegWeek": "Reverse total this week",
+    "totalNegMonth": "Reverse total this month",
+    "totalNegYear": "Reverse total this year",
+    "storage": "Storage",
+}
+_VENTILATION_LIMIT_READINGS = {
+    "presenceMin": ("hasPresenceMin", "Minimum speed when present"),
+    "presenceMax": ("hasPresenceMax", "Maximum speed when present"),
+    "absenceMin": ("hasAbsenceMin", "Minimum speed when absent"),
+    "absenceMax": ("hasAbsenceMax", "Maximum speed when absent"),
+}
+_VENTILATION_LIMIT_KEYS = frozenset(map(normalize_state_name, _VENTILATION_LIMIT_READINGS))
+_TEXT_STATE_TYPES = {"InfoOnlyText", "TextState"}
+_MONITOR_TYPES = {"EnergyFlowMonitor", "EnergyManager", "EnergyManager2", "Ventilation"}
+
+
+def _finite_reading(value: Any) -> float | None:
+    numeric = coerce_float(value)
+    return numeric if numeric is not None and isfinite(numeric) else None
+
+
+def _reading_unit(control: LoxoneControl, state_name: str, reading: _Reading) -> str | None:
+    if reading.device_class == "TEMPERATURE":
+        unit = infer_unit(control, state_name)
+        return unit if unit in {"°C", "°F", "K"} else None
+    return reading.unit
+
+
+def _reading_device_class(reading: _Reading, unit: str | None) -> SensorDeviceClass | None:
+    return getattr(SensorDeviceClass, reading.device_class) if reading.device_class and unit else None
 EVENT_LOG_ATTRIBUTE_MAX_ENTRIES = 50
 
 
@@ -397,7 +523,7 @@ def _truncate_state_text(value: str) -> str:
 def _sensor_native_value(value: Any) -> Any:
     numeric = coerce_float(value)
     if numeric is not None:
-        return numeric
+        return numeric if isfinite(numeric) else None
     if isinstance(value, str):
         return _truncate_state_text(value)
     if isinstance(value, (Mapping, list, tuple, set)):
@@ -639,17 +765,24 @@ def _pick_best_meter_state(
     return best_state
 
 
-def _find_meter_total_state(control: LoxoneControl) -> str | None:
+def _find_meter_total_state(
+    control: LoxoneControl, excluded: set[str] | None = None
+) -> str | None:
+    excluded = (excluded or set()) | {
+        state_name
+        for state_name in control.states
+        if normalize_state_name(state_name) in METER_ACTUAL_STATE_KEYS
+    }
     state_name = first_matching_state_name(control, METER_TOTAL_STATE_CANDIDATES)
     if state_name is not None and not state_is_boolean(control, state_name):
         return state_name
 
-    scored_state = _pick_best_meter_state(control, _score_meter_total_state)
+    scored_state = _pick_best_meter_state(control, _score_meter_total_state, excluded)
     if scored_state is not None:
         return scored_state
 
     for candidate in control.states:
-        if _is_j_locked_state_name(candidate) or state_is_boolean(control, candidate):
+        if candidate in excluded or _is_j_locked_state_name(candidate) or state_is_boolean(control, candidate):
             continue
         unit = infer_unit(control, candidate) or infer_unit(control, METER_STATE_KIND_TOTAL)
         if _is_energy_unit(unit):
@@ -775,6 +908,11 @@ def _build_presence_detector_sensors(bridge, control: LoxoneControl) -> list[Sen
                 PRESENCE_KIND_SOUND_LEVEL,
             )
         )
+    entities.extend(_build_numeric_readings(bridge, control, _NUMERIC_READINGS["PresenceDetector"]))
+    if (state_name := first_matching_state_name(control, ("activeSince",))) is not None:
+        entities.append(
+            LoxoneTimestampStateSensor(bridge, control, state_name, "Active since", LOXONE_TIME_EPOCH)
+        )
     return entities
 
 
@@ -804,12 +942,19 @@ def _find_meter_actual_state(control: LoxoneControl, excluded: set[str] | None =
     return None
 
 
-def _build_meter_sensors(bridge, control: LoxoneControl) -> list["LoxoneMeterSensor"]:
-    total_state = _find_meter_total_state(control)
-    excluded_states = {state_name for state_name in (total_state,) if state_name}
+def _build_meter_sensors(bridge, control: LoxoneControl) -> list[SensorEntity]:
+    extra_names = {
+        raw_name: state_name
+        for raw_name in _METER_EXTRA_READINGS
+        if (state_name := first_matching_state_name(control, (raw_name,))) is not None
+    }
+    excluded_states = set(extra_names.values())
+    total_state = _find_meter_total_state(control, excluded_states)
+    if total_state is not None:
+        excluded_states.add(total_state)
     actual_state = _find_meter_actual_state(control, excluded=excluded_states)
 
-    entities: list[LoxoneMeterSensor] = []
+    entities: list[SensorEntity] = []
     if actual_state is not None:
         entities.append(
             LoxoneMeterSensor(
@@ -829,21 +974,30 @@ def _build_meter_sensors(bridge, control: LoxoneControl) -> list["LoxoneMeterSen
             )
         )
 
-    if entities:
-        return entities
-
-    for fallback_state in control.states:
-        if _is_j_locked_state_name(fallback_state) or state_is_boolean(control, fallback_state):
+    used_uuids = {
+        control.state_uuid(state_name)
+        for state_name in (actual_state, total_state)
+        if state_name is not None
+    }
+    for raw_name, state_name in extra_names.items():
+        state_uuid = control.state_uuid(state_name)
+        if state_uuid in used_uuids:
             continue
-        fallback_kind = _meter_state_kind_from_name(fallback_state)
-        if fallback_kind != METER_STATE_KIND_TOTAL:
-            fallback_unit = infer_unit(control, fallback_state) or infer_unit(
-                control, METER_STATE_KIND_TOTAL
+        used_uuids.add(state_uuid)
+        unit = infer_unit(control, raw_name)
+        is_storage = raw_name == "storage"
+        device_class = None
+        if _is_energy_unit(unit):
+            device_class = "ENERGY_STORAGE" if is_storage else "ENERGY"
+        entities.append(
+            LoxoneNumericStateSensor(
+                bridge,
+                control,
+                state_name,
+                _Reading(_METER_EXTRA_READINGS[raw_name], unit, device_class, cumulative=not is_storage),
             )
-            if _is_energy_unit(fallback_unit):
-                fallback_kind = METER_STATE_KIND_TOTAL
-        return [LoxoneMeterSensor(bridge, control, fallback_state, fallback_kind)]
-    return []
+        )
+    return entities
 
 
 def _matching_universal_event_states(control: LoxoneControl) -> list[str]:
@@ -978,15 +1132,37 @@ def _build_power_supply_sensors(bridge, control: LoxoneControl) -> list[SensorEn
         )
 
     if remaining_time_state is not None and remaining_time_state != battery_state:
-        entities.append(
-            LoxonePowerSupplySensor(
+        if control.type == "PowerUnit" and normalize_state_name(remaining_time_state) == "supplytimeremaining":
+            entities.append(
+                LoxoneTimestampStateSensor(
+                    bridge, control, remaining_time_state, "Remaining time", UNIX_TIME_EPOCH
+                )
+            )
+        else:
+            entities.append(
+                LoxonePowerSupplySensor(
+                    bridge,
+                    control,
+                    remaining_time_state,
+                    "Remaining time",
+                    POWER_SUPPLY_KIND_REMAINING_TIME,
+                )
+            )
+
+    if control.type == "PowerUnit":
+        entities.extend(_build_numeric_readings(bridge, control, _NUMERIC_READINGS["PowerUnit"]))
+        entities.extend(
+            _build_diagnostic_sensors(
                 bridge,
                 control,
-                remaining_time_state,
-                "Remaining time",
-                POWER_SUPPLY_KIND_REMAINING_TIME,
+                {
+                    name
+                    for name in control.states
+                    if normalize_state_name(name) not in {"fuse", "deviceinfo"}
+                },
             )
         )
+        return entities
 
     if entities:
         return entities
@@ -1040,7 +1216,7 @@ def _build_control_sensor_entities(bridge, control: LoxoneControl) -> list[Senso
 
     entities, covered_state_names = _build_universal_event_sensors(bridge, control)
 
-    if control.type == "Meter":
+    if control.type in {"Meter", "Wallbox2"}:
         entities.extend(_build_meter_sensors(bridge, control))
         return entities
 
@@ -1066,8 +1242,46 @@ def _build_control_sensor_entities(bridge, control: LoxoneControl) -> list[Senso
         )
         return entities
 
-    if control.type in SENSOR_CONTROL_TYPES:
-        entities.append(LoxonePrimarySensor(bridge, control))
+    if control.type in SENSOR_CONTROL_TYPES or control.type == "InfoOnlyText":
+        primary = LoxonePrimarySensor(bridge, control)
+        entities.append(primary)
+        entities.extend(
+            _build_numeric_readings(
+                bridge,
+                control,
+                _NUMERIC_READINGS.get(control.type, {}),
+                excluded_uuids=set(primary.relevant_state_uuids()),
+            )
+        )
+        return entities
+
+    if control.type in _MONITOR_TYPES:
+        readings = (
+            _energy_flow_readings(control)
+            if control.type == "EnergyFlowMonitor"
+            else _NUMERIC_READINGS[control.type]
+        )
+        entities.extend(
+            _build_numeric_readings(bridge, control, readings, preserve_state_ids=True)
+        )
+        if control.type == "Ventilation":
+            entities.extend(_build_ventilation_sensors(bridge, control))
+        watched = {uuid for entity in entities for uuid in entity.relevant_state_uuids()}
+        entities.extend(
+            _build_diagnostic_sensors(
+                bridge,
+                control,
+                {
+                    name
+                    for name, uuid in control.states.items()
+                    if uuid in watched
+                    or (
+                        control.type == "Ventilation"
+                        and normalize_state_name(name) in _VENTILATION_LIMIT_KEYS
+                    )
+                },
+            )
+        )
         return entities
 
     if control.type in HANDLED_CONTROL_TYPES:
@@ -1092,10 +1306,85 @@ def _build_control_sensor_entities(bridge, control: LoxoneControl) -> list[Senso
     return entities
 
 
+def _build_numeric_readings(
+    bridge,
+    control: LoxoneControl,
+    readings: Mapping[str, _Reading],
+    *,
+    excluded_uuids: set[str] | None = None,
+    preserve_state_ids: bool = False,
+) -> list[SensorEntity]:
+    used = set(excluded_uuids or ())
+    entities: list[SensorEntity] = []
+    for raw_name, reading in readings.items():
+        state_name = first_matching_state_name(control, (raw_name,))
+        if state_name is None:
+            continue
+        state_uuid = control.state_uuid(state_name)
+        if state_uuid is None or state_uuid in used:
+            continue
+        used.add(state_uuid)
+        entities.append(
+            LoxoneNumericStateSensor(
+                bridge, control, state_name, reading, preserve_state_id=preserve_state_ids
+            )
+        )
+    return entities
+
+
+def _build_ventilation_sensors(bridge, control: LoxoneControl) -> list[SensorEntity]:
+    entities: list[SensorEntity] = []
+    if (state_name := first_matching_state_name(control, ("overwriteUntil",))) is not None:
+        entities.append(
+            LoxoneTimestampStateSensor(
+                bridge, control, state_name, "Override ends", UNIX_TIME_EPOCH, preserve_state_id=True
+            )
+        )
+    entities.extend(
+        _build_numeric_readings(
+            bridge,
+            control,
+            {
+                name: _Reading(label, "%")
+                for name, (lock, label) in _VENTILATION_LIMIT_READINGS.items()
+                if coerce_bool(_mapping_get_case_insensitive(control.details, lock)) is True
+            },
+            preserve_state_ids=True,
+        )
+    )
+    return entities
+
+
+def _energy_flow_readings(control: LoxoneControl) -> dict[str, _Reading]:
+    unit = infer_unit(control, "actual")
+    power_class = "POWER" if _is_power_unit(unit) else None
+    readings = {
+        "Ppwr": _Reading("Production power", unit, power_class),
+        "Gpwr": _Reading("Grid power", unit, power_class),
+        "Spwr": _Reading("Storage power", unit, power_class),
+        "Pre": _Reading("Export price"),
+        "Pri": _Reading("Import price"),
+        "CO2": _Reading("Carbon intensity", "kg/kWh"),
+    }
+    nodes = control.details.get("nodes")
+    if not isinstance(nodes, list):
+        return readings
+    for node in nodes:
+        if not isinstance(node, Mapping):
+            continue
+        state_name = node.get("actualEfmState")
+        if not isinstance(state_name, str) or not state_name:
+            continue
+        title = node.get("title")
+        label = title.strip() if isinstance(title, str) and title.strip() else state_name
+        readings.setdefault(state_name, _Reading(label, unit, power_class))
+    return readings
+
+
 async def async_setup_entry(
     hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
 ) -> None:
-    bridge = entry_bridge(hass, entry)
+    bridge = entry_bridge(entry)
     entities: list[SensorEntity] = []
     if _supports_miniserver_system_diagnostics(bridge):
         entities.extend(_build_miniserver_system_sensors(bridge))
@@ -1254,7 +1543,7 @@ def _is_likely_climate_temperature_state_name(state_name: str) -> bool:
 
 
 def _measurement_state_class(value: Any) -> SensorStateClass | None:
-    return SensorStateClass.MEASUREMENT if coerce_float(value) is not None else None
+    return SensorStateClass.MEASUREMENT if _finite_reading(value) is not None else None
 
 
 class LoxoneSingleStateSensor(LoxoneEntity, SensorEntity):
@@ -1275,58 +1564,150 @@ class LoxoneSingleStateSensor(LoxoneEntity, SensorEntity):
         return [state_uuid] if state_uuid else []
 
 
+class LoxoneNumericStateSensor(LoxoneSingleStateSensor):
+    """Numeric state whose meaning is defined by the control protocol."""
+
+    def __init__(
+        self,
+        bridge,
+        control: LoxoneControl,
+        state_name: str,
+        reading: _Reading,
+        *,
+        preserve_state_id: bool = False,
+    ) -> None:
+        super().__init__(bridge, control, state_name, reading.label)
+        if preserve_state_id:
+            self._attr_unique_id = control_entity_unique_id(
+                bridge.serial, control.uuid_action, state_name
+            )
+        unit = _reading_unit(control, state_name, reading)
+        self._attr_native_unit_of_measurement = unit
+        self._attr_device_class = _reading_device_class(reading, unit)
+        self._attr_state_class = (
+            SensorStateClass.TOTAL_INCREASING if reading.cumulative else SensorStateClass.MEASUREMENT
+        )
+
+    @property
+    def native_value(self) -> float | None:
+        return _finite_reading(self.state_value(self._state_name))
+
+
+class LoxoneTimestampStateSensor(LoxoneSingleStateSensor):
+    """UTC timestamp with the epoch defined by the Loxone state."""
+
+    def __init__(
+        self,
+        bridge,
+        control: LoxoneControl,
+        state_name: str,
+        label: str,
+        epoch: datetime,
+        *,
+        preserve_state_id: bool = False,
+    ) -> None:
+        super().__init__(bridge, control, state_name, label)
+        if preserve_state_id:
+            self._attr_unique_id = control_entity_unique_id(
+                bridge.serial, control.uuid_action, state_name
+            )
+        self._attr_device_class = SensorDeviceClass.TIMESTAMP
+        self._epoch = epoch
+
+    @property
+    def native_value(self) -> datetime | None:
+        value = _finite_reading(self.state_value(self._state_name))
+        if value is None or value <= 0:
+            return None
+        try:
+            return self._epoch + timedelta(seconds=value)
+        except OverflowError:
+            return None
+
+
 class LoxonePrimarySensor(LoxoneEntity, SensorEntity):
     """Primary read-only sensor for one Loxone control."""
 
-    def _primary_state_name(self) -> str | None:
-        state_name, _ = control_primary_state(self.control)
-        return state_name
+    def __init__(self, bridge, control: LoxoneControl) -> None:
+        super().__init__(bridge, control)
+        self._state_name = first_matching_state_name(control, _PRIMARY_READINGS.get(control.type, ()))
+        if self._state_name is None:
+            self._state_name, _ = control_primary_state(control)
+        if control.type == "InfoOnlyText" and self._state_name is not None:
+            self._attr_unique_id = control_entity_unique_id(
+                bridge.serial, control.uuid_action, self._state_name
+            )
+        state_key = normalize_state_name(self._state_name or "")
+        self._reading = next(
+            (
+                reading
+                for state_name, reading in _NUMERIC_READINGS.get(control.type, {}).items()
+                if normalize_state_name(state_name) == state_key
+            ),
+            None,
+        )
+
+    def relevant_state_uuids(self):
+        state_uuid = self.control.state_uuid(self._state_name) if self._state_name else None
+        return [state_uuid] if state_uuid else []
 
     @property
     def native_value(self) -> Any:
-        state_name = self._primary_state_name()
-        if state_name is None:
+        if self._state_name is None:
             return None
-        return _sensor_native_value(self.state_value(state_name))
+        value = self.state_value(self._state_name)
+        if self.control.type in _TEXT_STATE_TYPES:
+            return _truncate_state_text(str(value)) if value is not None else None
+        if self._reading is not None or self.control.type == "InfoOnlyAnalog":
+            return _finite_reading(value)
+        return _sensor_native_value(value)
 
     @property
     def native_unit_of_measurement(self) -> str | None:
-        state_name = self._primary_state_name()
-        if state_name is None:
+        if self._state_name is None or self.control.type in _TEXT_STATE_TYPES:
             return None
-        return infer_unit(self.control, state_name)
+        if self._reading is not None:
+            return _reading_unit(self.control, self._state_name, self._reading)
+        return infer_unit(self.control, self._state_name)
 
     @property
     def device_class(self) -> SensorDeviceClass | None:
         unit = self.native_unit_of_measurement
-        if _is_energy_unit(unit):
+        if self._reading is not None:
+            return _reading_device_class(self._reading, unit)
+        if _is_energy_unit(unit) and not self._is_instantaneous:
             return SensorDeviceClass.ENERGY
         if _is_power_unit(unit):
             return SensorDeviceClass.POWER
+        if unit in {"°C", "°F", "K"}:
+            return SensorDeviceClass.TEMPERATURE
+        if unit == "lx":
+            return SensorDeviceClass.ILLUMINANCE
         return None
 
     @property
+    def _is_instantaneous(self) -> bool:
+        if self._state_name is None:
+            return False
+        normalized = normalize_state_name(self._state_name)
+        return any(
+            fragment in normalized
+            for fragment in ("actual", "current", "power", "instant", "moment")
+        )
+
+    @property
     def state_class(self) -> SensorStateClass | None:
-        state_name = self._primary_state_name()
-        if state_name is None:
-            return None
-
-        if coerce_float(self.state_value(state_name)) is None:
-            return None
-
+        if self._reading is not None:
+            return (
+                SensorStateClass.TOTAL_INCREASING
+                if self._reading.cumulative
+                else SensorStateClass.MEASUREMENT
+            )
         unit = self.native_unit_of_measurement
-        if _is_power_unit(unit):
-            return SensorStateClass.MEASUREMENT
-
-        if _is_energy_unit(unit):
-            normalized_state_name = normalize_state_name(state_name)
-            if any(
-                fragment in normalized_state_name
-                for fragment in ("actual", "current", "power", "instant", "moment")
-            ):
-                return SensorStateClass.MEASUREMENT
+        if _is_energy_unit(unit) and not self._is_instantaneous:
             return SensorStateClass.TOTAL_INCREASING
-
+        if _is_energy_unit(unit) or _is_power_unit(unit) or unit in {"°C", "°F", "K", "lx"}:
+            return SensorStateClass.MEASUREMENT
         return None
 
 
@@ -1424,7 +1805,7 @@ class LoxoneMeterSensor(LoxoneSingleStateSensor):
 
     @property
     def native_value(self) -> float | None:
-        return coerce_float(self.state_value(self._state_name))
+        return _finite_reading(self.state_value(self._state_name))
 
     @property
     def native_unit_of_measurement(self) -> str | None:
@@ -1442,8 +1823,8 @@ class LoxoneMeterSensor(LoxoneSingleStateSensor):
             return SensorDeviceClass.ENERGY if _is_energy_unit(unit) else None
         if _is_power_unit(unit):
             return SensorDeviceClass.POWER
-        if _is_energy_unit(unit):
-            return SensorDeviceClass.ENERGY
+        if unit in {"m³/h", "L/min", "L/s", "L/h"}:
+            return SensorDeviceClass.VOLUME_FLOW_RATE
         return None
 
     @property
@@ -1766,7 +2147,6 @@ class LoxoneIntercomHistorySensor(LoxoneEntity, SensorEntity):
 
         if self._latest_event_time is None:
             self._latest_event_time = intercom_last_bell_timestamp(
-                self.bridge,
                 self.control,
                 state_value_getter=self.state_value,
             )

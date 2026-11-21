@@ -18,6 +18,7 @@ DOMAIN = "loxone_home_assistant"
 INTEGRATION_TITLE = "Loxone"
 
 PLATFORMS: list[Platform | str] = [
+    "alarm_control_panel",
     Platform.BINARY_SENSOR,
     Platform.BUTTON,
     getattr(Platform, "CAMERA", "camera"),
@@ -26,6 +27,7 @@ PLATFORMS: list[Platform | str] = [
     Platform.LIGHT,
     getattr(Platform, "MEDIA_PLAYER", "media_player"),
     Platform.NUMBER,
+    "remote",
     Platform.SELECT,
     Platform.SENSOR,
     Platform.SWITCH,
@@ -40,7 +42,6 @@ APP_PERMISSION = 4
 WEB_PERMISSION = 2
 CLIENT_INFO = "Loxone"
 
-CONF_SCAN_TIMEOUT = "scan_timeout"
 CONF_SERIAL = "serial"
 CONF_CLIENT_UUID = "client_uuid"
 CONF_TOKEN = "token"
@@ -55,15 +56,12 @@ CONF_INTERCOM_LANGUAGE = "intercom_language"
 INTERCOM_LANGUAGES = {"auto": "Home Assistant", "pl": "Polski", "en": "English", "de": "Deutsch"}
 CONF_ENABLE_LIGHT_MOOD_SELECT = "enable_light_mood_select"
 CONF_EXPOSE_CONTROLLER_CHILD_LIGHTS = "expose_controller_child_lights"
-CONF_AUTO_CREATE_AUTOMATIONS = "auto_create_automations"
 CONF_USE_LOXONE_ICONS = "use_loxone_icons"
 
 DEFAULT_ENABLE_LIGHT_MOOD_SELECT = True
 DEFAULT_EXPOSE_CONTROLLER_CHILD_LIGHTS = True
-DEFAULT_AUTO_CREATE_AUTOMATIONS = False
 DEFAULT_USE_LOXONE_ICONS = False
 
-DATA_BRIDGES = "bridges"
 
 SERVICE_SEND_COMMAND = "send_command"
 SERVICE_SEND_RAW_COMMAND = "send_raw_command"

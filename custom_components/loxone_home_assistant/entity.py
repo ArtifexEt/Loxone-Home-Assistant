@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import colorsys
+import math
 import re
 from collections.abc import Iterable
 from typing import Any
@@ -10,11 +11,19 @@ from typing import Any
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity import Entity
 
-from .const import BOOLEAN_STATE_NAMES, DOMAIN, MANUFACTURER, PRIMARY_STATE_CANDIDATES, STATE_NAME_UNITS
+from .const import (
+    BOOLEAN_STATE_NAMES,
+    DOMAIN,
+    INTERCOM_CONTROL_TYPES,
+    MANUFACTURER,
+    MEDIA_PLAYER_CONTROL_TYPES,
+    PRIMARY_STATE_CANDIDATES,
+    STATE_NAME_UNITS,
+)
 from .models import LoxoneControl
 from .server_model import DEFAULT_SERVER_MODEL
 
-FORMAT_UNIT_RE = re.compile(r"([%°A-Za-z/]+)\s*$")
+FORMAT_UNIT_RE = re.compile(r"([%°A-Za-zµμΩ][%°A-Za-zµμΩ0-9²³/·()^\-]*)\s*$")
 PRINTF_SPEC_RE = re.compile(
     r"%(?:[-+0 #]*)?(?:\d+|\*)?(?:\.(?:\d+|\*))?(?:hh|h|ll|l|L|z|j|t)?[diuoxXfFeEgGaAcspn]"
 )
@@ -28,6 +37,12 @@ NORMALIZED_STATE_NAME_UNITS = {
     for state_name, unit in STATE_NAME_UNITS.items()
 }
 TEMPERATURE_STATE_NAME_HINTS = ("temp", "temperature", "setpoint")
+_SWITCH_STATE_NAMES = {
+    "Alarm": ("armed", "active"),
+    "CarCharger": ("charging", "isCharging", "active"),
+    "Remote": ("power", "mode"),
+    "TimedSwitch": ("deactivationDelay", "active", "value"),
+}
 
 
 def miniserver_device_identifier(serial: str) -> tuple[str, str]:
@@ -50,6 +65,21 @@ def control_entity_unique_id(
     return f"{base}:{slugify_state_name(suffix)}"
 
 
+def unique_option_labels(items: Iterable[tuple[int, str]]) -> dict[int, str]:
+    """Keep Loxone options selectable when they share a display name."""
+    labels: dict[int, str] = {}
+    used: set[str] = set()
+    for option_id, name in items:
+        if option_id in labels:
+            continue
+        label = name
+        while label in used:
+            label = f"{label} ({option_id})"
+        labels[option_id] = label
+        used.add(label)
+    return labels
+
+
 def miniserver_device_info(bridge) -> DeviceInfo:
     """Return DeviceInfo for the Miniserver hub device."""
     model = str(getattr(bridge, "server_model", DEFAULT_SERVER_MODEL)).strip()
@@ -70,11 +100,11 @@ def control_device_info(bridge, control: LoxoneControl) -> DeviceInfo:
         "model": control.type,
         "name": control.display_name,
     }
-    if "via_device_id" in DeviceInfo.__annotations__:
-        if (device_id := getattr(bridge, "miniserver_device_id", None)) is not None:
-            kwargs["via_device_id"] = device_id
-    else:
+    hub_device_id = getattr(bridge, "miniserver_device_id", None)
+    if "via_device_id" not in DeviceInfo.__annotations__:
         kwargs["via_device"] = miniserver_device_identifier(bridge.serial)
+    elif hub_device_id is not None:
+        kwargs["via_device_id"] = hub_device_id
     if control.room_name:
         kwargs["suggested_area"] = control.room_name
     return DeviceInfo(**kwargs)
@@ -195,6 +225,18 @@ def normalize_state_name(value: str) -> str:
     return NON_ALNUM_STATE_RE.sub("", value.casefold())
 
 
+_INTERCOM_TTS_TYPES = frozenset(map(normalize_state_name, INTERCOM_CONTROL_TYPES))
+_AUDIO_TTS_TYPES = frozenset(map(normalize_state_name, MEDIA_PLAYER_CONTROL_TYPES))
+
+
+def is_intercom_tts_control(control: LoxoneControl) -> bool:
+    return normalize_state_name(control.type) in _INTERCOM_TTS_TYPES
+
+
+def is_audio_tts_control(control: LoxoneControl) -> bool:
+    return normalize_state_name(control.type) in _AUDIO_TTS_TYPES
+
+
 def _is_temperature_state_name(state_name: str | None) -> bool:
     if state_name is None:
         return False
@@ -218,6 +260,14 @@ def _canonical_inferred_unit(unit: str | None, state_name: str | None) -> str | 
         return "°C"
     if collapsed == "°" and _is_temperature_state_name(state_name):
         return "°C"
+    if collapsed in {"m3", "m^3"}:
+        return "m³"
+    if collapsed in {"m3/h", "m^3/h"}:
+        return "m³/h"
+    if collapsed == "lux":
+        return "lx"
+    if collapsed in {"µg/m3", "µg/m^3", "µg/m³", "μg/m3", "μg/m^3", "μg/m³"}:
+        return "µg/m³"
     return cleaned
 
 
@@ -259,11 +309,22 @@ def control_primary_state(control: LoxoneControl) -> tuple[str | None, str | Non
     return None, None
 
 
-def first_numeric_state_name(control: LoxoneControl) -> str | None:
-    for candidate in ("position", "value", "actual", "tempTarget", "tempActual"):
-        if candidate in control.states:
-            return candidate
-    return next(iter(control.states), None)
+def number_value_state_name(control: LoxoneControl) -> str | None:
+    """Find the writable value state on a Loxone numeric input."""
+    return first_matching_state_name(control, ("value", "position", "actual"))
+
+
+def switch_control_is_on(bridge, control: LoxoneControl) -> bool | None:
+    """Read the state that reflects the switch output for this block type."""
+    candidates = _SWITCH_STATE_NAMES.get(control.type, ("active", "value", "position"))
+    state_name = first_matching_state_name(control, candidates)
+    if state_name is None:
+        return None
+    value = bridge.control_state(control, state_name)
+    numeric = coerce_float(value)
+    if numeric is None:
+        return coerce_bool(value)
+    return bool(numeric) if math.isfinite(numeric) else None
 
 
 def state_is_boolean(control: LoxoneControl, state_name: str) -> bool:
@@ -274,10 +335,8 @@ def state_is_boolean(control: LoxoneControl, state_name: str) -> bool:
 
 
 def coerce_bool(value: Any) -> bool | None:
-    if value is None:
+    if isinstance(value, float) and not math.isfinite(value):
         return None
-    if isinstance(value, bool):
-        return value
     if isinstance(value, (int, float)):
         return bool(value)
     if isinstance(value, str):
@@ -290,19 +349,15 @@ def coerce_bool(value: Any) -> bool | None:
 
 
 def coerce_float(value: Any) -> float | None:
-    if value is None:
-        return None
-    if isinstance(value, bool):
-        return float(value)
-    if isinstance(value, (int, float)):
-        return float(value)
     if isinstance(value, str):
-        with_value = value.replace(",", ".")
-        try:
-            return float(with_value)
-        except ValueError:
-            return None
-    return None
+        value = value.replace(",", ".")
+    elif not isinstance(value, (int, float)):
+        return None
+    try:
+        number = float(value)
+    except (ValueError, OverflowError):
+        return None
+    return number if math.isfinite(number) else None
 
 
 def infer_unit(control: LoxoneControl, state_name: str | None = None) -> str | None:
@@ -320,10 +375,14 @@ def infer_unit(control: LoxoneControl, state_name: str | None = None) -> str | N
     if mapped_unit in {"%", "ppm"}:
         return mapped_unit
 
-    if state_name == "actual":
+    if normalized_state_name == "actual":
         keys = ("actualFormat", "format", "text")
-    elif state_name == "total":
+    elif normalized_state_name and normalized_state_name.startswith("totalneg"):
+        keys = ("totalFormatNeg", "totalFormat")
+    elif normalized_state_name and normalized_state_name.startswith("total"):
         keys = ("totalFormat", "format", "actualFormat", "text")
+    elif normalized_state_name == "storage":
+        keys = ("storageFormat",)
     elif state_name and normalize_state_name(state_name) in {
         normalize_state_name("remainingTime"),
         normalize_state_name("timeRemaining"),

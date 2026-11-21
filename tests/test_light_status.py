@@ -396,6 +396,82 @@ class LightMoodEffectsTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(bridge.commands, [("ctrl-action", "changeTo/12")])
 
+    async def test_legacy_controller_reads_scene_list_and_uses_bare_scene_id(self) -> None:
+        control = LoxoneControl(
+            uuid="legacy-uuid",
+            uuid_action="legacy-action",
+            name="Salon",
+            type="LightController",
+            states={"activeScene": "active-scene", "sceneList": "scenes"},
+        )
+        bridge = _FakeBridge([control], {
+            "active-scene": 3,
+            "scenes": {"text": '3="Reading, warm",7="Evening"'},
+        })
+        light = LoxoneLightEntity(bridge, control)
+
+        self.assertTrue(light.is_on)
+        self.assertEqual(light.effect_list, ["Reading, warm", "Evening"])
+        self.assertEqual(light.effect, "Reading, warm")
+        await light.async_turn_on(effect="Evening")
+        self.assertEqual(bridge.commands, [("legacy-action", "7")])
+
+    async def test_group_routes_white_temperature_and_brightness_to_separate_masters(self) -> None:
+        control = LoxoneControl(
+            uuid="controller-uuid",
+            uuid_action="controller",
+            name="Salon",
+            type="LightControllerV2",
+            states={"activeMoods": "active", "moodList": "moods"},
+            details={"masterValue": "controller/master", "masterColor": "controller/white"},
+        )
+        value = LoxoneControl(
+            uuid="value-uuid", uuid_action="controller/master", name="Brightness",
+            type="Dimmer", states={"position": "brightness"},
+        )
+        color = LoxoneControl(
+            uuid="color-uuid", uuid_action="controller/white", name="White",
+            type="ColorPickerV2", states={"color": "color"},
+            details={"pickerType": "TunableWhite", "TWMin": 2800, "TWMax": 4200},
+        )
+        bridge = _FakeBridge([control, value, color], {
+            "active": "[12]",
+            "moods": """[{"id":12,"name":"Reader's lamp"}]""",
+            "brightness": 65,
+            "color": "temp(65,3500)",
+        })
+        light = LoxoneLightEntity(bridge, control)
+
+        self.assertEqual(light.supported_color_modes, {"color_temp"})
+        self.assertEqual(light.color_temp_kelvin, 3500)
+        self.assertEqual((light.min_color_temp_kelvin, light.max_color_temp_kelvin), (2800, 4200))
+        self.assertEqual(light.effect, "Reader's lamp")
+        await light.async_turn_on(color_temp_kelvin=5500)
+        await light.async_turn_on(brightness=128)
+        self.assertEqual(
+            bridge.commands,
+            [("controller/white", "temp(65,4200)"), ("controller/master", "50")],
+        )
+
+    async def test_color_picker_brightness_retains_rgb_or_an_active_sequence(self) -> None:
+        control = LoxoneControl(
+            uuid="color-uuid",
+            uuid_action="color-action",
+            name="LED",
+            type="ColorPickerV2",
+            states={"color": "color", "sequenceColorIdx": "sequence"},
+        )
+        values = {"color": "hsv(210,70,95)", "sequence": -1}
+        bridge = _FakeBridge([control], values)
+        light = LoxoneLightEntity(bridge, control)
+        await light.async_turn_on(brightness=128)
+        values["sequence"] = 0
+        await light.async_turn_on(brightness=128)
+        self.assertEqual(
+            bridge.commands,
+            [("color-action", "hsv(210,70,50)"), ("color-action", "setBrightness/50")],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

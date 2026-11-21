@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import struct
 import sys
 import types
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
+
+from aiohttp import WSMessage, WSMsgType
 
 from tests._loader import load_integration_module
 
@@ -108,30 +111,6 @@ def _install_homeassistant_stubs() -> None:
     aiohttp_client.async_get_clientsession = async_get_clientsession
     sys.modules["homeassistant.helpers.aiohttp_client"] = aiohttp_client
 
-    aiohttp = types.ModuleType("aiohttp")
-
-    class ClientError(Exception):
-        pass
-
-    class ClientSession:
-        pass
-
-    class WSMessage:
-        pass
-
-    class WSMsgType:
-        BINARY = 2
-        TEXT = 1
-        CLOSE = 8
-        CLOSED = 257
-        ERROR = 258
-
-    aiohttp.ClientError = ClientError
-    aiohttp.ClientSession = ClientSession
-    aiohttp.WSMessage = WSMessage
-    aiohttp.WSMsgType = WSMsgType
-    sys.modules["aiohttp"] = aiohttp
-
 
 _install_homeassistant_stubs()
 bridge_module = load_integration_module("custom_components.loxone_home_assistant.bridge")
@@ -178,6 +157,7 @@ class BridgeSystemStatsTests(unittest.IsolatedAsyncioTestCase):
         bridge.state_values = {}
         bridge._system_stats_lock = asyncio.Lock()
         bridge._system_stats_last_refresh = 0.0
+        bridge._poll_retry_at = {}
 
         calls: list[str] = []
         command_values = {
@@ -226,10 +206,28 @@ class BridgeSystemStatsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(third["cpu"], 55.0)
         self.assertEqual(len(calls), 8)
 
+    async def test_background_poll_skips_a_previous_timeout_until_forced_refresh(self):
+        bridge = bridge_module.LoxoneBridge.__new__(bridge_module.LoxoneBridge)
+        bridge.state_values = {}
+        bridge._system_stats_lock = asyncio.Lock()
+        bridge._system_stats_last_refresh = 0.0
+        bridge._poll_retry_at = {"dev/sys/cpu": float("inf")}
+        bridge._send_loxone_command = AsyncMock(return_value={"value": 1})
+        bridge._merge_changed_states = bridge.state_values.update
+
+        await bridge.async_refresh_system_stats(ensure_connected=False)
+        self.assertNotIn("sysdiag-cpu", bridge.state_values)
+
+        await bridge.async_refresh_system_stats(force=True, ensure_connected=False)
+        self.assertEqual(bridge.state_values["sysdiag-cpu"], 1)
+        self.assertEqual(bridge._poll_retry_at, {})
+
     async def test_send_loxone_command_accepts_plain_scalar_json_responses(self) -> None:
         bridge = bridge_module.LoxoneBridge.__new__(bridge_module.LoxoneBridge)
 
-        async def fake_send_text(command: str, *, ensure_connected: bool = True) -> str:
+        async def fake_send_text(
+            command: str, *, ensure_connected: bool = True, encrypt_response: bool = False
+        ) -> str:
             del command, ensure_connected
             return "0"
 
@@ -247,7 +245,9 @@ class BridgeSystemStatsTests(unittest.IsolatedAsyncioTestCase):
     async def test_send_loxone_command_accepts_non_ll_json_payloads(self) -> None:
         bridge = bridge_module.LoxoneBridge.__new__(bridge_module.LoxoneBridge)
 
-        async def fake_send_text(command: str, *, ensure_connected: bool = True) -> str:
+        async def fake_send_text(
+            command: str, *, ensure_connected: bool = True, encrypt_response: bool = False
+        ) -> str:
             del command, ensure_connected
             return '{"controls":{"abc":1}}'
 
@@ -265,7 +265,9 @@ class BridgeSystemStatsTests(unittest.IsolatedAsyncioTestCase):
     async def test_send_loxone_command_rejects_empty_responses(self) -> None:
         bridge = bridge_module.LoxoneBridge.__new__(bridge_module.LoxoneBridge)
 
-        async def fake_send_text(command: str, *, ensure_connected: bool = True) -> str:
+        async def fake_send_text(
+            command: str, *, ensure_connected: bool = True, encrypt_response: bool = False
+        ) -> str:
             del command, ensure_connected
             return ""
 
@@ -300,7 +302,7 @@ class BridgeConnectionTests(unittest.IsolatedAsyncioTestCase):
         self.bridge.use_tls = True
         await self.bridge.async_send_action("intercom-action", "securedDetails")
         self.bridge._send_loxone_command.assert_awaited_once_with(
-            "jdev/sps/io/intercom-action/securedDetails"
+            "jdev/sps/io/intercom-action/securedDetails", encrypt_response=False
         )
 
     async def test_reconnect_and_command_share_one_websocket(self) -> None:
@@ -312,6 +314,7 @@ class BridgeConnectionTests(unittest.IsolatedAsyncioTestCase):
             connect_started.set()
             await finish_connect.wait()
             self.bridge._ws = websocket
+            self.bridge._mark_available()
 
         self.bridge.structure = object()
         self.bridge._connect = AsyncMock(side_effect=connect)
@@ -324,6 +327,28 @@ class BridgeConnectionTests(unittest.IsolatedAsyncioTestCase):
                 await asyncio.gather(reconnect, command_connect)
 
         self.bridge._connect.assert_awaited_once()
+
+    async def test_disconnect_during_setup_marks_bridge_unavailable(self):
+        exhausted = asyncio.Event()
+
+        class ClosedSocket:
+            closed = True
+
+            async def __aiter__(self):
+                exhausted.set()
+                for message in ():
+                    yield message
+
+        self.bridge._ws = ClosedSocket()
+        self.bridge._schedule_reconnect = Mock()
+        async with self.bridge._connect_lock:
+            reader = asyncio.create_task(self.bridge._reader_loop())
+            await asyncio.wait_for(exhausted.wait(), timeout=1)
+            self.bridge._mark_available()
+
+        await reader
+        self.assertFalse(self.bridge.available)
+        self.assertIsNone(self.bridge._ws)
 
     async def test_websocket_opened_during_shutdown_is_closed(self) -> None:
         connect_started = asyncio.Event()
@@ -399,6 +424,65 @@ class BridgeConnectionTests(unittest.IsolatedAsyncioTestCase):
         reloaded = connection_config.merge_connection_config({**stored, **exported}, changes)
         self.assertEqual(reloaded["token"], "fresh-token")
         self.assertEqual(reloaded["token_valid_until"], "999999999")
+
+
+class BridgeWebSocketTests(unittest.IsolatedAsyncioTestCase):
+    """Exercise frame and command handling without a network connection."""
+
+    async def test_extra_binary_data_after_websocket_text_is_ignored(self) -> None:
+        bridge = bridge_module.LoxoneBridge.__new__(bridge_module.LoxoneBridge)
+        bridge._pending_header = None
+        bridge._pending_response = asyncio.get_running_loop().create_future()
+        bridge._merge_changed_states = lambda _: self.fail("Unexpected state update")
+        await bridge._handle_ws_message(
+            WSMessage(WSMsgType.BINARY, struct.pack("<BBBxI", 3, 2, 0, 24), "")
+        )
+        await bridge._handle_ws_message(WSMessage(WSMsgType.TEXT, "reply", ""))
+        await bridge._handle_ws_message(WSMessage(WSMsgType.BINARY, bytes(24), ""))
+
+        self.assertEqual(bridge._pending_response.result(), "reply")
+
+    async def test_exact_short_binary_payload_can_start_with_header_byte(self) -> None:
+        bridge = bridge_module.LoxoneBridge.__new__(bridge_module.LoxoneBridge)
+        bridge._pending_header = None
+        bridge._pending_response = asyncio.get_running_loop().create_future()
+        await bridge._handle_ws_message(
+            WSMessage(WSMsgType.BINARY, struct.pack("<BBBxI", 3, 1, 0, 8), "")
+        )
+        await bridge._handle_ws_message(WSMessage(WSMsgType.BINARY, b"\x03abcdefg", ""))
+
+        self.assertEqual(bridge._pending_response.result(), "\x03abcdefg")
+
+    async def test_control_command_preserves_subcontrol_path(self) -> None:
+        bridge = bridge_module.LoxoneBridge.__new__(bridge_module.LoxoneBridge)
+        bridge._send_loxone_command = AsyncMock()
+
+        await bridge.async_send_action("action-id/2", "pulse")
+
+        bridge._send_loxone_command.assert_awaited_once_with(
+            "jdev/sps/io/action-id/2/pulse", encrypt_response=False
+        )
+
+    async def test_cancelled_in_flight_command_closes_socket(self) -> None:
+        bridge = bridge_module.LoxoneBridge.__new__(bridge_module.LoxoneBridge)
+        bridge._command_lock = asyncio.Lock()
+        sent = asyncio.Event()
+
+        async def send_str(_command: str) -> None:
+            sent.set()
+
+        close = AsyncMock()
+        bridge._ws = types.SimpleNamespace(closed=False, send_str=send_str, close=close)
+        bridge._legacy_session = None
+        bridge.use_tls = True
+        task = asyncio.create_task(bridge._send_text_command("command", ensure_connected=False))
+        await asyncio.wait_for(sent.wait(), timeout=1)
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+
+        close.assert_awaited_once()
+        self.assertIsNone(bridge._pending_response)
 
 
 if __name__ == "__main__":

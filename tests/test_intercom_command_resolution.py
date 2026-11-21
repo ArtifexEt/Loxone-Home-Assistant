@@ -93,9 +93,9 @@ class IntercomCommandResolutionTests(unittest.TestCase):
         command = resolve_intercom_command("tts", "2")
         self.assertEqual(command, "playTts/2")
 
-    def test_resolve_play_tts_accepts_non_numeric_text(self) -> None:
-        command = resolve_intercom_command("playTts", "Kod niepoprawny")
-        self.assertEqual(command, "playTts/Kod%20niepoprawny")
+    def test_play_tts_requires_a_predefined_answer_index(self) -> None:
+        with self.assertRaisesRegex(ValueError, "must be an integer"):
+            resolve_intercom_command("playTts", "Kod niepoprawny")
 
     def test_build_intercom_tts_command_ignores_volume_suffix(self) -> None:
         command = build_intercom_tts_command("Test message", 75)
@@ -107,6 +107,10 @@ class IntercomCommandResolutionTests(unittest.TestCase):
     def test_resolve_setanswers_from_slash_text(self) -> None:
         command = resolve_intercom_command("setanswers", "Leave package/Call owner")
         self.assertEqual(command, "setAnswers/Leave%20package/Call%20owner")
+
+    def test_setanswers_rejects_an_empty_answer_between_indexes(self) -> None:
+        with self.assertRaisesRegex(ValueError, "cannot skip an answer index"):
+            resolve_intercom_command("setAnswers", "Leave package//Call owner")
 
     def test_resolve_setvideosettings_from_argument_list(self) -> None:
         command = resolve_intercom_command("setvideosettings", [0, 1280, 720])

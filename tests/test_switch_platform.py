@@ -142,28 +142,23 @@ class _FakeBridge:
 
     def __init__(self, controls):
         self.controls = controls
-        self.values = {}
+        self._values = {}
         self.commands: list[tuple[str, str]] = []
 
     def add_listener(self, _callback_fn, _watched_uuids):
         return lambda: None
 
     def control_state(self, control, state_name):
-        return self.values.get(control.state_uuid(state_name))
+        return self._values.get(control.state_uuid(state_name))
 
     async def async_send_action(self, uuid_action, command):
         self.commands.append((uuid_action, command))
 
 
 class _FakeConfigEntry:
-    def __init__(self, entry_id: str, options: dict) -> None:
-        self.entry_id = entry_id
+    def __init__(self, bridge: _FakeBridge, options: dict) -> None:
+        self.runtime_data = bridge
         self.options = options
-
-
-class _FakeHass:
-    def __init__(self, entry_id: str, bridge, domain: str) -> None:
-        self.data = {domain: {"bridges": {entry_id: bridge}}}
 
 
 _install_homeassistant_stubs()
@@ -191,22 +186,42 @@ class SwitchPlatformSplitTests(unittest.IsolatedAsyncioTestCase):
             type="IntercomV2",
             states={"bell": "state-bell"},
         )
-        bridge = _FakeBridge([intercom, other_intercom])
-        entry = _FakeConfigEntry("entry-1", {})
-        hass = _FakeHass(entry.entry_id, bridge, const.DOMAIN)
+        bluetooth = LoxoneControl(
+            uuid="audio-uuid",
+            uuid_action="audio-action",
+            name="Audio",
+            type="AudioZoneV2",
+            states={"bluetooth": "state-bluetooth"},
+        )
+        blind = LoxoneControl(
+            uuid="blind-uuid",
+            uuid_action="blind-action",
+            name="Blind",
+            type="Jalousie",
+            details={"isAutomatic": True},
+            states={"autoActive": "state-blind"},
+        )
+        bridge = _FakeBridge([intercom, other_intercom, bluetooth, blind])
         entities = []
-        await switch_module.async_setup_entry(hass, entry, entities.extend)
+        await switch_module.async_setup_entry(object(), _FakeConfigEntry(bridge, {}), entities.extend)
 
-        self.assertEqual(len(entities), 1)
-        mute = entities[0]
+        self.assertCountEqual(
+            [entity._attr_unique_id for entity in entities],
+            [
+                "1234567890:intercom-action:doorbell_mute",
+                "1234567890:audio-action:bluetooth",
+                "1234567890:blind-action:automatic_shading",
+            ],
+        )
+        mute = next(entity for entity in entities if entity.control is intercom)
         self.assertEqual(mute._attr_unique_id, "1234567890:intercom-action:doorbell_mute")
         self.assertEqual(mute.relevant_state_uuids(), ("state-muted",))
         self.assertIsNone(mute.is_on)
         await mute.async_turn_on()
-        bridge.values["state-muted"] = 1
+        bridge._values["state-muted"] = 1
         self.assertTrue(mute.is_on)
         await mute.async_turn_off()
-        bridge.values["state-muted"] = 0
+        bridge._values["state-muted"] = 0
         self.assertFalse(mute.is_on)
         self.assertEqual(
             bridge.commands,
@@ -238,14 +253,13 @@ class SwitchPlatformSplitTests(unittest.IsolatedAsyncioTestCase):
         )
         bridge = _FakeBridge([controller, child_switch, top_level_switch])
         entry = _FakeConfigEntry(
-            "entry-1",
+            bridge,
             {const.CONF_EXPOSE_CONTROLLER_CHILD_LIGHTS: True},
         )
-        hass = _FakeHass(entry.entry_id, bridge, const.DOMAIN)
         entities = []
 
         await switch_module.async_setup_entry(
-            hass,
+            object(),
             entry,
             lambda new_entities: entities.extend(new_entities),
         )
@@ -271,14 +285,13 @@ class SwitchPlatformSplitTests(unittest.IsolatedAsyncioTestCase):
         )
         bridge = _FakeBridge([controller, child_switch])
         entry = _FakeConfigEntry(
-            "entry-1",
+            bridge,
             {const.CONF_EXPOSE_CONTROLLER_CHILD_LIGHTS: False},
         )
-        hass = _FakeHass(entry.entry_id, bridge, const.DOMAIN)
         entities = []
 
         await switch_module.async_setup_entry(
-            hass,
+            object(),
             entry,
             lambda new_entities: entities.extend(new_entities),
         )
@@ -304,6 +317,78 @@ class SwitchPlatformSplitTests(unittest.IsolatedAsyncioTestCase):
             bridge.commands,
             [("charger-action", "charge/on"), ("charger-action", "charge/off")],
         )
+
+    async def test_audio_bluetooth_only_maps_controllable_player(self) -> None:
+        control = LoxoneControl(
+            uuid="audio-uuid",
+            uuid_action="audio-action",
+            name="Audioserver",
+            type="AudioZoneV2",
+            states={"bluetooth": "bt"},
+        )
+        locked = LoxoneControl(
+            uuid="locked-audio-uuid",
+            uuid_action="locked-audio-action",
+            name="Controlled by Loxone logic",
+            type="AudioZoneV2",
+            states={"bluetooth": "locked-bt"},
+            details={"parameterConnections": 1 << 1},
+        )
+        bridge = _FakeBridge([control, locked])
+        bridge._values["bt"] = 1
+        entities = []
+        await switch_module.async_setup_entry(object(), _FakeConfigEntry(bridge, {}), entities.extend)
+
+        self.assertEqual(len(entities), 1)
+        bluetooth = entities[0]
+        self.assertIs(bluetooth.is_on, True)
+        await bluetooth.async_turn_off()
+        bridge._values["bt"] = 0
+        self.assertIs(bluetooth.is_on, False)
+        await bluetooth.async_turn_on()
+        self.assertEqual(bridge.commands, [("audio-action", "bluetooth/0"), ("audio-action", "bluetooth/1")])
+
+    async def test_automatic_shading_switch_reflects_active_mode(self) -> None:
+        control = LoxoneControl(
+            uuid="blind-uuid",
+            uuid_action="blind-action",
+            name="Blind",
+            type="Jalousie",
+            details={"isAutomatic": True},
+            states={"autoActive": "program", "autoAllowed": "allowed"},
+        )
+        bridge = _FakeBridge([control])
+        bridge._values.update({"program": 0, "allowed": 1})
+        switches = []
+        await switch_module.async_setup_entry(object(), _FakeConfigEntry(bridge, {}), switches.extend)
+
+        self.assertEqual(len(switches), 1)
+        switch = switches[0]
+        self.assertFalse(switch.is_on)
+        await switch.async_turn_on()
+        await switch.async_turn_off()
+        self.assertEqual(
+            bridge.commands,
+            [("blind-action", "auto"), ("blind-action", "NoAuto")],
+        )
+
+    def test_timed_switch_tracks_remaining_delay(self) -> None:
+        control = LoxoneControl(
+            uuid="timed-uuid",
+            uuid_action="timed-action",
+            name="Stair light",
+            type="TimedSwitch",
+            states={"deactivationDelayTotal": "full", "deactivationDelay": "remaining"},
+        )
+        bridge = _FakeBridge([control])
+        entity = switch_module.LoxoneSwitchEntity(bridge, control)
+        bridge._values["full"] = 60
+        self.assertIsNone(entity.is_on)
+
+        for raw_delay, expected in ((0, False), (23, True), ("-1", True)):
+            with self.subTest(raw_delay=raw_delay):
+                bridge._values["remaining"] = raw_delay
+                self.assertIs(entity.is_on, expected)
 
 
 if __name__ == "__main__":

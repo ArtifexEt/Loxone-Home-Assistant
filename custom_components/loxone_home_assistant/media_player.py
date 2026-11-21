@@ -2,24 +2,30 @@
 
 from __future__ import annotations
 
-import json
 import ipaddress
+import math
 import re
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
+from aiohttp import ClientError, ClientSession, ClientTimeout
 from homeassistant.components.media_player import (
+    BrowseMedia,
+    MediaClass,
     MediaPlayerDeviceClass,
     MediaPlayerEntity,
     MediaPlayerEntityFeature,
     MediaPlayerState,
+    MediaType,
+    RepeatMode,
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from yarl import URL
 
 from .const import MEDIA_PLAYER_CONTROL_TYPES
 from .entity import (
@@ -29,17 +35,13 @@ from .entity import (
     first_matching_state_name,
     normalize_state_name,
 )
+from .models import LoxoneControl, LoxoneMediaServer
+from .protocol import deserialize_value, normalize_uuid
 from .runtime import entry_bridge
-
-try:  # Home Assistant >= 2022.10
-    from homeassistant.components.media_player import MediaType
-except ImportError:  # pragma: no cover - fallback for minimal test stubs
-    class MediaType:  # type: ignore[no-redef]
-        MUSIC = "music"
 
 PLAY_STATE_CANDIDATES = ("playState", "play_state", "playstate", "mode")
 POWER_STATE_CANDIDATES = ("power", "active")
-VOLUME_STATE_CANDIDATES = ("volume", "defaultVolume", "masterVolume")
+VOLUME_STATE_CANDIDATES = ("volume", "masterVolume")
 VOLUME_STEP_CANDIDATES = ("volumeStep",)
 MUTE_STATE_CANDIDATES = ("mute", "isMuted")
 SHUFFLE_STATE_CANDIDATES = ("shuffle", "plshuffle")
@@ -56,40 +58,45 @@ GENRE_STATE_CANDIDATES = ("genre",)
 IMAGE_STATE_CANDIDATES = ("cover", "coverurl")
 SERVER_STATE_CANDIDATES = ("serverState",)
 CLIENT_STATE_CANDIDATES = ("clientState",)
-TTS_STATE_CANDIDATES = ("tts",)
+TTS_VOLUME_STATE_CANDIDATES = ("ttsVolume",)
+MAX_VOLUME_STATE_CANDIDATES = ("maxVolume",)
+VOLUME_ATTRIBUTES = {
+    "alarm_volume": ("alarmVolume",),
+    "bell_volume": ("bellVolume",),
+    "buzzer_volume": ("buzzerVolume",),
+    "tts_volume": TTS_VOLUME_STATE_CANDIDATES,
+    "default_volume": ("defaultVolume",),
+    "max_volume": MAX_VOLUME_STATE_CANDIDATES,
+    "volume_step": VOLUME_STEP_CANDIDATES,
+}
 MEDIA_SERVER_CONN_STATE_CANDIDATES = ("connState", "connectionState")
 MEDIA_SERVER_CERTIFICATE_STATE_CANDIDATES = ("certificateValid", "certValid")
 MEDIA_SERVER_HOST_STATE_CANDIDATES = ("host",)
 DEFAULT_AUDIO_TTS_MESSAGE = ""
 DEFAULT_AUDIO_TTS_VOLUME = 60
+MUSIC_SERVER_TYPE = 1
+MUSIC_SERVER_PORT = 7091
+MUSIC_SERVER_TIMEOUT = 5
+LEGACY_TTS_MAX_LENGTH = 150
+AUDIO_TTS_MAX_LENGTH = 400
 _AUDIO_TTS_MESSAGES_ATTR = "_audio_tts_messages"
 _AUDIO_TTS_VOLUMES_ATTR = "_audio_tts_volumes"
 _MEDIA_PLAYER_ENTITIES_ATTR = "_loxone_media_player_entities"
 
-REPEAT_OFF = "off"
-REPEAT_ONE = "one"
-REPEAT_ALL = "all"
-
-FEATURE_SELECT_SOURCE = getattr(MediaPlayerEntityFeature, "SELECT_SOURCE", 0)
-FEATURE_PLAY_MEDIA = getattr(MediaPlayerEntityFeature, "PLAY_MEDIA", 0)
-FEATURE_SHUFFLE_SET = getattr(MediaPlayerEntityFeature, "SHUFFLE_SET", 0)
-FEATURE_REPEAT_SET = getattr(MediaPlayerEntityFeature, "REPEAT_SET", 0)
-FEATURE_SEEK = getattr(MediaPlayerEntityFeature, "SEEK", 0)
-FEATURE_VOLUME_MUTE = getattr(MediaPlayerEntityFeature, "VOLUME_MUTE", 0)
-FEATURE_BROWSE_MEDIA = getattr(MediaPlayerEntityFeature, "BROWSE_MEDIA", 0)
-
+AUDIO_ZONE_CONTROL_TYPE = "AudioZone"
 AUDIO_ZONE_V2_CONTROL_TYPE = "AudioZoneV2"
 CENTRAL_AUDIO_ZONE_CONTROL_TYPE = "CentralAudioZone"
-CHILD_AUDIO_ZONE_CONTROL_TYPES = {"AudioZone", AUDIO_ZONE_V2_CONTROL_TYPE}
+CHILD_AUDIO_ZONE_CONTROL_TYPES = {AUDIO_ZONE_CONTROL_TYPE, AUDIO_ZONE_V2_CONTROL_TYPE}
 
-STATE_OFF = -1
+STATE_UNKNOWN = -1
 STATE_IDLE = 0
 STATE_PAUSED = 1
 STATE_PLAYING = 2
+PLAY_STATE_OFF_NAMES = {"off", "offline"}
 
 DEFAULT_VOLUME_STEP = 3
 MIN_VOLUME_STEP = 1
-MAX_VOLUME_STEP = 20
+MAX_VOLUME_STEP = 100
 
 _MAC_NON_HEX_RE = re.compile(r"[^0-9A-Fa-f]")
 
@@ -99,61 +106,47 @@ SUPPORTED_FEATURES = (
     | MediaPlayerEntityFeature.STOP
     | MediaPlayerEntityFeature.NEXT_TRACK
     | MediaPlayerEntityFeature.PREVIOUS_TRACK
-    | MediaPlayerEntityFeature.VOLUME_SET
     | MediaPlayerEntityFeature.VOLUME_STEP
     | MediaPlayerEntityFeature.TURN_ON
     | MediaPlayerEntityFeature.TURN_OFF
-    | FEATURE_PLAY_MEDIA
+    | MediaPlayerEntityFeature.PLAY_MEDIA
 )
+
+CENTRAL_FEATURES = (
+    MediaPlayerEntityFeature.PAUSE
+    | MediaPlayerEntityFeature.PLAY
+    | MediaPlayerEntityFeature.PLAY_MEDIA
+    | MediaPlayerEntityFeature.VOLUME_STEP
+)
+
+LEGACY_EVENTS = {
+    "alarm": ("alarm", "alarmVolume"),
+    "firealarm": ("firealarm", "alarmVolume"),
+    "bell": ("bell", "bellVolume"),
+    "buzzer": ("wecker", "buzzerVolume"),
+}
 
 BROWSE_CONTENT_TYPE_ROOT = "loxone_library"
 BROWSE_CONTENT_TYPE_DIRECTORY = "directory"
 BROWSE_CONTENT_TYPE_SOURCE = "source"
 BROWSE_CONTENT_TYPE_AUDIO_ZONE = "audio_zone"
-BROWSE_MEDIA_CLASS_DIRECTORY = "directory"
-BROWSE_MEDIA_CLASS_MUSIC = "music"
-BROWSE_MEDIA_CLASS_APP = "app"
 BROWSE_MEDIA_CLASS_SPEAKER = "speaker"
-
-
-@dataclass
-class LoxoneBrowseMedia:
-    """Minimal BrowseMedia-compatible payload for Home Assistant media browsing."""
-
-    title: str
-    media_class: str | None
-    media_content_id: str
-    media_content_type: str
-    can_play: bool
-    can_expand: bool
-    children: list["LoxoneBrowseMedia"] = field(default_factory=list)
-    children_media_class: str | None = None
-    thumbnail: str | None = None
-
-    def as_dict(self) -> dict[str, Any]:
-        return {
-            "title": self.title,
-            "media_class": self.media_class,
-            "media_content_id": self.media_content_id,
-            "media_content_type": self.media_content_type,
-            "can_play": self.can_play,
-            "can_expand": self.can_expand,
-            "children": [child.as_dict() for child in self.children],
-            "children_media_class": self.children_media_class,
-            "thumbnail": self.thumbnail,
-        }
 
 
 async def async_setup_entry(
     hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
 ) -> None:
-    bridge = entry_bridge(hass, entry)
+    bridge = entry_bridge(entry)
     entities = [
         LoxoneAudioZoneEntity(bridge, control)
         for control in bridge.controls
         if control.type in MEDIA_PLAYER_CONTROL_TYPES
     ]
-    _register_media_player_entities(bridge, entities)
+    setattr(
+        bridge,
+        _MEDIA_PLAYER_ENTITIES_ATTR,
+        {entity.control.uuid_action: entity for entity in entities},
+    )
     async_add_entities(entities)
 
 
@@ -162,13 +155,15 @@ class LoxoneAudioZoneEntity(LoxoneEntity, MediaPlayerEntity):
 
     _attr_device_class = MediaPlayerDeviceClass.SPEAKER
 
-    def __init__(self, bridge, control) -> None:
+    def __init__(self, bridge, control: LoxoneControl) -> None:
         super().__init__(bridge, control)
         self._media_position_updated_at: datetime | None = None
+        self._last_playback_position: tuple[MediaPlayerState | None, float | None] | None = None
         self._play_state_name = first_matching_state_name(control, PLAY_STATE_CANDIDATES)
         self._power_state_name = first_matching_state_name(control, POWER_STATE_CANDIDATES)
         self._volume_state_name = first_matching_state_name(control, VOLUME_STATE_CANDIDATES)
         self._volume_step_state_name = first_matching_state_name(control, VOLUME_STEP_CANDIDATES)
+        self._max_volume_state_name = first_matching_state_name(control, MAX_VOLUME_STATE_CANDIDATES)
         self._mute_state_name = first_matching_state_name(control, MUTE_STATE_CANDIDATES)
         self._shuffle_state_name = first_matching_state_name(control, SHUFFLE_STATE_CANDIDATES)
         self._repeat_state_name = first_matching_state_name(control, REPEAT_STATE_CANDIDATES)
@@ -184,7 +179,13 @@ class LoxoneAudioZoneEntity(LoxoneEntity, MediaPlayerEntity):
         self._image_state_name = first_matching_state_name(control, IMAGE_STATE_CANDIDATES)
         self._server_state_name = first_matching_state_name(control, SERVER_STATE_CANDIDATES)
         self._client_state_name = first_matching_state_name(control, CLIENT_STATE_CANDIDATES)
-        self._tts_state_name = first_matching_state_name(control, TTS_STATE_CANDIDATES)
+        self._volume_attributes = {
+            attribute: name
+            for attribute, candidates in VOLUME_ATTRIBUTES.items()
+            if (name := first_matching_state_name(control, candidates)) is not None
+        }
+        self._bluetooth_state_name = first_matching_state_name(control, ("bluetooth",))
+        self._queue_index_state_name = first_matching_state_name(control, ("queueIndex",))
         self._media_server = resolve_media_server(bridge, control)
         media_server_states = (
             self._media_server.states
@@ -203,7 +204,21 @@ class LoxoneAudioZoneEntity(LoxoneEntity, MediaPlayerEntity):
         self._media_server_host_uuid = _first_matching_state_uuid(
             media_server_states, MEDIA_SERVER_HOST_STATE_CANDIDATES
         )
-        self._linked_audio_zone_refs = _resolve_linked_audio_zone_refs(bridge, control)
+        self._configured_group = _resolve_audio_group(bridge.controls, control)
+        self._playback_group = _linked_player_group(bridge.controls, control)
+        self._audio_group = self._playback_group or self._configured_group
+        self._linked_audio_zone_refs = (
+            tuple(
+                (
+                    child,
+                    first_matching_state_name(child, PLAY_STATE_CANDIDATES),
+                    first_matching_state_name(child, POWER_STATE_CANDIDATES),
+                )
+                for child in self._configured_group[1:]
+            )
+            if self._is_central_audio_zone()
+            else ()
+        )
 
     def relevant_state_uuids(self) -> Iterable[str]:
         watched = set(super().relevant_state_uuids())
@@ -216,12 +231,12 @@ class LoxoneAudioZoneEntity(LoxoneEntity, MediaPlayerEntity):
             if state_uuid:
                 watched.add(state_uuid)
         for linked_control, play_state_name, power_state_name in self._linked_audio_zone_refs:
-            for state_name in (play_state_name, power_state_name):
-                if state_name is None:
-                    continue
-                state_uuid = linked_control.state_uuid(state_name)
-                if state_uuid:
-                    watched.add(state_uuid)
+            watched.update(
+                state_uuid
+                for state_name in (play_state_name, power_state_name)
+                if state_name is not None
+                and (state_uuid := linked_control.state_uuid(state_name)) is not None
+            )
         return watched
 
     def _state_raw(self, state_name: str | None) -> Any:
@@ -250,15 +265,9 @@ class LoxoneAudioZoneEntity(LoxoneEntity, MediaPlayerEntity):
     async def _async_send_action(self, command: str) -> None:
         await self.bridge.async_send_action(self.control.uuid_action, command)
 
-    async def _async_send_tts_action(self, command: str) -> None:
-        await self.bridge.async_send_action(self._tts_target_uuid_action(), command)
-
-    def _tts_target_uuid_action(self) -> str:
-        return resolve_audio_tts_target_uuid_action(
-            self.bridge,
-            self.control,
-            media_server=self._media_server,
-        )
+    @property
+    def available(self) -> bool:
+        return super().available and coerce_bool(self.control.details.get("validOutputs")) is not False
 
     @property
     def state(self) -> MediaPlayerState | None:
@@ -277,10 +286,8 @@ class LoxoneAudioZoneEntity(LoxoneEntity, MediaPlayerEntity):
     @property
     def volume_level(self) -> float | None:
         raw = coerce_float(self._state_raw(self._volume_state_name))
-        if raw is None:
+        if raw is None or not math.isfinite(raw):
             return None
-        if 0.0 <= raw <= 1.0:
-            return raw
         return max(0.0, min(1.0, raw / 100.0))
 
     @property
@@ -308,8 +315,8 @@ class LoxoneAudioZoneEntity(LoxoneEntity, MediaPlayerEntity):
         return self._state_text(self._station_state_name)
 
     @property
-    def media_content_type(self) -> str:
-        return getattr(MediaType, "MUSIC", "music")
+    def media_content_type(self) -> MediaType:
+        return MediaType.MUSIC
 
     @property
     def media_duration(self) -> float | None:
@@ -328,7 +335,7 @@ class LoxoneAudioZoneEntity(LoxoneEntity, MediaPlayerEntity):
         return coerce_bool(self._state_raw(self._shuffle_state_name))
 
     @property
-    def repeat(self) -> str | None:
+    def repeat(self) -> RepeatMode | None:
         return _repeat_mode_to_ha_value(self._state_int(self._repeat_state_name))
 
     @property
@@ -346,10 +353,7 @@ class LoxoneAudioZoneEntity(LoxoneEntity, MediaPlayerEntity):
         if slot is not None:
             return source_options.get(slot, f"Source {slot}")
 
-        text_value = _coerce_text(raw)
-        if text_value is not None:
-            return text_value
-        return None
+        return _coerce_text(raw)
 
     @property
     def group_members(self) -> list[str] | None:
@@ -358,20 +362,29 @@ class LoxoneAudioZoneEntity(LoxoneEntity, MediaPlayerEntity):
 
     @property
     def supported_features(self) -> MediaPlayerEntityFeature:
-        features = SUPPORTED_FEATURES
-        if self._source_options() or self._source_state_name is not None:
-            features |= FEATURE_SELECT_SOURCE
+        features = CENTRAL_FEATURES if self._is_central_audio_zone() else SUPPORTED_FEATURES
+        if self._can_set_volume():
+            features |= MediaPlayerEntityFeature.VOLUME_SET
+        if self._source_options():
+            features |= MediaPlayerEntityFeature.SELECT_SOURCE
         if self._mute_state_name is not None:
-            features |= FEATURE_VOLUME_MUTE
+            features |= MediaPlayerEntityFeature.VOLUME_MUTE
         if self._shuffle_state_name is not None:
-            features |= FEATURE_SHUFFLE_SET
+            features |= MediaPlayerEntityFeature.SHUFFLE_SET
         if self._repeat_state_name is not None:
-            features |= FEATURE_REPEAT_SET
+            features |= MediaPlayerEntityFeature.REPEAT_SET
         if self._progress_state_name is not None:
-            features |= FEATURE_SEEK
+            features |= MediaPlayerEntityFeature.SEEK
         if self._browse_children_available():
-            features |= FEATURE_BROWSE_MEDIA
+            features |= MediaPlayerEntityFeature.BROWSE_MEDIA
         return features
+
+    def _can_set_volume(self) -> bool:
+        if self._is_central_audio_zone():
+            return self._volume_state_name is not None
+        modes = _coerce_int(self.control.details.get("volumeModes"))
+        # Bit 2 indicates an output driven by volume-up/down pulses.
+        return not (self._is_audio_zone_v2() and modes is not None and modes & (1 << 2))
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
@@ -389,6 +402,13 @@ class LoxoneAudioZoneEntity(LoxoneEntity, MediaPlayerEntity):
         _set_if_not_none(attrs, "client_state", self._state_int(self._client_state_name))
         _set_if_not_none(attrs, "source_id", self._state_int(self._source_state_name))
         _set_if_not_none(attrs, "genre", self._state_text(self._genre_state_name))
+        _set_if_not_none(attrs, "queue_index", self._state_int(self._queue_index_state_name))
+        _set_if_not_none(attrs, "bluetooth", coerce_bool(self._state_raw(self._bluetooth_state_name)))
+        attrs.update(
+            (attribute, volume)
+            for attribute, state_name in self._volume_attributes.items()
+            if (volume := self._state_int(state_name)) is not None
+        )
         self._append_audio_server_attributes(attrs)
         self._append_linked_audio_zone_attributes(attrs)
         self._append_group_attributes(attrs)
@@ -398,22 +418,16 @@ class LoxoneAudioZoneEntity(LoxoneEntity, MediaPlayerEntity):
         self,
         media_content_type: str | None = None,
         media_content_id: str | None = None,
-    ) -> LoxoneBrowseMedia:
+    ) -> BrowseMedia:
         normalized_type = (media_content_type or BROWSE_CONTENT_TYPE_ROOT).strip().casefold()
         normalized_id = _coerce_text(media_content_id)
 
-        if (
-            normalized_type in {BROWSE_CONTENT_TYPE_ROOT, BROWSE_CONTENT_TYPE_DIRECTORY, ""}
-            and normalized_id == self._browse_sources_directory_id()
-        ):
+        if normalized_type not in {BROWSE_CONTENT_TYPE_ROOT, BROWSE_CONTENT_TYPE_DIRECTORY, ""}:
+            return self._browse_root()
+        if normalized_id == self._browse_sources_directory_id():
             return self._browse_sources_directory()
-
-        if (
-            normalized_type in {BROWSE_CONTENT_TYPE_ROOT, BROWSE_CONTENT_TYPE_DIRECTORY, ""}
-            and normalized_id == self._browse_linked_zones_directory_id()
-        ):
+        if normalized_id == self._browse_linked_zones_directory_id():
             return self._browse_linked_zones_directory()
-
         return self._browse_root()
 
     def _append_audio_server_attributes(self, attrs: dict[str, Any]) -> None:
@@ -426,13 +440,9 @@ class LoxoneAudioZoneEntity(LoxoneEntity, MediaPlayerEntity):
         audio_server_host = self._audio_server_host()
         if audio_server_host is not None:
             attrs["audio_server_host"] = audio_server_host
-            local_hint = _host_local_hint(audio_server_host)
-            if local_hint is not None:
-                attrs["audio_server_local_hint"] = local_hint
+            _set_if_not_none(attrs, "audio_server_local_hint", _host_local_hint(audio_server_host))
 
-        masked_mac = _mask_mac(self._media_server.mac)
-        if masked_mac is not None:
-            attrs["audio_server_mac"] = masked_mac
+        _set_if_not_none(attrs, "audio_server_mac", _mask_mac(self._media_server.mac))
 
         _set_if_not_none(
             attrs,
@@ -446,106 +456,62 @@ class LoxoneAudioZoneEntity(LoxoneEntity, MediaPlayerEntity):
         )
 
     def _append_group_attributes(self, attrs: dict[str, Any]) -> None:
-        group_controls = self._group_member_controls()
-        if len(group_controls) <= 1:
+        if not self._audio_group:
             return
 
-        attrs["group_member_uuid_actions"] = [
-            str(getattr(control, "uuid_action", ""))
-            for control in group_controls
-            if _coerce_text(getattr(control, "uuid_action", None)) is not None
-        ]
-
-        group_names = self._group_member_names()
-        if group_names:
-            attrs["group_member_names"] = group_names
-
+        attrs["group_member_uuid_actions"] = [control.uuid_action for control in self._audio_group]
+        attrs["group_member_names"] = [control.display_name for control in self._audio_group]
         group_entity_ids = self._group_member_entity_ids()
         if group_entity_ids:
             attrs["group_member_entity_ids"] = group_entity_ids
 
-        leader_control = self._group_leader_control()
-        if leader_control is None:
+        if self._playback_group:
+            _set_if_not_none(attrs, "group_name", _coerce_text(self.control.details.get("groupName")))
             return
 
-        leader_uuid_action = _coerce_text(getattr(leader_control, "uuid_action", None))
-        if leader_uuid_action is not None:
-            attrs["group_leader_uuid_action"] = leader_uuid_action
-
-        leader_name = _coerce_text(getattr(leader_control, "display_name", None)) or _coerce_text(
-            getattr(leader_control, "name", None)
-        )
-        if leader_name is not None:
-            attrs["group_leader_name"] = leader_name
-
-        leader_entity_id = _entity_id_for_control_uuid_action(self.bridge, leader_uuid_action)
-        if leader_entity_id is not None:
-            attrs["group_leader_entity_id"] = leader_entity_id
+        leader = self._audio_group[0]
+        attrs["group_leader_uuid_action"] = leader.uuid_action
+        attrs["group_leader_name"] = leader.display_name
+        _set_if_not_none(attrs, "group_leader_entity_id", self._entity_id_for_control(leader))
 
     def _browse_children_available(self) -> bool:
         return bool(self._source_options() or self._linked_audio_zone_refs)
 
-    def _browse_root(self) -> LoxoneBrowseMedia:
-        children: list[LoxoneBrowseMedia] = []
+    def _browse_root(self) -> BrowseMedia:
+        children = [
+            directory
+            for directory in (self._browse_sources_directory(), self._browse_linked_zones_directory())
+            if directory.can_expand
+        ]
 
-        source_children = self._browse_source_children()
-        if source_children:
-            children.append(
-                LoxoneBrowseMedia(
-                    title="Sources",
-                    media_class=BROWSE_MEDIA_CLASS_DIRECTORY,
-                    media_content_id=self._browse_sources_directory_id(),
-                    media_content_type=BROWSE_CONTENT_TYPE_DIRECTORY,
-                    can_play=False,
-                    can_expand=True,
-                    children=source_children,
-                    children_media_class=BROWSE_MEDIA_CLASS_MUSIC,
-                )
-            )
-
-        linked_zone_children = self._browse_linked_zone_children()
-        if linked_zone_children:
-            children.append(
-                LoxoneBrowseMedia(
-                    title="Linked Zones",
-                    media_class=BROWSE_MEDIA_CLASS_DIRECTORY,
-                    media_content_id=self._browse_linked_zones_directory_id(),
-                    media_content_type=BROWSE_CONTENT_TYPE_DIRECTORY,
-                    can_play=False,
-                    can_expand=True,
-                    children=linked_zone_children,
-                    children_media_class=BROWSE_MEDIA_CLASS_SPEAKER,
-                )
-            )
-
-        return LoxoneBrowseMedia(
+        return BrowseMedia(
             title=self.control.display_name,
-            media_class=BROWSE_MEDIA_CLASS_APP,
-            media_content_id=self._browse_root_id(),
+            media_class=MediaClass.APP,
+            media_content_id=self.control.uuid_action,
             media_content_type=BROWSE_CONTENT_TYPE_ROOT,
             can_play=False,
             can_expand=bool(children),
             children=children,
         )
 
-    def _browse_sources_directory(self) -> LoxoneBrowseMedia:
+    def _browse_sources_directory(self) -> BrowseMedia:
         children = self._browse_source_children()
-        return LoxoneBrowseMedia(
+        return BrowseMedia(
             title="Sources",
-            media_class=BROWSE_MEDIA_CLASS_DIRECTORY,
+            media_class=MediaClass.DIRECTORY,
             media_content_id=self._browse_sources_directory_id(),
             media_content_type=BROWSE_CONTENT_TYPE_DIRECTORY,
             can_play=False,
             can_expand=bool(children),
             children=children,
-            children_media_class=BROWSE_MEDIA_CLASS_MUSIC,
+            children_media_class=MediaClass.MUSIC,
         )
 
-    def _browse_linked_zones_directory(self) -> LoxoneBrowseMedia:
+    def _browse_linked_zones_directory(self) -> BrowseMedia:
         children = self._browse_linked_zone_children()
-        return LoxoneBrowseMedia(
+        return BrowseMedia(
             title="Linked Zones",
-            media_class=BROWSE_MEDIA_CLASS_DIRECTORY,
+            media_class=MediaClass.DIRECTORY,
             media_content_id=self._browse_linked_zones_directory_id(),
             media_content_type=BROWSE_CONTENT_TYPE_DIRECTORY,
             can_play=False,
@@ -554,13 +520,13 @@ class LoxoneAudioZoneEntity(LoxoneEntity, MediaPlayerEntity):
             children_media_class=BROWSE_MEDIA_CLASS_SPEAKER,
         )
 
-    def _browse_source_children(self) -> list[LoxoneBrowseMedia]:
-        children: list[LoxoneBrowseMedia] = []
+    def _browse_source_children(self) -> list[BrowseMedia]:
+        children: list[BrowseMedia] = []
         for slot, label in self._source_options().items():
             children.append(
-                LoxoneBrowseMedia(
+                BrowseMedia(
                     title=label,
-                    media_class=BROWSE_MEDIA_CLASS_MUSIC,
+                    media_class=MediaClass.MUSIC,
                     media_content_id=str(slot),
                     media_content_type=BROWSE_CONTENT_TYPE_SOURCE,
                     can_play=True,
@@ -569,28 +535,18 @@ class LoxoneAudioZoneEntity(LoxoneEntity, MediaPlayerEntity):
             )
         return children
 
-    def _browse_linked_zone_children(self) -> list[LoxoneBrowseMedia]:
-        children: list[LoxoneBrowseMedia] = []
-        for linked_control, _play_state_name, _power_state_name in self._linked_audio_zone_refs:
-            title = _coerce_text(getattr(linked_control, "display_name", None)) or _coerce_text(
-                getattr(linked_control, "name", None)
+    def _browse_linked_zone_children(self) -> list[BrowseMedia]:
+        return [
+            BrowseMedia(
+                title=control.display_name,
+                media_class=BROWSE_MEDIA_CLASS_SPEAKER,
+                media_content_id=control.uuid_action,
+                media_content_type=BROWSE_CONTENT_TYPE_AUDIO_ZONE,
+                can_play=False,
+                can_expand=False,
             )
-            if title is None:
-                continue
-            children.append(
-                LoxoneBrowseMedia(
-                    title=title,
-                    media_class=BROWSE_MEDIA_CLASS_SPEAKER,
-                    media_content_id=str(getattr(linked_control, "uuid_action", title)),
-                    media_content_type=BROWSE_CONTENT_TYPE_AUDIO_ZONE,
-                    can_play=False,
-                    can_expand=False,
-                )
-            )
-        return children
-
-    def _browse_root_id(self) -> str:
-        return str(self.control.uuid_action)
+            for control, _, _ in self._linked_audio_zone_refs
+        ]
 
     def _browse_sources_directory_id(self) -> str:
         return f"{self.control.uuid_action}:sources"
@@ -598,75 +554,16 @@ class LoxoneAudioZoneEntity(LoxoneEntity, MediaPlayerEntity):
     def _browse_linked_zones_directory_id(self) -> str:
         return f"{self.control.uuid_action}:linked_zones"
 
-    def _group_leader_control(self) -> Any | None:
-        if self._is_central_audio_zone():
-            return self.control
-        return self._central_audio_parent_control()
-
-    def _group_member_controls(self) -> tuple[Any, ...]:
-        if self._is_central_audio_zone():
-            return _dedupe_controls_by_uuid_action(
-                (
-                    self.control,
-                    *(linked_control for linked_control, _play_state, _power_state in self._linked_audio_zone_refs),
-                )
-            )
-
-        parent_control = self._central_audio_parent_control()
-        if parent_control is None:
-            return ()
-
-        parent_entity = _media_player_entity_for_uuid_action(
-            self.bridge,
-            getattr(parent_control, "uuid_action", None),
-        )
-        if isinstance(parent_entity, LoxoneAudioZoneEntity):
-            return parent_entity._group_member_controls()
-
-        parent_refs = _resolve_linked_audio_zone_refs(self.bridge, parent_control)
-        return _dedupe_controls_by_uuid_action(
-            (
-                parent_control,
-                *(linked_control for linked_control, _play_state, _power_state in parent_refs),
-            )
-        )
-
     def _group_member_entity_ids(self) -> list[str]:
-        entity_ids: list[str] = []
-        for control in self._group_member_controls():
-            control_uuid_action = _coerce_text(getattr(control, "uuid_action", None))
-            if control_uuid_action is None:
-                continue
-            entity_id = _entity_id_for_control_uuid_action(self.bridge, control_uuid_action)
-            if entity_id is not None:
-                entity_ids.append(entity_id)
-        return entity_ids
+        return [
+            entity_id
+            for control in self._audio_group
+            if (entity_id := self._entity_id_for_control(control)) is not None
+        ]
 
-    def _group_member_names(self) -> list[str]:
-        names: list[str] = []
-        for control in self._group_member_controls():
-            title = _coerce_text(getattr(control, "display_name", None)) or _coerce_text(
-                getattr(control, "name", None)
-            )
-            if title is not None:
-                names.append(title)
-        return names
-
-    def _central_audio_parent_control(self) -> Any | None:
-        parent_uuid_action = _coerce_text(getattr(self.control, "parent_uuid_action", None))
-        if parent_uuid_action is None:
-            return None
-
-        resolver = getattr(self.bridge, "control_for_uuid_action", None)
-        parent_control = resolver(parent_uuid_action) if callable(resolver) else None
-        if parent_control is None:
-            for candidate in getattr(self.bridge, "controls", ()) or ():
-                if _coerce_text(getattr(candidate, "uuid_action", None)) == parent_uuid_action:
-                    parent_control = candidate
-                    break
-        if getattr(parent_control, "type", None) != CENTRAL_AUDIO_ZONE_CONTROL_TYPE:
-            return None
-        return parent_control
+    def _entity_id_for_control(self, control: LoxoneControl) -> str | None:
+        entities = getattr(self.bridge, _MEDIA_PLAYER_ENTITIES_ATTR, {})
+        return getattr(entities.get(control.uuid_action), "entity_id", None)
 
     async def async_turn_on(self) -> None:
         await self._async_send_action("on")
@@ -690,8 +587,12 @@ class LoxoneAudioZoneEntity(LoxoneEntity, MediaPlayerEntity):
         await self._async_send_action("prev")
 
     async def async_set_volume_level(self, volume: float) -> None:
+        if not self._can_set_volume():
+            raise ServiceValidationError("This Loxone audio output only supports volume steps.")
         clamped = max(0.0, min(1.0, volume))
-        volume_percent = round(clamped * 100)
+        volume_limit = self._state_int(self._max_volume_state_name)
+        percent = round(clamped * 100)
+        volume_percent = min(percent, volume_limit) if volume_limit is not None and volume_limit >= 0 else percent
         await self._async_send_action(f"volume/{volume_percent}")
 
     async def async_mute_volume(self, mute: bool) -> None:
@@ -715,7 +616,7 @@ class LoxoneAudioZoneEntity(LoxoneEntity, MediaPlayerEntity):
     async def async_select_source(self, source: str) -> None:
         slot = _source_slot_for_name(source, self._source_options())
         if slot is None:
-            return
+            slot = _coerce_int(source)
         await self._async_send_source_slot(slot)
 
     async def _async_handle_source_media(self, kind: str, media_id: str) -> bool:
@@ -723,8 +624,8 @@ class LoxoneAudioZoneEntity(LoxoneEntity, MediaPlayerEntity):
             return False
         slot = _coerce_int(media_id)
         if slot is None:
-            slot = _source_slot_for_name(media_id, self._source_options())
-        if slot is not None:
+            await self.async_select_source(media_id)
+        else:
             await self._async_send_source_slot(slot)
         return True
 
@@ -737,14 +638,7 @@ class LoxoneAudioZoneEntity(LoxoneEntity, MediaPlayerEntity):
         if kind not in {"tts", "announce", "announcement"}:
             return False
 
-        text = _coerce_text(media_id)
-        if not text:
-            return True
-        volume = _coerce_tts_volume(kwargs)
-        command = build_audio_tts_command(text, volume)
-        if command is None:
-            return True
-        await self._async_send_tts_action(command)
+        await async_send_audio_tts(self.bridge, self.control, media_id, _tts_volume_argument(kwargs))
         return True
 
     async def _async_handle_command_media(self, kind: str, media_id: str) -> bool:
@@ -755,11 +649,37 @@ class LoxoneAudioZoneEntity(LoxoneEntity, MediaPlayerEntity):
             await self._async_send_action(command)
         return True
 
-    async def _async_handle_alarm_media(self, kind: str) -> bool:
-        if kind not in {"alarm", "firealarm", "fire_alarm", "bell", "buzzer"}:
-            return False
-        await self._async_send_action(kind.replace("_", ""))
-        return True
+    async def _async_play_event(self, event: str, volume: int | None) -> None:
+        targets = _audio_zone_targets(self.bridge, self.control)
+        if not targets:
+            raise ServiceValidationError("This Central Audio control has no mapped audio zones.")
+        command, volume_state = LEGACY_EVENTS[event]
+        for target in targets:
+            legacy = _legacy_audio_endpoint(self.bridge, target)
+            if legacy is None:
+                await self.bridge.async_send_action(target.uuid_action, event)
+                continue
+            state_name = first_matching_state_name(target, (volume_state,))
+            target_volume = volume
+            if target_volume is None:
+                target_volume = _coerce_audio_tts_volume(
+                    _control_state_raw(self.bridge, target, state_name)
+                )
+            percent = target_volume if target_volume is not None else DEFAULT_AUDIO_TTS_VOLUME
+            await _async_send_music_server_command(legacy, f"{command}/{percent}")
+
+    async def _async_play_event_media(self, kind: str, media_id: str, volume: int | None) -> None:
+        legacy = _legacy_audio_endpoint(self.bridge, self.control)
+        if legacy is None:
+            raise ServiceValidationError(
+                "Direct event files and playlists require an original Loxone Music Server zone."
+            )
+        media_name = _coerce_text(media_id)
+        if media_name is None:
+            raise ServiceValidationError("Choose an event filename or playlist name.")
+        command = _music_server_event_command(kind, media_name)
+        percent = volume if volume is not None else audio_tts_volume(self.bridge, self.control)
+        await _async_send_music_server_command(legacy, f"{command}/{percent}")
 
     async def async_play_media(
         self,
@@ -769,15 +689,20 @@ class LoxoneAudioZoneEntity(LoxoneEntity, MediaPlayerEntity):
     ) -> None:
         kind = (media_type or "").strip().casefold()
 
+        if kind in {"event_file", "event_playlist"}:
+            await self._async_play_event_media(
+                kind, media_id, _coerce_audio_tts_volume(_tts_volume_argument(kwargs))
+            )
+            return
+        if (event := kind.replace("_", "")) in LEGACY_EVENTS:
+            await self._async_play_event(event, _coerce_audio_tts_volume(_tts_volume_argument(kwargs)))
+            return
         if await self._async_handle_source_media(kind, media_id):
             return
         if await self._async_handle_tts_media(kind, media_id, kwargs):
             return
         if await self._async_handle_command_media(kind, media_id):
             return
-        if await self._async_handle_alarm_media(kind):
-            return
-
         if kind in {"play", "resume"}:
             await self.async_media_play()
             return
@@ -787,6 +712,9 @@ class LoxoneAudioZoneEntity(LoxoneEntity, MediaPlayerEntity):
         if kind == "stop":
             await self.async_media_stop()
             return
+        raise ServiceValidationError(
+            "Loxone accepts configured favourites, native text announcements or supported audio commands."
+        )
 
     async def async_media_seek(self, position: float) -> None:
         if self._progress_state_name is None:
@@ -797,8 +725,14 @@ class LoxoneAudioZoneEntity(LoxoneEntity, MediaPlayerEntity):
     async def async_set_shuffle(self, shuffle: bool) -> None:
         if self._shuffle_state_name is None:
             return
-        command_value = 1 if shuffle else 0
-        await self._async_send_action(f"shuffle/{command_value}")
+        if self.control.type != AUDIO_ZONE_CONTROL_TYPE:
+            await self._async_send_action(f"shuffle/{int(shuffle)}")
+            return
+
+        # The original Music Server implements a toggle command.
+        current = self.shuffle
+        if current is not None and current != shuffle:
+            await self._async_send_action("shuffle")
 
     async def async_set_repeat(self, repeat: str) -> None:
         if self._repeat_state_name is None:
@@ -809,12 +743,15 @@ class LoxoneAudioZoneEntity(LoxoneEntity, MediaPlayerEntity):
         await self._async_send_action(f"repeat/{repeat_mode}")
 
     def _handle_bridge_update(self) -> None:
-        if self.media_position is None:
-            self._media_position_updated_at = None
-        elif self.state in {MediaPlayerState.PLAYING, MediaPlayerState.PAUSED}:
-            self._media_position_updated_at = datetime.now(timezone.utc)
-        else:
-            self._media_position_updated_at = None
+        playback = self.state, self.media_position
+        if playback != self._last_playback_position:
+            state, position = playback
+            self._media_position_updated_at = (
+                datetime.now(UTC)
+                if position is not None and state in {MediaPlayerState.PLAYING, MediaPlayerState.PAUSED}
+                else None
+            )
+            self._last_playback_position = playback
         super()._handle_bridge_update()
 
     def _volume_step(self) -> int:
@@ -833,10 +770,7 @@ class LoxoneAudioZoneEntity(LoxoneEntity, MediaPlayerEntity):
                 raw = self.control.details.get(detail_key)
                 if raw is not None:
                     break
-        parsed = _deserialize_source_list(raw)
-        if parsed is None:
-            return {}
-        return _extract_source_slots(parsed)
+        return _extract_source_slots(deserialize_value(raw))
 
     def _source_command_name(self) -> str:
         return (
@@ -846,7 +780,11 @@ class LoxoneAudioZoneEntity(LoxoneEntity, MediaPlayerEntity):
             else "source"
         )
 
-    async def _async_send_source_slot(self, slot: int) -> None:
+    async def _async_send_source_slot(self, slot: int | None) -> None:
+        if slot is None or slot < 0 or (
+            self.control.type == AUDIO_ZONE_CONTROL_TYPE and not 1 <= slot <= 8
+        ):
+            raise ServiceValidationError("Select a configured Loxone audio favourite.")
         await self._async_send_action(f"{self._source_command_name()}/{slot}")
 
     def _state_value_with_fallback(
@@ -866,58 +804,34 @@ class LoxoneAudioZoneEntity(LoxoneEntity, MediaPlayerEntity):
             return None
         return _coerce_text(self._media_server.host)
 
-    def _linked_audio_zone_states(self) -> list[tuple[Any, MediaPlayerState | None]]:
-        states: list[tuple[Any, MediaPlayerState | None]] = []
+    def _linked_audio_zone_states(self) -> Iterable[tuple[LoxoneControl, MediaPlayerState | None]]:
         for linked_control, play_state_name, power_state_name in self._linked_audio_zone_refs:
-            states.append(
-                (
-                    linked_control,
-                    _media_player_state_from_values(
-                        _control_state_raw(self.bridge, linked_control, power_state_name),
-                        _control_state_raw(self.bridge, linked_control, play_state_name),
-                        treat_idle_as_available=(
-                            getattr(linked_control, "type", None)
-                            == AUDIO_ZONE_V2_CONTROL_TYPE
-                        ),
-                    ),
-                )
+            yield linked_control, _media_player_state_from_values(
+                _control_state_raw(self.bridge, linked_control, power_state_name),
+                _control_state_raw(self.bridge, linked_control, play_state_name),
+                treat_idle_as_available=linked_control.type == AUDIO_ZONE_V2_CONTROL_TYPE,
             )
-        return states
 
     def _aggregate_linked_audio_zone_state(self) -> MediaPlayerState | None:
         if not self._linked_audio_zone_refs:
             return None
 
-        saw_paused = False
-        saw_known_state = False
-        for _linked_control, linked_state in self._linked_audio_zone_states():
-            if linked_state is None:
-                continue
-            saw_known_state = True
-            if linked_state == MediaPlayerState.PLAYING:
-                return MediaPlayerState.PLAYING
-            if linked_state == MediaPlayerState.PAUSED:
-                saw_paused = True
-
-        if saw_paused:
+        states = {state for _, state in self._linked_audio_zone_states()}
+        if MediaPlayerState.PLAYING in states:
+            return MediaPlayerState.PLAYING
+        if MediaPlayerState.PAUSED in states:
             return MediaPlayerState.PAUSED
-        if saw_known_state:
-            return MediaPlayerState.IDLE
         return MediaPlayerState.IDLE
 
     def _append_linked_audio_zone_attributes(self, attrs: dict[str, Any]) -> None:
         if not self._linked_audio_zone_refs:
             return
 
-        active_zone_names: list[str] = []
-        for linked_control, linked_state in self._linked_audio_zone_states():
-            if linked_state not in {MediaPlayerState.PLAYING, MediaPlayerState.PAUSED}:
-                continue
-            display_name = _coerce_text(getattr(linked_control, "display_name", None))
-            if display_name is None:
-                display_name = _coerce_text(getattr(linked_control, "name", None))
-            if display_name is not None:
-                active_zone_names.append(display_name)
+        active_zone_names = [
+            control.display_name
+            for control, state in self._linked_audio_zone_states()
+            if state in {MediaPlayerState.PLAYING, MediaPlayerState.PAUSED}
+        ]
 
         attrs["linked_audio_zone_count"] = len(self._linked_audio_zone_refs)
         attrs["active_audio_zone_count"] = len(active_zone_names)
@@ -934,6 +848,20 @@ def resolve_media_server(bridge: Any, control: Any) -> Any | None:
     if not media_servers:
         return None
 
+    details = control.details if isinstance(control.details, Mapping) else {}
+    server_reference = details.get("server")
+    if isinstance(server_reference, str) and server_reference.strip():
+        server_uuid = normalize_uuid(server_reference)
+        return next(
+            (
+                server
+                for action, server in raw_servers.items()
+                if server is not None
+                and server_uuid in (normalize_uuid(action), normalize_uuid(server.uuid_action))
+            ),
+            None,
+        )
+
     direct = raw_servers.get(control.uuid_action)
     if direct is not None:
         return direct
@@ -942,7 +870,6 @@ def resolve_media_server(bridge: Any, control: Any) -> Any | None:
     if matched_by_states is not None:
         return matched_by_states
 
-    details = control.details if isinstance(control.details, Mapping) else {}
     detail_tokens = _extract_text_tokens(details)
     host_state_name = first_matching_state_name(control, MEDIA_SERVER_HOST_STATE_CANDIDATES)
     if host_state_name is not None:
@@ -975,116 +902,179 @@ def resolve_media_server(bridge: Any, control: Any) -> Any | None:
     return None
 
 
-def _register_media_player_entities(bridge: Any, entities: Iterable[Any]) -> None:
-    registry: dict[str, Any] = {}
-    for entity in entities:
-        control = getattr(entity, "control", None)
-        uuid_action = _coerce_text(getattr(control, "uuid_action", None))
-        if uuid_action is not None:
-            registry[uuid_action] = entity
-    setattr(bridge, _MEDIA_PLAYER_ENTITIES_ATTR, registry)
+def _audio_zone_targets(bridge: Any, control: LoxoneControl) -> tuple[LoxoneControl, ...]:
+    if control.type != CENTRAL_AUDIO_ZONE_CONTROL_TYPE:
+        return (control,)
+    members = _central_audio_group(bridge.controls, control)[1:]
+    if members or "controls" in control.details:
+        return members
+    return (control,)
 
 
-def _media_player_entity_for_uuid_action(bridge: Any, uuid_action: Any) -> Any | None:
-    normalized_uuid_action = _coerce_text(uuid_action)
-    if normalized_uuid_action is None:
-        return None
-    registry = getattr(bridge, _MEDIA_PLAYER_ENTITIES_ATTR, None)
-    if not isinstance(registry, Mapping):
-        return None
-    return registry.get(normalized_uuid_action)
+def audio_tts_target_uuids(bridge: Any, control: LoxoneControl) -> tuple[str, ...]:
+    """Return the zone identities that receive a text announcement."""
+    return tuple(target.uuid_action for target in _audio_zone_targets(bridge, control))
 
 
-def _entity_id_for_control_uuid_action(bridge: Any, uuid_action: Any) -> str | None:
-    entity = _media_player_entity_for_uuid_action(bridge, uuid_action)
-    return _coerce_text(getattr(entity, "entity_id", None))
+async def async_send_audio_tts(
+    bridge: Any, control: LoxoneControl, message: Any, volume: Any = None
+) -> dict[str, Any]:
+    """Speak native text on the selected audio zone or its group members."""
+    text = _coerce_text(message)
+    if text is None:
+        raise ServiceValidationError("TTS message cannot be empty.")
+    targets = _audio_zone_targets(bridge, control)
+    if not targets:
+        raise ServiceValidationError("This Central Audio control has no mapped audio zones.")
 
+    endpoints = [(target, _legacy_audio_endpoint(bridge, target)) for target in targets]
+    max_length = (
+        LEGACY_TTS_MAX_LENGTH
+        if any(endpoint is not None for _, endpoint in endpoints)
+        else AUDIO_TTS_MAX_LENGTH
+    )
+    if len(text) > max_length:
+        raise ServiceValidationError(f"Loxone TTS supports at most {max_length} characters here.")
 
-def _dedupe_controls_by_uuid_action(controls: Iterable[Any]) -> tuple[Any, ...]:
-    seen_uuid_actions: set[str] = set()
-    deduped: list[Any] = []
-    for control in controls:
-        uuid_action = _coerce_text(getattr(control, "uuid_action", None))
-        if uuid_action is None or uuid_action in seen_uuid_actions:
-            continue
-        seen_uuid_actions.add(uuid_action)
-        deduped.append(control)
-    return tuple(deduped)
-
-
-def resolve_audio_tts_target_uuid_action(
-    bridge: Any,
-    control: Any,
-    *,
-    media_server: Any | None = None,
-) -> str:
-    matched_media_server = media_server if media_server is not None else resolve_media_server(bridge, control)
-    if matched_media_server is not None:
-        media_server_uuid_action = _coerce_text(getattr(matched_media_server, "uuid_action", None))
-        if media_server_uuid_action is not None:
-            return media_server_uuid_action
-    return str(getattr(control, "uuid_action", ""))
-
-
-def _resolve_linked_audio_zone_refs(
-    bridge: Any,
-    control: Any,
-) -> tuple[tuple[Any, str | None, str | None], ...]:
-    if getattr(control, "type", None) != CENTRAL_AUDIO_ZONE_CONTROL_TYPE:
-        return ()
-
-    raw_controls = getattr(bridge, "controls", None)
-    if raw_controls is None:
-        return ()
-
-    detail_tokens = {
-        token.casefold()
-        for token in _extract_text_tokens(
-            control.details if isinstance(control.details, Mapping) else {}
-        )
-    }
-    linked_refs: list[tuple[Any, str | None, str | None]] = []
-
-    for candidate in raw_controls:
-        if candidate is control:
-            continue
-        if getattr(candidate, "type", None) not in CHILD_AUDIO_ZONE_CONTROL_TYPES:
-            continue
-        if not _is_linked_audio_zone_candidate(control, candidate, detail_tokens):
-            continue
-        linked_refs.append(
-            (
-                candidate,
-                first_matching_state_name(candidate, PLAY_STATE_CANDIDATES),
-                first_matching_state_name(candidate, POWER_STATE_CANDIDATES),
+    selected_volume = _coerce_audio_tts_volume(volume)
+    command = _audio_tts_command(text, selected_volume)
+    responses = {}
+    for target, endpoint in endpoints:
+        if endpoint is not None:
+            effective_volume = selected_volume if selected_volume is not None else audio_tts_volume(bridge, target)
+            responses[target.uuid_action] = await _async_send_music_server_command(
+                endpoint, _audio_tts_command(text, effective_volume)
             )
-        )
+            continue
+        responses[target.uuid_action] = await bridge.async_send_action(target.uuid_action, command)
+    return next(iter(responses.values())) if len(responses) == 1 else {"results": responses}
 
-    return tuple(linked_refs)
 
+def _legacy_audio_endpoint(bridge: Any, control: LoxoneControl) -> URL | None:
+    """Resolve the original Music Server's documented local API for a zone."""
+    if control.type != AUDIO_ZONE_CONTROL_TYPE or control.is_secured:
+        return None
+    server_ref = control.details.get("server")
+    player_id = _coerce_int(control.details.get("playerid"))
+    if not isinstance(server_ref, str) or player_id is None or player_id < 1:
+        return None
 
-def _is_linked_audio_zone_candidate(
-    parent_control: Any,
-    candidate_control: Any,
-    detail_tokens: set[str],
-) -> bool:
-    if getattr(candidate_control, "parent_uuid_action", None) == getattr(
-        parent_control, "uuid_action", None
+    server: LoxoneMediaServer | None = resolve_media_server(bridge, control)
+    if (
+        server is None
+        or server.server_type != MUSIC_SERVER_TYPE
+        or not server.host
+        or normalize_uuid(server.uuid_action) != normalize_uuid(server_ref)
     ):
-        return True
+        return None
 
-    if not detail_tokens:
-        return False
+    try:
+        host = urlsplit(server.host if "://" in server.host else f"//{server.host}")
+        if (
+            not host.hostname
+            or host.scheme not in {"", "http"}
+            or host.username is not None
+            or host.path not in {"", "/"}
+            or host.query
+            or host.fragment
+        ):
+            return None
+        base = URL.build(scheme="http", host=host.hostname, port=host.port or MUSIC_SERVER_PORT)
+    except (ValueError, UnicodeError):
+        return None
+    return base / "audio" / str(player_id)
 
-    candidate_tokens = {
-        token.casefold()
-        for token in (
-            _coerce_text(getattr(candidate_control, "uuid_action", None)),
-            _coerce_text(getattr(candidate_control, "uuid", None)),
+
+async def _async_send_music_server_command(endpoint: URL, command: str) -> dict[str, Any]:
+    url = URL(f"{endpoint}/{command}", encoded=True)
+    try:
+        async with (
+            ClientSession(timeout=ClientTimeout(total=MUSIC_SERVER_TIMEOUT)) as session,
+            session.get(url, allow_redirects=False) as response,
+        ):
+            if response.status != 200:
+                raise HomeAssistantError(f"Loxone Music Server returned HTTP {response.status}.")
+            return {"code": response.status, "control": command, "value": None}
+    except (ClientError, TimeoutError):
+        raise HomeAssistantError("Could not reach the original Loxone Music Server.") from None
+
+
+def _music_server_event_command(kind: str, media_name: str) -> str:
+    if kind == "event_playlist":
+        if media_name in {".", ".."}:
+            raise ServiceValidationError("Choose an event playlist name.")
+        return f"playeventplaylist/{quote(media_name, safe='')}"
+    path = media_name.removeprefix("Event_Sounds/").split("/")
+    if any(part in {"", ".", ".."} or "\\" in part for part in path) or not path[-1].lower().endswith(".mp3"):
+        raise ServiceValidationError("Choose an MP3 path relative to the Music Server's Event_Sounds directory.")
+    return "playeventfile/Event_Sounds/" + "/".join(quote(part, safe="") for part in path)
+
+
+def _resolve_audio_group(
+    controls: list[LoxoneControl], control: LoxoneControl
+) -> tuple[LoxoneControl, ...]:
+    if control.type == CENTRAL_AUDIO_ZONE_CONTROL_TYPE:
+        return _central_audio_group(controls, control)
+
+    matches: list[tuple[LoxoneControl, ...]] = []
+    for central in controls:
+        if central.type != CENTRAL_AUDIO_ZONE_CONTROL_TYPE:
+            continue
+        group = _central_audio_group(controls, central)
+        if control not in group:
+            continue
+        if control.parent_uuid_action == central.uuid_action:
+            return group
+        matches.append(group)
+
+    # Central objects can overlap. HA can represent one group per player.
+    return matches[0] if len(matches) == 1 else ()
+
+
+def _central_audio_group(
+    controls: list[LoxoneControl], central: LoxoneControl
+) -> tuple[LoxoneControl, ...]:
+    members = _audio_group_references(central.details.get("controls"))
+    linked = {
+        control.uuid_action: control
+        for control in controls
+        if control.type in CHILD_AUDIO_ZONE_CONTROL_TYPES
+        and (
+            control.parent_uuid_action == central.uuid_action
+            or normalize_uuid(control.uuid_action) in members
+            or normalize_uuid(control.uuid) in members
         )
-        if token is not None
     }
-    return bool(candidate_tokens & detail_tokens)
+    return (central, *linked.values()) if linked else ()
+
+
+def _linked_player_group(
+    controls: list[LoxoneControl], control: LoxoneControl
+) -> tuple[LoxoneControl, ...]:
+    """Resolve the actual Audio Player group from the documented groupObjects."""
+    if control.type != AUDIO_ZONE_V2_CONTROL_TYPE:
+        return ()
+    linked = _audio_group_references(control.details.get("groupObjects"))
+    if not linked:
+        return ()
+    linked.add(normalize_uuid(control.uuid_action))
+    members = {
+        member.uuid_action: member
+        for member in controls
+        if member.type in CHILD_AUDIO_ZONE_CONTROL_TYPES
+        and (normalize_uuid(member.uuid_action) in linked or normalize_uuid(member.uuid) in linked)
+    }
+    return tuple(members.values()) if len(members) > 1 else ()
+
+
+def _audio_group_references(entries: Any) -> set[str]:
+    if not isinstance(entries, list):
+        return set()
+    return {
+        normalize_uuid(reference)
+        for item in entries
+        if isinstance(item, Mapping) and isinstance(reference := item.get("uuid"), str)
+    }
 
 
 def _first_matching_state_uuid(
@@ -1181,20 +1171,24 @@ def _host_match_keys(value: Any) -> set[str]:
     if not raw:
         return set()
 
-    parsed = urlsplit(raw if "://" in raw else f"//{raw}")
-    hostname = parsed.hostname
+    try:
+        parsed = urlsplit(raw if "://" in raw else f"//{raw}")
+        hostname = parsed.hostname
+        port = parsed.port
+    except ValueError:
+        return set()
     if not hostname:
         return set()
 
     normalized_host = hostname.casefold()
-    if "." not in normalized_host and normalized_host != "localhost" and parsed.port is None:
+    if "." not in normalized_host and normalized_host != "localhost" and port is None:
         try:
             ipaddress.ip_address(normalized_host)
         except ValueError:
             return set()
     keys = {normalized_host}
-    if parsed.port is not None:
-        keys.add(f"{normalized_host}:{parsed.port}")
+    if port is not None:
+        keys.add(f"{normalized_host}:{port}")
     return keys
 
 
@@ -1265,14 +1259,14 @@ def _coerce_text(value: Any) -> str | None:
 
 def _coerce_int(value: Any) -> int | None:
     numeric = coerce_float(value)
-    if numeric is None:
+    if numeric is None or not math.isfinite(numeric):
         return None
     return int(numeric)
 
 
 def _positive_float(value: Any) -> float | None:
     numeric = coerce_float(value)
-    if numeric is None or numeric < 0:
+    if numeric is None or not math.isfinite(numeric) or numeric < 0:
         return None
     return numeric
 
@@ -1310,8 +1304,8 @@ def _coerce_play_state(value: Any) -> int | None:
         return STATE_PAUSED
     if normalized in {"stop", "stopped", "idle"}:
         return STATE_IDLE
-    if normalized in {"off", "offline"}:
-        return STATE_OFF
+    if normalized in PLAY_STATE_OFF_NAMES:
+        return STATE_UNKNOWN
     return None
 
 
@@ -1336,7 +1330,7 @@ def _media_player_state_from_values(
         return MediaPlayerState.PAUSED
     if play_state == STATE_IDLE:
         return MediaPlayerState.IDLE
-    if play_state == STATE_OFF:
+    if play_state == STATE_UNKNOWN and str(play_state_value).strip().casefold() in PLAY_STATE_OFF_NAMES:
         return MediaPlayerState.OFF
 
     if power is True:
@@ -1356,16 +1350,12 @@ def _control_state_raw(bridge: Any, control: Any, state_name: str | None) -> Any
     return getattr(bridge, "state_value", lambda _uuid: None)(state_uuid)
 
 
-def _coerce_tts_volume(kwargs: Mapping[str, Any]) -> int | None:
+def _tts_volume_argument(kwargs: Mapping[str, Any]) -> Any:
     raw_value = kwargs.get("volume")
-    if raw_value is None:
-        extra = kwargs.get("extra")
-        if isinstance(extra, Mapping):
-            raw_value = extra.get("volume")
-    volume = _coerce_int(raw_value)
-    if volume is None:
-        return None
-    return max(0, min(100, volume))
+    extra = kwargs.get("extra")
+    if raw_value is None and isinstance(extra, Mapping):
+        return extra.get("volume")
+    return raw_value
 
 
 def audio_tts_message(bridge: Any, control_or_uuid_action: Any) -> str:
@@ -1407,17 +1397,14 @@ def _default_audio_tts_volume(bridge: Any, control_or_uuid_action: Any) -> int |
     control = _audio_tts_control(bridge, control_or_uuid_action)
     if control is None:
         return None
+
+    state_name = first_matching_state_name(control, TTS_VOLUME_STATE_CANDIDATES)
+    tts_volume = _coerce_audio_tts_volume(_control_state_raw(bridge, control, state_name))
+    if tts_volume is not None:
+        return tts_volume
+
     state_name = first_matching_state_name(control, VOLUME_STATE_CANDIDATES)
-    numeric = coerce_float(_control_state_raw(bridge, control, state_name))
-    if numeric is None:
-        return None
-    if 0.0 <= numeric <= 1.0:
-        percent = round(numeric * 100)
-    else:
-        percent = round(numeric)
-    if percent <= 0:
-        return None
-    return max(0, min(100, percent))
+    return _coerce_audio_tts_volume(_control_state_raw(bridge, control, state_name)) or None
 
 
 def _audio_tts_store_key(control_or_uuid_action: Any) -> str:
@@ -1459,82 +1446,55 @@ def _coerce_audio_tts_volume(value: Any) -> int | None:
     return max(0, min(100, volume))
 
 
-def encode_audio_tts_text(value: str) -> str:
-    # Keep `/` literal inside a single TTS segment to avoid path splits.
-    return value.replace("/", "%2F")
-
-
 def build_audio_tts_command(message: Any, volume: Any = None) -> str | None:
     text = _coerce_text(message)
     if text is None:
         return None
-
-    encoded_text = encode_audio_tts_text(text)
-    clamped_volume = _coerce_int(volume)
-    if clamped_volume is None:
-        return f"tts/{encoded_text}"
-    return f"tts/{encoded_text}/{max(0, min(100, clamped_volume))}"
+    return _audio_tts_command(text, _coerce_audio_tts_volume(volume))
 
 
-def _deserialize_source_list(value: Any) -> Any | None:
-    if value is None:
-        return None
-    if isinstance(value, (Mapping, list)):
-        return value
-    if not isinstance(value, str):
-        return None
+def _audio_tts_command(text: str, volume: int | None) -> str:
+    command = f"tts/{quote(text, safe='')}"
+    return command if volume is None else f"{command}/{volume}"
 
-    raw = value.strip()
-    if not raw:
-        return None
-    try:
-        return json.loads(raw.replace("'", '"'))
-    except json.JSONDecodeError:
-        return None
+
+def _source_items(raw: Any) -> Iterable[Mapping[str, Any]]:
+    if isinstance(raw, list):
+        yield from (item for item in raw if isinstance(item, Mapping))
+        return
+    if not isinstance(raw, Mapping):
+        return
+
+    groups = raw.get("getroomfavs_result")
+    if isinstance(groups, list):
+        for group in groups:
+            if isinstance(group, Mapping) and isinstance(items := group.get("items"), list):
+                yield from (item for item in items if isinstance(item, Mapping))
+
+    for key in ("items", "sources", "favourites", "favorites", "zoneFavorites"):
+        items = raw.get(key)
+        if isinstance(items, list):
+            yield from (item for item in items if isinstance(item, Mapping))
 
 
 def _extract_source_slots(raw: Any) -> dict[int, str]:
-    items: list[dict[str, Any]] = []
-    if isinstance(raw, list):
-        items.extend(item for item in raw if isinstance(item, dict))
-    elif isinstance(raw, Mapping):
-        zone_result = raw.get("getroomfavs_result")
-        if isinstance(zone_result, list):
-            for group in zone_result:
-                if not isinstance(group, Mapping):
-                    continue
-                group_items = group.get("items")
-                if isinstance(group_items, list):
-                    items.extend(item for item in group_items if isinstance(item, dict))
-        direct_items = raw.get("items")
-        if isinstance(direct_items, list):
-            items.extend(item for item in direct_items if isinstance(item, dict))
-        for key in ("sources", "favourites", "favorites", "zoneFavorites"):
-            direct_candidates = raw.get(key)
-            if isinstance(direct_candidates, list):
-                items.extend(item for item in direct_candidates if isinstance(item, dict))
-
     slots: dict[int, str] = {}
     seen_names: set[str] = set()
-    for item in items:
+    for item in _source_items(raw):
         slot = _coerce_int(item.get("slot", item.get("id")))
-        if slot is None:
+        if slot is None or slot in slots or slot < 0:
             continue
         name = _coerce_text(item.get("name", item.get("title")))
         if name is None:
             name = f"Source {slot}"
-        if name in seen_names:
+        if name.casefold() in seen_names:
             name = f"{name} ({slot})"
-        seen_names.add(name)
+        seen_names.add(name.casefold())
         slots[slot] = name
     return slots
 
 
 def _source_slot_for_name(name: str, options: Mapping[int, str]) -> int | None:
-    direct_slot = _coerce_int(name)
-    if direct_slot is not None:
-        return direct_slot
-
     target = name.strip().casefold()
     for slot, label in options.items():
         if label.strip().casefold() == target:
@@ -1542,18 +1502,8 @@ def _source_slot_for_name(name: str, options: Mapping[int, str]) -> int | None:
     return None
 
 
-def _repeat_mode_to_ha_value(value: int | None) -> str | None:
-    if value is None:
-        return None
-    if value <= 0:
-        return REPEAT_OFF
-    # Current Loxone docs define: 1=list/all, 3=track/one.
-    # Keep `2` as an all/list compatibility alias for older payload variants.
-    if value in {1, 2}:
-        return REPEAT_ALL
-    if value == 3:
-        return REPEAT_ONE
-    return REPEAT_ALL
+def _repeat_mode_to_ha_value(value: int | None) -> RepeatMode | None:
+    return {0: RepeatMode.OFF, 1: RepeatMode.ALL, 3: RepeatMode.ONE}.get(value)
 
 
 def _ha_repeat_to_repeat_mode(value: str) -> int | None:

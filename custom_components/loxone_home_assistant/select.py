@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import json
-import re
 from collections.abc import Mapping
 from datetime import datetime, timezone
 from typing import Any
@@ -17,10 +15,9 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from .const import (
     CONF_ENABLE_LIGHT_MOOD_SELECT,
     DEFAULT_ENABLE_LIGHT_MOOD_SELECT,
-    DOMAIN,
     RADIO_SELECT_CONTROL_TYPES,
 )
-from .entity import LoxoneEntity, control_entity_unique_id
+from .entity import LoxoneEntity, control_entity_unique_id, unique_option_labels
 from .intercom import is_intercom_control
 from .intercom_media import (
     IntercomHistoryEntry,
@@ -28,13 +25,18 @@ from .intercom_media import (
     set_intercom_selected_history_timestamp,
     supports_intercom_history,
 )
-from .light import CONTROLLER_TYPES
+from .light import (
+    active_light_effect_id,
+    light_active_effect_states,
+    light_effect_command,
+    light_effect_maps,
+    light_effect_state_name,
+    light_effects,
+)
 from .models import LoxoneControl
 from .options import option_enabled
 from .runtime import entry_bridge
 
-OFF_MOOD_IDS = {0, 778}
-NON_DIGIT_RE = re.compile(r"[^0-9,.-]+")
 INTERCOM_HISTORY_SELECT_SUFFIX = "history_photo"
 INTERCOM_HISTORY_SELECT_LIVE_OPTION = "Live"
 
@@ -42,7 +44,7 @@ INTERCOM_HISTORY_SELECT_LIVE_OPTION = "Live"
 async def async_setup_entry(
     hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
 ) -> None:
-    bridge = entry_bridge(hass, entry)
+    bridge = entry_bridge(entry)
     entry_data = getattr(entry, "data", {}) or {}
     mood_select_enabled = option_enabled(
         entry.options.get(
@@ -57,7 +59,8 @@ async def async_setup_entry(
         controls = [
             control
             for control in bridge.controls
-            if control.type in CONTROLLER_TYPES and _extract_moods(control)
+            if (state_name := light_effect_state_name(control)) is not None
+            and (control.state_uuid(state_name) or light_effects(bridge, control))
         ]
 
     radio_controls = [
@@ -74,25 +77,18 @@ async def async_setup_entry(
     entities = [LoxoneMoodSelectEntity(bridge, control) for control in controls]
     entities.extend(LoxoneRadioOutputSelectEntity(bridge, control) for control in radio_controls)
     entities.extend(LoxoneIntercomHistorySelectEntity(bridge, control) for control in intercom_controls)
+    for control in bridge.controls:
+        if (
+            control.type != "Ventilation"
+            or control.is_secured
+            or not control.state_uuid("activeTimerProfile")
+        ):
+            continue
+        profiles = _ventilation_profiles(control)
+        if profiles:
+            entities.append(LoxoneVentilationTimerSelect(bridge, control, profiles))
     _cleanup_stale_select_entities(
-        hass,
-        entry,
-        {
-            control_entity_unique_id(bridge.serial, control.uuid_action, "mood")
-            for control in controls
-        }
-        | {
-            control_entity_unique_id(bridge.serial, control.uuid_action, "radio")
-            for control in radio_controls
-        }
-        | {
-            control_entity_unique_id(
-                bridge.serial,
-                control.uuid_action,
-                INTERCOM_HISTORY_SELECT_SUFFIX,
-            )
-            for control in intercom_controls
-        },
+        hass, entry, {key for entity in entities if (key := entity.unique_id) is not None}
     )
     async_add_entities(entities)
 
@@ -104,35 +100,38 @@ class LoxoneMoodSelectEntity(LoxoneEntity, SelectEntity):
 
     def __init__(self, bridge, control: LoxoneControl) -> None:
         super().__init__(bridge, control, "Mood")
-        moods = _extract_moods(control)
-        (
-            self._attr_options,
-            self._option_to_mood_id,
-            self._mood_id_to_option,
-        ) = _build_option_maps(moods)
+
+    def _options(self) -> tuple[list[str], dict[str, int], dict[int, str]]:
+        return light_effect_maps(self.bridge, self.control, include_off=True)
+
+    @property
+    def options(self) -> list[str]:
+        return self._options()[0]
+
+    def _active_mood_id(self) -> int | None:
+        return active_light_effect_id(
+            self.first_state_value(*light_active_effect_states(self.control))
+        )
 
     @property
     def current_option(self) -> str | None:
-        mood_id = _extract_active_mood_id(
-            self.first_state_value("activeMoods", "moodList", "active")
-        )
-        if mood_id is None:
-            return None
-        return self._mood_id_to_option.get(mood_id)
+        mood_id = self._active_mood_id()
+        return self._options()[2].get(mood_id) if mood_id is not None else None
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         attrs = super().extra_state_attributes
-        active_mood_id = _extract_active_mood_id(
-            self.first_state_value("activeMoods", "moodList", "active")
-        )
+        active_mood_id = self._active_mood_id()
         if active_mood_id is not None:
             attrs["active_mood_id"] = active_mood_id
         return attrs
 
     async def async_select_option(self, option: str) -> None:
-        mood_id = self._option_to_mood_id[option]
-        await self.bridge.async_send_action(self.control.uuid_action, f"changeTo/{mood_id}")
+        mood_id = self._options()[1].get(option)
+        if mood_id is not None:
+            await self.bridge.async_send_action(
+                self.control.uuid_action, light_effect_command(self.control, mood_id)
+            )
 
 
 class LoxoneRadioOutputSelectEntity(LoxoneEntity, SelectEntity):
@@ -142,26 +141,25 @@ class LoxoneRadioOutputSelectEntity(LoxoneEntity, SelectEntity):
 
     def __init__(self, bridge, control: LoxoneControl) -> None:
         super().__init__(bridge, control, "Output")
-        outputs = _extract_radio_outputs(control)
-        self._option_to_output_id = {label: output_id for output_id, label in outputs}
-        self._output_id_to_option = {output_id: label for output_id, label in outputs}
-        self._attr_options = [label for _, label in outputs]
+        self._output_id_to_option = unique_option_labels(_extract_radio_outputs(control))
+        self._option_to_output_id = {
+            label: output_id for output_id, label in self._output_id_to_option.items()
+        }
+        self._attr_options = list(self._option_to_output_id)
 
     @property
     def current_option(self) -> str | None:
         output_id = _coerce_int(self.first_state_value("activeOutput", "output", "value"))
         if output_id is None:
             return None
-        return self._output_id_to_option.get(output_id, f"Output {output_id}")
+        return self._output_id_to_option.get(output_id)
 
     async def async_select_option(self, option: str) -> None:
         output_id = self._option_to_output_id.get(option)
         if output_id is None:
             return
-        if output_id == 0:
-            await self.bridge.async_send_action(self.control.uuid_action, "reset")
-            return
-        await self.bridge.async_send_action(self.control.uuid_action, str(output_id))
+        command = "reset" if output_id == 0 else str(output_id)
+        await self.bridge.async_send_action(self.control.uuid_action, command)
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
@@ -170,6 +168,31 @@ class LoxoneRadioOutputSelectEntity(LoxoneEntity, SelectEntity):
         if output_id is not None:
             attrs["active_output_id"] = output_id
         return attrs
+
+
+class LoxoneVentilationTimerSelect(LoxoneEntity, SelectEntity):
+    """Start a configured ventilation timer or return to automatic control."""
+
+    def __init__(
+        self, bridge, control: LoxoneControl, profiles: dict[int, tuple[str, str]]
+    ) -> None:
+        super().__init__(bridge, control, "Ventilation Profile")
+        self._labels = unique_option_labels(
+            [(-2, "Automatic"), *((idx, name) for idx, (name, _) in profiles.items())]
+        )
+        self._commands = {self._labels[-2]: "setTimer/0"}
+        self._commands.update(
+            {self._labels[idx]: command for idx, (_, command) in profiles.items()}
+        )
+        self._attr_options = list(self._commands)
+
+    @property
+    def current_option(self) -> str | None:
+        profile_id = _coerce_int(self.state_value("activeTimerProfile"))
+        return None if profile_id is None else self._labels.get(profile_id)
+
+    async def async_select_option(self, option: str) -> None:
+        await self.bridge.async_send_action(self.control.uuid_action, self._commands[option])
 
 
 class LoxoneIntercomHistorySelectEntity(LoxoneEntity, SelectEntity):
@@ -266,63 +289,53 @@ class LoxoneIntercomHistorySelectEntity(LoxoneEntity, SelectEntity):
         )
 
 
-def _extract_moods(control: LoxoneControl) -> list[tuple[int, str]]:
-    raw_moods: Any = control.details.get("moodList")
-    if isinstance(raw_moods, str):
-        raw = raw_moods.strip()
-        if not raw:
-            return []
-        try:
-            raw_moods = json.loads(raw.replace("'", '"'))
-        except json.JSONDecodeError:
-            return []
-
-    normalized_items: list[Any]
-    if isinstance(raw_moods, list):
-        normalized_items = raw_moods
-    elif isinstance(raw_moods, Mapping):
-        normalized_items = []
-        for raw_key, raw_value in raw_moods.items():
-            if isinstance(raw_value, Mapping):
-                normalized_items.append(raw_value)
-                continue
-            normalized_items.append({"id": raw_key, "name": raw_value})
-    else:
-        return []
-
-    moods: list[tuple[int, str]] = []
-    for item in normalized_items:
-        if not isinstance(item, Mapping):
-            continue
-        mood_id = _coerce_mood_id(
-            item.get("id", item.get("moodId", item.get("value")))
-        )
-        if mood_id is None:
-            continue
-        name = str(item.get("name") or item.get("title") or "").strip()
-        if not name:
-            name = f"Mood {mood_id}"
-        moods.append((mood_id, name))
-    return moods
-
-
 def _extract_radio_outputs(control: LoxoneControl) -> list[tuple[int, str]]:
     raw_outputs = control.details.get("outputs")
     if not isinstance(raw_outputs, Mapping):
         return []
 
     outputs: list[tuple[int, str]] = []
+    all_off = control.details.get("allOff")
+    if isinstance(all_off, str) and all_off.strip():
+        outputs.append((0, all_off.strip()))
     for output_id_raw, output_name_raw in raw_outputs.items():
         output_id = _coerce_int(output_id_raw)
         if output_id is None:
             continue
-        output_name = str(output_name_raw).strip()
+        output_name = output_name_raw.strip() if isinstance(output_name_raw, str) else ""
         if not output_name:
             output_name = f"Output {output_id}"
         outputs.append((output_id, output_name))
 
     outputs.sort(key=lambda item: item[0])
     return outputs
+
+
+def _ventilation_profiles(control: LoxoneControl) -> dict[int, tuple[str, str]]:
+    timer_profiles = control.details.get("timerProfiles")
+    if not isinstance(timer_profiles, list):
+        return {}
+
+    profiles: dict[int, tuple[str, str]] = {}
+    for index, profile in enumerate(timer_profiles):
+        if not isinstance(profile, Mapping):
+            continue
+        speed_detail = profile.get("speed")
+        speed = _coerce_int(speed_detail.get("value")) if isinstance(speed_detail, Mapping) else None
+        interval = _coerce_int(profile.get("interval"))
+        mode = _coerce_int(profile.get("defaultMode"))
+        if (
+            interval is None
+            or interval <= 0
+            or speed is None
+            or not 0 <= speed <= 100
+            or mode is None
+        ):
+            continue
+        name = profile.get("name")
+        label = name.strip() if isinstance(name, str) and name.strip() else f"Timer {index + 1}"
+        profiles[index] = label, f"setTimer/{interval}/{speed}/{mode}/{index}"
+    return profiles
 
 
 def _build_intercom_history_options(
@@ -355,125 +368,14 @@ def _intercom_event_option_label(event: IntercomHistoryEntry, index: int) -> str
     return f"Photo {index}"
 
 
-def _build_option_maps(
-    moods: list[tuple[int, str]],
-) -> tuple[list[str], dict[str, int], dict[int, str]]:
-    options: list[str] = []
-    option_to_mood_id: dict[str, int] = {}
-    mood_id_to_option: dict[int, str] = {}
-    seen_labels: set[str] = set()
-
-    for mood_id, mood_name in moods:
-        option = mood_name
-        if option in seen_labels:
-            option = f"{mood_name} ({mood_id})"
-        seen_labels.add(option)
-        options.append(option)
-        option_to_mood_id[option] = mood_id
-        mood_id_to_option[mood_id] = option
-
-    if 0 not in mood_id_to_option and "Off" not in option_to_mood_id:
-        options.insert(0, "Off")
-        option_to_mood_id["Off"] = 0
-        mood_id_to_option[0] = "Off"
-
-    return options, option_to_mood_id, mood_id_to_option
-
-
-def _extract_active_mood_id(value: Any) -> int | None:
-    if value is None:
-        return None
-
-    if isinstance(value, bool):
-        return 0 if value is False else None
-
-    if isinstance(value, (int, float)):
-        return int(value)
-
-    if isinstance(value, Mapping):
-        return _coerce_mood_id(value.get("id", value.get("moodId")))
-
-    if isinstance(value, list):
-        mood_ids: list[int] = []
-        for item in value:
-            mood_id = _coerce_mood_id(item)
-            if mood_id is not None:
-                mood_ids.append(mood_id)
-                continue
-            nested = _extract_active_mood_id(item)
-            if nested is not None:
-                mood_ids.append(nested)
-        if not mood_ids:
-            return None
-        for mood_id in mood_ids:
-            if mood_id not in OFF_MOOD_IDS:
-                return mood_id
-        return mood_ids[0]
-
-    if isinstance(value, str):
-        raw = value.strip()
-        if raw in {"", "[]"}:
-            return None
-        if raw == "0":
-            return 0
-
-        try:
-            parsed = json.loads(raw.replace("'", '"'))
-        except json.JSONDecodeError:
-            parsed = None
-
-        if parsed is not None:
-            return _extract_active_mood_id(parsed)
-
-        numbers_only = NON_DIGIT_RE.sub("", raw).strip(",")
-        if not numbers_only:
-            return None
-        parts = [item for item in numbers_only.split(",") if item]
-        if not parts:
-            return None
-        for item in parts:
-            try:
-                mood_id = int(float(item))
-            except ValueError:
-                continue
-            if mood_id not in OFF_MOOD_IDS:
-                return mood_id
-        try:
-            return int(float(parts[0]))
-        except ValueError:
-            return None
-
-    return None
-
-
-def _coerce_mood_id(value: Any) -> int | None:
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, (int, float)):
-        return int(value)
-    if isinstance(value, str):
-        raw = value.strip()
-        if raw and raw.lstrip("-").isdigit():
-            return int(raw)
-    if isinstance(value, Mapping):
-        return _coerce_mood_id(value.get("id", value.get("moodId")))
-    return None
-
-
 def _coerce_int(value: Any) -> int | None:
     if isinstance(value, bool):
         return None
-    if isinstance(value, (int, float)):
-        return int(value)
-    if isinstance(value, str):
-        raw = value.strip()
-        if not raw:
-            return None
-        try:
-            return int(float(raw))
-        except ValueError:
-            return None
-    return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return int(number) if number.is_integer() else None
 
 
 def _cleanup_stale_select_entities(

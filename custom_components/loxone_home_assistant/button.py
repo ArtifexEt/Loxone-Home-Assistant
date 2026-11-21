@@ -12,24 +12,30 @@ from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .bridge import LoxoneConnectionError
-from .const import BUTTON_CONTROL_TYPES, INTERCOM_CONTROL_TYPES, MEDIA_PLAYER_CONTROL_TYPES
-from .entity import LoxoneEntity, miniserver_device_info, normalize_state_name
+from .const import BUTTON_CONTROL_TYPES
+from .entity import (
+    LoxoneEntity,
+    is_audio_tts_control,
+    is_intercom_tts_control,
+    miniserver_device_info,
+    number_value_state_name,
+)
 from .intercom import (
     build_intercom_tts_command,
     intercom_mute_state_name,
     intercom_tts_message,
-    intercom_tts_volume,
     is_intercom_gen2_control,
     resolve_intercom_command,
 )
 from .media_player import (
+    async_send_audio_tts,
     audio_tts_message,
+    audio_tts_target_uuids,
     audio_tts_volume,
-    build_audio_tts_command,
-    resolve_audio_tts_target_uuid_action,
 )
 from .models import LoxoneControl
 from .runtime import entry_bridge
+from .versioning import parse_miniserver_version
 
 INTERCOM_BUTTON_SPECS = (
     ("Answer Call", "intercom_stop_ringing", "answer", None, "mdi:bell-cancel-outline"),
@@ -38,12 +44,24 @@ INTERCOM_GEN2_MUTE_BUTTON_SPECS = (
     ("Mute Microphone", "intercom_mute_doorbell", "mute", ("1",), "mdi:bell-off-outline"),
     ("Unmute Microphone", "intercom_unmute_doorbell", "mute", ("0",), "mdi:bell-outline"),
 )
-INTERCOM_TTS_CONTROL_TYPES_NORMALIZED = {
-    normalize_state_name(value) for value in INTERCOM_CONTROL_TYPES
+
+_CONTROL_ACTIONS = {
+    "Alarm": (("Acknowledge Alarm", "quit", "mdi:bell-check-outline"),),
+    "AlarmChain": (("Acknowledge Alarm", "quit", "mdi:bell-check-outline"),),
+    "Gate": (("Open Partially", "PartiallyOpen", "mdi:gate-open"),),
+    "Jalousie": (("Shade", "shade", "mdi:blinds-horizontal"),),
+    "Radio": (
+        ("Previous Output", "prev", "mdi:skip-previous"),
+        ("Next Output", "next", "mdi:skip-next"),
+    ),
+    "TimedSwitch": (("Pulse", "pulse", "mdi:gesture-tap"),),
+    "UpDownLeftRight": (
+        ("Pulse Up or Right", "PulseUp", "mdi:arrow-up"),
+        ("Pulse Down or Left", "PulseDown", "mdi:arrow-down"),
+    ),
+    "Ventilation": (("Acknowledge Filter Change", "ackFilterChange", "mdi:air-filter"),),
 }
-AUDIO_TTS_CONTROL_TYPES_NORMALIZED = {
-    normalize_state_name(value) for value in MEDIA_PLAYER_CONTROL_TYPES
-}
+_ACTION_MINIMUM_VERSION = {"Gate": (14, 2), "Radio": (13, 3, 1, 10)}
 
 
 def _build_control_buttons(bridge) -> list[ButtonEntity]:
@@ -54,11 +72,26 @@ def _build_control_buttons(bridge) -> list[ButtonEntity]:
     ]
 
 
+def _build_control_action_buttons(bridge) -> list[ButtonEntity]:
+    entities: list[ButtonEntity] = []
+    version = parse_miniserver_version(bridge.software_version) or ()
+    for control in bridge.controls:
+        if control.is_secured or version < _ACTION_MINIMUM_VERSION.get(control.type, ()):
+            continue
+        if control.type == "UpDownLeftRight" and number_value_state_name(control):
+            continue
+        entities.extend(
+            LoxoneControlActionButton(bridge, control, label, command, icon)
+            for label, command, icon in _CONTROL_ACTIONS.get(control.type, ())
+        )
+    return entities
+
+
 def _build_intercom_command_buttons(bridge) -> list[ButtonEntity]:
     entities: list[ButtonEntity] = []
     for control in bridge.controls:
         gen2 = is_intercom_gen2_control(control)
-        if not gen2 and normalize_state_name(control.type) not in INTERCOM_TTS_CONTROL_TYPES_NORMALIZED:
+        if not gen2 and not is_intercom_tts_control(control):
             continue
         specs = (
             INTERCOM_BUTTON_SPECS + INTERCOM_GEN2_MUTE_BUTTON_SPECS
@@ -92,7 +125,7 @@ def _build_intercom_tts_buttons(bridge) -> list[ButtonEntity]:
     return [
         LoxoneIntercomTtsButton(bridge, control)
         for control in bridge.controls
-        if _supports_intercom_tts_controls(control)
+        if is_intercom_tts_control(control)
     ]
 
 
@@ -100,7 +133,7 @@ def _build_audio_tts_buttons(bridge) -> list[ButtonEntity]:
     return [
         LoxoneAudioTtsButton(bridge, control)
         for control in bridge.controls
-        if _supports_audio_tts_controls(control)
+        if is_audio_tts_control(control)
     ]
 
 
@@ -117,9 +150,10 @@ def _build_hub_action_buttons(bridge, entry: ConfigEntry) -> list[ButtonEntity]:
 async def async_setup_entry(
     hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
 ) -> None:
-    bridge = entry_bridge(hass, entry)
+    bridge = entry_bridge(entry)
     entities: list[ButtonEntity] = []
     entities.extend(_build_control_buttons(bridge))
+    entities.extend(_build_control_action_buttons(bridge))
     entities.extend(_build_intercom_command_buttons(bridge))
     entities.extend(_build_intercom_tts_buttons(bridge))
     entities.extend(_build_audio_tts_buttons(bridge))
@@ -132,6 +166,18 @@ class LoxoneButtonEntity(LoxoneEntity, ButtonEntity):
 
     async def async_press(self) -> None:
         await self.bridge.async_send_action(self.control.uuid_action, "pulse")
+
+
+class LoxoneControlActionButton(LoxoneEntity, ButtonEntity):
+    """Run a momentary action documented for a Loxone control."""
+
+    def __init__(self, bridge, control: LoxoneControl, label: str, command: str, icon: str) -> None:
+        super().__init__(bridge, control, label)
+        self._command = command
+        self._attr_icon = icon
+
+    async def async_press(self) -> None:
+        await self.bridge.async_send_action(self.control.uuid_action, self._command)
 
 
 class LoxoneIntercomCommandButton(LoxoneEntity, ButtonEntity):
@@ -181,15 +227,6 @@ class LoxoneIntercomTtsButton(LoxoneEntity, ButtonEntity):
             return
         await self.bridge.async_send_action(self.control.uuid_action, command)
 
-    @property
-    def extra_state_attributes(self) -> dict[str, Any]:
-        attrs = super().extra_state_attributes
-        attrs["intercom_tts_volume"] = intercom_tts_volume(
-            self.bridge,
-            self.control.uuid_action,
-        )
-        return attrs
-
 
 class LoxoneAudioTtsButton(LoxoneEntity, ButtonEntity):
     """Action button sending configured TTS message to AudioZone targets."""
@@ -200,16 +237,12 @@ class LoxoneAudioTtsButton(LoxoneEntity, ButtonEntity):
         super().__init__(bridge, control, "Send TTS")
 
     async def async_press(self) -> None:
-        message = audio_tts_message(self.bridge, self.control)
-        volume = audio_tts_volume(self.bridge, self.control)
-        command = build_audio_tts_command(message, volume)
-        if command is None:
-            return
-        target_uuid_action = resolve_audio_tts_target_uuid_action(
+        await async_send_audio_tts(
             self.bridge,
             self.control,
+            audio_tts_message(self.bridge, self.control),
+            audio_tts_volume(self.bridge, self.control),
         )
-        await self.bridge.async_send_action(target_uuid_action, command)
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
@@ -222,10 +255,11 @@ class LoxoneAudioTtsButton(LoxoneEntity, ButtonEntity):
             self.bridge,
             self.control,
         )
-        attrs["audio_tts_target_uuid_action"] = resolve_audio_tts_target_uuid_action(
-            self.bridge,
-            self.control,
-        )
+        targets = audio_tts_target_uuids(self.bridge, self.control)
+        if len(targets) == 1:
+            attrs["audio_tts_target_uuid_action"] = targets[0]
+        elif targets:
+            attrs["audio_tts_target_uuid_actions"] = list(targets)
         return attrs
 
 
@@ -291,11 +325,3 @@ class LoxoneHubRefreshSystemStatsButton(LoxoneHubActionButton):
 
     async def async_press(self) -> None:
         await self.bridge.async_refresh_system_stats(force=True)
-
-
-def _supports_intercom_tts_controls(control: LoxoneControl) -> bool:
-    return normalize_state_name(control.type) in INTERCOM_TTS_CONTROL_TYPES_NORMALIZED
-
-
-def _supports_audio_tts_controls(control: LoxoneControl) -> bool:
-    return normalize_state_name(control.type) in AUDIO_TTS_CONTROL_TYPES_NORMALIZED

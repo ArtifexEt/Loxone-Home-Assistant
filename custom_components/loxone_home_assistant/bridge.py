@@ -11,18 +11,23 @@ import json
 import logging
 import re
 import ssl
-import sys
-from time import monotonic
 import uuid
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
+from time import monotonic
 from typing import Any
 from urllib.parse import quote, urlsplit
 
 from aiohttp import ClientError, ClientSession, WSMessage, WSMsgType
 from homeassistant.components.network import async_get_adapters
-from homeassistant.const import CONF_HOST, CONF_PASSWORD, CONF_PORT, CONF_USERNAME, CONF_VERIFY_SSL
+from homeassistant.const import (
+    CONF_HOST,
+    CONF_PASSWORD,
+    CONF_PORT,
+    CONF_USERNAME,
+    CONF_VERIFY_SSL,
+)
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
@@ -38,9 +43,8 @@ from .const import (
     CONF_INTERCOM_PASSWORD,
     CONF_INTERCOM_USERNAME,
     CONF_LOXAPP_VERSION,
-    CONF_SCAN_TIMEOUT,
-    CONF_SERVER_MODEL,
     CONF_SERIAL,
+    CONF_SERVER_MODEL,
     CONF_SOFTWARE_VERSION,
     CONF_TOKEN,
     CONF_TOKEN_VALID_UNTIL,
@@ -77,18 +81,6 @@ from .versioning import (
 )
 
 _LOGGER = logging.getLogger(__name__)
-
-try:  # Python 3.11+
-    from datetime import UTC
-except ImportError:  # Python <=3.10
-    UTC = timezone.utc
-
-if sys.version_info >= (3, 10):
-    def slotted_dataclass(cls):
-        return dataclass(slots=True)(cls)
-else:
-    def slotted_dataclass(cls):
-        return dataclass(cls)
 
 PROBE_PATH = "/jdev/cfg/apiKey"
 LEGACY_PROBE_TIMEOUT = 2
@@ -192,6 +184,9 @@ SYSTEM_STATS_STATE_PREFIX = "sysdiag-"
 SYSTEM_STATS_REFRESH_SECONDS = 30
 SYSTEM_STATS_MIN_REFRESH_SECONDS = 5
 STRUCTURE_CHECK_SECONDS = 300
+STRUCTURE_VERSION_COMMAND = "jdev/sps/LoxAPPversion3"
+OPTIONAL_POLL_COMMANDS = frozenset((*SYSTEM_STATS_COMMANDS.values(), STRUCTURE_VERSION_COMMAND))
+OPTIONAL_POLL_RETRY_SECONDS = 900
 
 
 class LoxoneError(Exception):
@@ -218,7 +213,7 @@ class LoxoneVersionUnsupportedError(LoxoneUnsupportedError):
     """Raised when Miniserver software is outside supported API range."""
 
 
-@slotted_dataclass
+@dataclass(slots=True)
 class DiscoveryResult:
     """One discovered Miniserver candidate."""
 
@@ -227,14 +222,6 @@ class DiscoveryResult:
     use_tls: bool
     label: str
     server_model: str = DEFAULT_SERVER_MODEL
-
-
-@slotted_dataclass
-class DiscoverySummary:
-    """Discovery result set."""
-
-    devices: list[DiscoveryResult]
-    legacy_found: bool = False
 
 
 class LoxoneBridge:
@@ -316,6 +303,7 @@ class LoxoneBridge:
         self._keepalive_waiter: asyncio.Future[bool] | None = None
         self._system_stats_lock = asyncio.Lock()
         self._system_stats_last_refresh = 0.0
+        self._poll_retry_at: dict[str, float] = {}
         self._closing = False
         self._unavailable_logged = False
 
@@ -375,11 +363,6 @@ class LoxoneBridge:
             if self.structure
             else {}
         )
-
-    @property
-    def operating_modes(self) -> dict[str, str]:
-        """Return parsed global operating mode labels keyed by mode id."""
-        return self.structure.operating_modes if self.structure else {}
 
     @property
     def loxone_state_map(self) -> dict[str, Any]:
@@ -489,12 +472,13 @@ class LoxoneBridge:
 
     async def async_send_action(self, uuid_action: str, command: str) -> dict[str, Any]:
         """Send a control command through the authenticated websocket."""
-        encoded_uuid = quote(uuid_action, safe="-")
+        # Subcontrols can share the parent's UUID followed by a path segment.
+        encoded_uuid = quote(uuid_action, safe="/-")
         encoded_command = quote(command, safe="/(),:%._-")
-        path = f"jdev/sps/io/{encoded_uuid}/{encoded_command}"
-        if command == "securedDetails" and not self.use_tls:
-            return await self._send_loxone_command(path, encrypt_response=True)
-        return await self._send_loxone_command(path)
+        return await self._send_loxone_command(
+            f"jdev/sps/io/{encoded_uuid}/{encoded_command}",
+            encrypt_response=command == "securedDetails" and not self.use_tls,
+        )
 
     async def async_send_raw_command(self, command: str) -> dict[str, Any]:
         """Send a raw command through the authenticated websocket."""
@@ -507,17 +491,6 @@ class LoxoneBridge:
         ensure_connected: bool = True,
     ) -> dict[str, Any]:
         """Fetch and cache diagnostics from `dev/sys/*` commands."""
-        now = monotonic()
-        if (
-            not force
-            and self._system_stats_last_refresh
-            and now - self._system_stats_last_refresh < SYSTEM_STATS_MIN_REFRESH_SECONDS
-        ):
-            return {
-                key: self.system_stat_value(key)
-                for key in SYSTEM_STATS_COMMANDS
-            }
-
         async with self._system_stats_lock:
             now = monotonic()
             if (
@@ -530,8 +503,11 @@ class LoxoneBridge:
                     for key in SYSTEM_STATS_COMMANDS
                 }
 
+            self._system_stats_last_refresh = now
             changed: dict[str, Any] = {}
             for metric_key, command in SYSTEM_STATS_COMMANDS.items():
+                if not force and now < self._poll_retry_at.get(command, 0):
+                    continue
                 try:
                     response = await self._send_loxone_command(
                         command,
@@ -545,9 +521,9 @@ class LoxoneBridge:
                         err,
                     )
                     continue
+                self._poll_retry_at.pop(command, None)
                 changed[self.system_stat_state_uuid(metric_key)] = response.get("value")
 
-            self._system_stats_last_refresh = monotonic()
             if changed:
                 self._merge_changed_states(changed)
             return {
@@ -561,12 +537,11 @@ class LoxoneBridge:
         async with self._connect_lock:
             if self._closing:
                 raise LoxoneConnectionError("The Loxone bridge is shutting down.")
-            if self._ws is not None and not self._ws.closed:
-                if load_structure and self.structure is None:
-                    await self._load_structure()
+            if self.available and self._ws is not None and not self._ws.closed:
                 return
 
             if self._reader_task is not None:
+                self._mark_unavailable()
                 await self._cleanup_connection(cancel_reconnect=False)
             await self._connect(load_structure=load_structure, probe_legacy=probe_legacy)
 
@@ -719,16 +694,12 @@ class LoxoneBridge:
                 ensure_connected=False,
             )
             _LOGGER.debug("Loxone bridge: status updates enabled")
-            await self.async_refresh_system_stats(
-                force=True,
-                ensure_connected=False,
-            )
-            self._ensure_system_stats_task()
         except (Exception, asyncio.CancelledError):
             await self._cleanup_connection(cancel_reconnect=False)
             raise
 
         self._mark_available()
+        self._ensure_system_stats_task()
         self._ensure_structure_task()
 
     async def _exchange_legacy_key(self, session: LegacySession) -> bytes:
@@ -750,12 +721,10 @@ class LoxoneBridge:
         legacy = legacy_challenge is not None
         software_version = parse_miniserver_version(self.software_version)
         if self.token and not self._token_expired() and (not legacy or software_version):
-            token_proof = self.token
-            if legacy:
-                # Loxone's SDK uses SHA256 for token challenges starting in firmware 10.4.
-                algorithm = hashlib.sha256 if software_version >= (10, 4) else hashlib.sha1
-                token_proof = hmac.new(legacy_challenge, self.token.encode(), algorithm).hexdigest()
             try:
+                token_proof = await self._async_token_proof(
+                    self.token, software_version, legacy_challenge
+                )
                 await self._send_loxone_command(
                     f"authwithtoken/{quote(token_proof, safe='')}/{encoded_username}",
                     ensure_connected=False,
@@ -811,6 +780,33 @@ class LoxoneBridge:
         self.token = str(token_raw)
         valid_until = token_value.get("validUntil")
         self.token_valid_until = str(valid_until) if valid_until is not None else None
+
+    async def _async_token_proof(
+        self,
+        token: str,
+        software_version: tuple[int, ...] | None,
+        legacy_challenge: bytes | None,
+    ) -> str:
+        """Use a challenge before 11.2 and for encrypted Gen1 sessions."""
+        if legacy_challenge is None and (
+            software_version is None or software_version >= (11, 2)
+        ):
+            return token
+
+        challenge = legacy_challenge
+        if challenge is None:
+            response = await self._send_loxone_command(
+                "jdev/sys/getkey", ensure_connected=False
+            )
+            try:
+                challenge = bytes.fromhex(response["value"])
+            except (TypeError, ValueError) as err:
+                raise LoxoneConnectionError("The Miniserver returned an invalid token challenge.") from err
+        if not challenge:
+            raise LoxoneConnectionError("The Miniserver returned an empty token challenge.")
+
+        algorithm = hashlib.sha256 if software_version and software_version >= (10, 4) else hashlib.sha1
+        return hmac.new(challenge, token.encode(), algorithm).hexdigest()
 
     async def _async_fetch_structure_payload(self) -> Mapping[str, Any]:
         raw = await self._send_text_command("data/LoxAPP3.json", ensure_connected=False)
@@ -870,12 +866,9 @@ class LoxoneBridge:
     async def _send_loxone_command(
         self, command: str, *, ensure_connected: bool = True, encrypt_response: bool = False
     ) -> dict[str, Any]:
-        if encrypt_response:
-            raw = await self._send_text_command(
-                command, ensure_connected=ensure_connected, encrypt_response=True
-            )
-        else:
-            raw = await self._send_text_command(command, ensure_connected=ensure_connected)
+        raw = await self._send_text_command(
+            command, ensure_connected=ensure_connected, encrypt_response=encrypt_response
+        )
         return _parse_loxone_command_payload(raw, command)
 
     async def _send_text_command(
@@ -883,9 +876,9 @@ class LoxoneBridge:
     ) -> str:
         if ensure_connected:
             await self._ensure_connected(load_structure=False)
+        websocket = self._ws
         async with self._command_lock:
-            websocket = self._ws
-            if websocket is None or websocket.closed:
+            if websocket is None or websocket is not self._ws or websocket.closed:
                 raise LoxoneConnectionError("Websocket is not connected.")
             legacy_session = self._legacy_session
             if not self.use_tls and legacy_session is None and not command.startswith(
@@ -895,33 +888,39 @@ class LoxoneBridge:
             loop = asyncio.get_running_loop()
             self._pending_response = loop.create_future()
             try:
-                wire_command = command
-                if legacy_session is not None:
-                    wire_command = legacy_session.encrypt_command(
-                        command, encrypt_response=encrypt_response
-                    )
+                wire_command = (
+                    legacy_session.encrypt_command(command, encrypt_response=encrypt_response)
+                    if legacy_session is not None
+                    else command
+                )
                 await websocket.send_str(wire_command)
                 response = await asyncio.wait_for(self._pending_response, timeout=20)
-                if encrypt_response and legacy_session is not None:
-                    if response.lstrip().startswith("{"):
-                        _raise_for_ll_error_payload(_deserialize_json(response))
-                        raise LoxoneConnectionError("Expected an encrypted Gen1 response.")
-                    return legacy_session.decrypt_response(response)
-                return response
-            except asyncio.TimeoutError as err:
-                raise LoxoneConnectionError(
-                    "No response for Loxone command."
-                ) from err
+                if not encrypt_response or legacy_session is None:
+                    return response
+                if response.lstrip().startswith("{"):
+                    _raise_for_ll_error_payload(_deserialize_json(response))
+                    raise LoxoneConnectionError("Expected an encrypted Gen1 response.")
+                return legacy_session.decrypt_response(response)
+            except (TimeoutError, asyncio.CancelledError) as err:
+                # Without a request ID the next command could receive this reply.
+                if isinstance(err, TimeoutError) and command in OPTIONAL_POLL_COMMANDS:
+                    self._poll_retry_at[command] = monotonic() + OPTIONAL_POLL_RETRY_SECONDS
+                with contextlib.suppress(ClientError, RuntimeError, OSError):
+                    await websocket.close()
+                if isinstance(err, asyncio.CancelledError):
+                    raise
+                raise LoxoneConnectionError("No response for Loxone command.") from err
             except (ClientError, LegacyCryptoError, OSError) as err:
                 raise LoxoneConnectionError("Could not complete the Miniserver command.") from err
             finally:
                 self._pending_response = None
 
     async def _reader_loop(self) -> None:
-        assert self._ws is not None
+        websocket = self._ws
+        assert websocket is not None
         loop_error: Exception | None = None
         try:
-            async for message in self._ws:
+            async for message in websocket:
                 await self._handle_ws_message(message)
         except asyncio.CancelledError:
             raise
@@ -929,57 +928,56 @@ class LoxoneBridge:
             loop_error = err
             _LOGGER.debug("Loxone websocket reader stopped: %s", err)
 
-        if not self._closing:
-            self._mark_unavailable(
-                reason="websocket reader stopped",
-                err=loop_error,
-            )
+        if self._closing:
+            return
+
+        self._fail_pending_response()
+        async with self._connect_lock:
+            if self._closing or websocket is not self._ws:
+                return
+            self._mark_unavailable(reason="websocket reader stopped", err=loop_error)
             await self._cleanup_connection(cancel_reconnect=False)
             self._schedule_reconnect()
 
     async def _handle_ws_message(self, message: WSMessage) -> None:
         if message.type == WSMsgType.TEXT:
+            self._pending_header = None
             self._deliver_text(message.data)
-            return
-
-        if message.type == WSMsgType.BINARY:
-            await self._handle_binary_message(message.data)
-            return
-
-        if message.type in {WSMsgType.CLOSE, WSMsgType.CLOSED, WSMsgType.ERROR}:
+        elif message.type == WSMsgType.BINARY:
+            self._handle_binary_message(message.data)
+        elif message.type in {WSMsgType.CLOSE, WSMsgType.CLOSED, WSMsgType.ERROR}:
             raise LoxoneConnectionError("Websocket closed by the Miniserver.")
 
-    async def _handle_binary_message(self, data: bytes) -> None:
-        if len(data) == 8 and data[0] == 0x03:
-            header = parse_header(data)
-            # Some Miniservers send state-table headers with the "estimated"
-            # bit set; dropping them causes all runtime states to stay unknown.
-            if header.identifier == KEEPALIVE_RESPONSE:
-                if self._keepalive_waiter and not self._keepalive_waiter.done():
-                    self._keepalive_waiter.set_result(True)
-                return
-            if header.identifier == OUT_OF_SERVICE:
-                raise LoxoneConnectionError("Miniserver reported out-of-service.")
-            self._pending_header = header
+    def _handle_binary_message(self, data: bytes) -> None:
+        pending = self._pending_header
+        # A short payload can begin with the same byte as a header.
+        payload_is_exact = (
+            pending is not None and not pending.estimated and pending.length == len(data)
+        )
+        header = None if payload_is_exact else parse_header(data)
+        if header is not None:
+            self._accept_header(header)
             return
 
-        header = self._pending_header
         self._pending_header = None
-        if header is None:
+        if pending is None:
             return
+        if pending.identifier == VALUE_STATE_TABLE:
+            self._merge_changed_states(parse_value_state_table(data))
+        elif pending.identifier == TEXT_STATE_TABLE:
+            self._merge_changed_states(parse_text_state_table(data))
+        elif pending.identifier in (TEXT_MESSAGE, FILE_MESSAGE):
+            self._deliver_text(data.decode("utf-8", errors="replace"))
 
-        if header.identifier == VALUE_STATE_TABLE:
-            changed = parse_value_state_table(data)
-            self._merge_changed_states(changed)
+    def _accept_header(self, header: PendingHeader) -> None:
+        if header.identifier == OUT_OF_SERVICE:
+            raise LoxoneConnectionError("Miniserver reported out-of-service.")
+        if header.identifier == KEEPALIVE_RESPONSE:
+            if self._keepalive_waiter is not None and not self._keepalive_waiter.done():
+                self._keepalive_waiter.set_result(True)
             return
-
-        if header.identifier == TEXT_STATE_TABLE:
-            changed = parse_text_state_table(data)
-            self._merge_changed_states(changed)
-            return
-
-        if header.identifier in (TEXT_MESSAGE, FILE_MESSAGE):
-            self._deliver_text(data.decode("utf-8", errors="ignore"))
+        # Some firmware sends only an estimated header for a state table.
+        self._pending_header = header
 
     async def _keepalive_loop(self) -> None:
         try:
@@ -1015,16 +1013,9 @@ class LoxoneBridge:
         )
 
     async def _system_stats_loop(self) -> None:
-        try:
-            while True:
-                if self.available:
-                    try:
-                        await self.async_refresh_system_stats(force=True, ensure_connected=False)
-                    except LoxoneError as err:
-                        _LOGGER.debug("System diagnostics refresh failed: %s", err)
-                await asyncio.sleep(SYSTEM_STATS_REFRESH_SECONDS)
-        except asyncio.CancelledError:
-            raise
+        while self.available:
+            await self.async_refresh_system_stats(ensure_connected=False)
+            await asyncio.sleep(SYSTEM_STATS_REFRESH_SECONDS)
 
     def _ensure_structure_task(self) -> None:
         on_change = self._on_structure_change
@@ -1046,12 +1037,13 @@ class LoxoneBridge:
 
     async def _async_structure_has_changed(self) -> bool:
         loaded = _parse_structure_timestamp(self.loxapp_version)
-        if loaded is None:
+        if loaded is None or monotonic() < self._poll_retry_at.get(STRUCTURE_VERSION_COMMAND, 0):
             return False
         try:
             response = await self._send_loxone_command(
-                "jdev/sps/LoxAPPversion3", ensure_connected=False
+                STRUCTURE_VERSION_COMMAND, ensure_connected=False
             )
+            self._poll_retry_at.pop(STRUCTURE_VERSION_COMMAND, None)
             reported = _parse_structure_timestamp(response.get("value"))
             if reported is None or reported == loaded:
                 return False
@@ -1129,35 +1121,31 @@ class LoxoneBridge:
             expires = expires.replace(tzinfo=UTC)
         return expires <= now
 
-    async def _cleanup_connection(
-        self, cancel_reconnect: bool, close_ws: bool = True
-    ) -> None:
+    async def _cleanup_connection(self, *, cancel_reconnect: bool) -> None:
         current_task = asyncio.current_task()
 
-        for task in (
+        tasks = [
             self._keepalive_task,
             self._reader_task,
             self._system_stats_task,
             self._structure_task,
-        ):
-            if task and task is not current_task:
-                task.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await task
-
-        if cancel_reconnect and self._reconnect_task and self._reconnect_task is not current_task:
-            self._reconnect_task.cancel()
+        ]
+        if cancel_reconnect:
+            tasks.append(self._reconnect_task)
+        for task in tasks:
+            if task is None or task is current_task:
+                continue
+            task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
-                await self._reconnect_task
+                await task
 
         if self._keepalive_waiter and not self._keepalive_waiter.done():
             self._keepalive_waiter.cancel()
         self._keepalive_waiter = None
 
-        if self._pending_response and not self._pending_response.done():
-            self._pending_response.set_exception(LoxoneConnectionError("Websocket is not connected."))
+        self._fail_pending_response()
 
-        if close_ws and self._ws is not None and not self._ws.closed:
+        if self._ws is not None and not self._ws.closed:
             with contextlib.suppress(ClientError, RuntimeError):
                 await self._ws.close()
 
@@ -1168,26 +1156,29 @@ class LoxoneBridge:
         for client in private_clients:
             if client is not None:
                 await client.close()
-        if self._reader_task is current_task:
-            self._reader_task = None
-        elif self._reader_task and self._reader_task.done():
-            self._reader_task = None
+        self._reader_task = None
         self._keepalive_task = None
         self._system_stats_task = None
         self._structure_task = None
         if cancel_reconnect:
             self._reconnect_task = None
 
+    def _fail_pending_response(self) -> None:
+        pending = self._pending_response
+        if pending is not None and not pending.done():
+            pending.set_exception(LoxoneConnectionError("Websocket is not connected."))
+
     def _deliver_text(self, payload: str) -> None:
         is_state_update, has_response_code = self._apply_state_update_from_text(payload)
-        if self._pending_response and not self._pending_response.done():
-            if not is_state_update or has_response_code:
-                self._pending_response.set_result(payload)
+        pending = self._pending_response
+        if pending is None or pending.done() or (is_state_update and not has_response_code):
+            return
+        pending.set_result(payload)
 
     def _apply_state_update_from_text(self, payload: str) -> tuple[bool, bool]:
         try:
             root = _ensure_mapping(_deserialize_json(payload).get("LL"))
-        except (json.JSONDecodeError, LoxoneConnectionError):
+        except LoxoneConnectionError:
             return False, False
 
         has_response_code = "Code" in root or "code" in root
@@ -1504,65 +1495,29 @@ def _normalize_state_name(value: str) -> str:
 
 async def async_discover_miniservers(
     hass: HomeAssistant, timeout: int = DEFAULT_SCAN_TIMEOUT
-) -> DiscoverySummary:
+) -> list[DiscoveryResult]:
     """Scan the local network for Loxone Miniservers."""
     candidates = _candidate_hosts(await async_get_adapters(hass))
     if not candidates:
-        return DiscoverySummary()
+        return []
 
     async with ClientSession() as session:
-        devices = await _async_probe_hosts(
-            session,
-            candidates,
-            timeout=timeout,
-            probe_legacy=True,
+        results = await asyncio.gather(
+            *(_probe_host(session, host, timeout) for host in candidates),
+            return_exceptions=True,
         )
-    devices.sort(key=lambda item: item.label.lower())
-    return DiscoverySummary(
-        devices=devices, legacy_found=any(not item.use_tls for item in devices)
+    return sorted(
+        (result for result in results if isinstance(result, DiscoveryResult)),
+        key=lambda item: item.label.casefold(),
     )
-
-
-async def _async_probe_hosts(
-    session: ClientSession,
-    hosts: Iterable[str],
-    timeout: int,
-    *,
-    probe_legacy: bool,
-) -> list[DiscoveryResult]:
-    tasks = [
-        asyncio.create_task(_probe_host(session, host, timeout, probe_legacy=probe_legacy))
-        for host in hosts
-    ]
-
-    try:
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-    finally:
-        pending = [task for task in tasks if not task.done()]
-        for task in pending:
-            task.cancel()
-        if pending:
-            await asyncio.gather(*pending, return_exceptions=True)
-
-    devices: list[DiscoveryResult] = []
-    for result in results:
-        if isinstance(result, DiscoveryResult):
-            devices.append(result)
-
-    return devices
 
 
 async def _probe_host(
     session: ClientSession,
     host: str,
     timeout: int,
-    *,
-    probe_legacy: bool,
 ) -> DiscoveryResult | None:
-    probe_variants = [("https", 443, timeout)]
-    if probe_legacy:
-        probe_variants.append(("http", 80, min(timeout, LEGACY_PROBE_TIMEOUT)))
-
+    probe_variants = (("https", 443, timeout), ("http", 80, min(timeout, LEGACY_PROBE_TIMEOUT)))
     for scheme, port, probe_timeout in probe_variants:
         url = f"{scheme}://{host}:{port}{PROBE_PATH}"
         use_tls = scheme == "https"
@@ -1695,40 +1650,17 @@ def _parse_loxone_command_payload(raw: str, command: str) -> dict[str, Any]:
     try:
         parsed = json.loads(stripped)
     except json.JSONDecodeError:
+        parsed = stripped
+
+    envelope = parsed.get("LL") if isinstance(parsed, Mapping) else None
+    if isinstance(envelope, Mapping):
+        code = _ll_response_code(envelope)
         return {
-            "code": 200,
-            "control": command,
-            "value": deserialize_value(stripped),
+            "code": code,
+            "control": envelope.get("control") or command,
+            "value": deserialize_value(envelope.get("value")),
         }
-
-    if isinstance(parsed, Mapping):
-        root = parsed.get("LL")
-        if isinstance(root, Mapping):
-            code = _coerce_response_code(root.get("Code") or root.get("code") or 0)
-            if code == 401:
-                raise LoxoneAuthenticationError("Authentication failed.")
-            if code and code >= 400:
-                raise LoxoneConnectionError(
-                    f"Loxone command failed with code {code}."
-                )
-            return {
-                "code": code,
-                "control": root.get("control") or command,
-                "value": deserialize_value(root.get("value")),
-            }
-
-        _raise_for_ll_error_payload(parsed)
-        return {
-            "code": 200,
-            "control": command,
-            "value": deserialize_value(parsed),
-        }
-
-    return {
-        "code": 200,
-        "control": command,
-        "value": deserialize_value(parsed),
-    }
+    return {"code": 200, "control": command, "value": deserialize_value(parsed)}
 
 
 def _coerce_response_code(value: Any) -> int:
@@ -1842,19 +1774,17 @@ def _normalize_mac(value: str) -> str | None:
 def _raise_for_ll_error_payload(payload: Mapping[str, Any]) -> None:
     """Raise a typed error when payload uses Loxone's `LL` error envelope."""
     ll = payload.get("LL")
-    if not isinstance(ll, Mapping):
-        return
+    if isinstance(ll, Mapping):
+        _ll_response_code(ll)
 
-    raw_code = ll.get("Code") or ll.get("code")
-    try:
-        code = int(raw_code or 0)
-    except (TypeError, ValueError):
-        code = 0
 
+def _ll_response_code(envelope: Mapping[str, Any]) -> int:
+    code = _coerce_response_code(envelope.get("Code", envelope.get("code")))
     if code == 401:
         raise LoxoneAuthenticationError("Authentication failed.")
-    if code and code >= 400:
+    if code >= 400:
         raise LoxoneConnectionError(f"Loxone command failed with code {code}.")
+    return code
 
 
 def _is_loxapp_structure_payload(payload: Mapping[str, Any]) -> bool:

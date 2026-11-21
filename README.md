@@ -1,435 +1,104 @@
-# Loxone
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="brand/dark_icon.png">
+    <img src="brand/icon.png" alt="" width="88" height="88">
+  </picture>
+</p>
 
-[![CI](https://github.com/ArtifexEt/Loxone-Home-Assistant/actions/workflows/ci.yml/badge.svg)](https://github.com/ArtifexEt/Loxone-Home-Assistant/actions/workflows/ci.yml)
-[![HACS](https://img.shields.io/badge/HACS-Custom-41BDF5?logo=home-assistant-community-store&logoColor=white)](https://hacs.xyz/)
-[![Home Assistant](https://img.shields.io/badge/Home%20Assistant-2025.1%2B-18BCF2?logo=homeassistant&logoColor=white)](https://www.home-assistant.io/)
+<h1 align="center">Loxone for Home Assistant</h1>
 
-Custom HACS integration for local control of Loxone Miniserver Gen 1 and Gen 2, Miniserver Go, and Miniserver Compact from Home Assistant.
+<p align="center">
+  Control your Loxone home from Home Assistant and use Miniserver states and events in your automations.
+</p>
 
-## Quick Start in Home Assistant
+<p align="center">
+  <a href="https://www.home-assistant.io/"><img src="https://img.shields.io/badge/Home%20Assistant-2025.1%2B-18BCF2?logo=homeassistant&amp;logoColor=white" alt="Home Assistant 2025.1 or later"></a>
+  <a href="https://hacs.xyz/"><img src="https://img.shields.io/badge/HACS-Custom-41BDF5?logo=home-assistant-community-store&amp;logoColor=white" alt="HACS custom integration"></a>
+  <a href="https://github.com/ArtifexEt/Loxone-Home-Assistant/actions/workflows/ci.yml"><img src="https://github.com/ArtifexEt/Loxone-Home-Assistant/actions/workflows/ci.yml/badge.svg" alt="Continuous integration status"></a>
+  <a href="https://github.com/ArtifexEt/Loxone-Home-Assistant/releases"><img src="https://img.shields.io/badge/GitHub-Releases-343941?logo=github" alt="GitHub releases"></a>
+</p>
 
-1. Add this repository to HACS:
+<p align="center">
+  <a href="#get-started"><strong>Get started</strong></a> ·
+  <a href="#see-it-in-home-assistant">See it in Home Assistant</a> ·
+  <a href="docs/reference.md">Integration reference</a>
+</p>
 
-[![Open your Home Assistant instance and open this repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=ArtifexEt&repository=Loxone-Home-Assistant&category=integration)
+## See it in Home Assistant
 
-2. Install `Loxone` in HACS and restart Home Assistant.
-3. Start the integration setup flow:
+[![Demo Home Assistant dashboard showing Loxone lighting, blinds, climate, audio and power readings](docs/screenshots/dashboard.webp)](docs/screenshots/dashboard.webp)
 
-[![Open your Home Assistant instance and start setting up this integration.](https://my.home-assistant.io/badges/config_flow_start.svg)](https://my.home-assistant.io/redirect/config_flow_start/?domain=loxone_home_assistant)
+*Both screenshots come from a demo Home Assistant installation with a simulated Miniserver and fictional data.*
 
-If the button does not open the flow directly, use `Settings -> Devices & Services -> Add Integration -> Loxone`.
+| In your home | In Home Assistant |
+| --- | --- |
+| **Lighting and comfort** | Adjust lights and moods, move blinds and windows, and set the temperature or ventilation profile. |
+| **Entrance** | View the Intercom, react to the doorbell or access events, and see the burglar alarm state. |
+| **Audio** | Control playback and volume, browse available sources, and speak a message in a selected Loxone audio zone. |
+| **Energy and activity** | Read meter, solar, presence and device status values for dashboards and automations. |
 
-## What it does
+## Get started
 
-- asks for Loxone username and password during setup
-- scans the local network for a Loxone server (Miniserver, Miniserver Go, Miniserver Compact)
-- connects locally over WebSocket using WSS or Loxone command encryption
-- imports the Loxone structure from `LoxAPP3.json`
-- keeps two-way state sync between Home Assistant and Loxone
-- checks for project changes after reconnecting to the Miniserver and every five minutes while connected,
-  then reloads the integration to discover new controls and update existing entities
-- exposes common Loxone blocks as Home Assistant entities
-- exposes Intercom/IntercomV2 (and DoorController/DoorStation variants) as dedicated doorbell entities:
-  - camera stream + snapshot preview when available
-  - binary sensors for ring, call, proximity, and intercom light state
-  - `Stop Ringing` button for Intercom Gen 1 and Gen 2, plus a Gen 2 doorbell mute switch when Loxone reports the mute state
-  - Gen 2 device status, when provided by the Miniserver
-  - intercom history sensor based on `lastBellEvents` and a photo selector for the camera preview
-  - Home Assistant bus events (`loxone_home_assistant_intercom_event`) for automation triggers
-- exposes access/keypad-style activity events as Home Assistant bus events (`loxone_home_assistant_access_event`) so automations can react to granted/denied attempts (for example wrong PIN)
-- exposes `AudioZone`/`AudioZoneV2`/`CentralAudioZone` as `media_player` with source selection, browseable source library, seek/progress, shuffle/repeat, TTS and event/command passthrough via `play_media`
-- exposes Central Audio group metadata on `media_player` (linked zone names, UUIDs, entity ids when available)
-  - adds optional native audio TTS helpers per zone: `text.<audio>_tts_message`, `number.<audio>_tts_volume`, `button.<audio>_send_tts`
-- exposes `PresenceDetector` as:
-  - `binary_sensor` for presence/motion
-  - `sensor` for illuminance (`lx`) and sound level (`dB`)
-- exposes `Tracker` as event/history sensors for log-like states (with `log_entry_count`, `latest_log_entry`, and `log_entries` attributes on event sensors such as `entries`)
-- exposes Miniserver Web Services diagnostics as hub-level sensors:
-  - `dev/sys/numtasks` (system tasks)
-  - `dev/sys/cpu` (CPU load)
-  - `dev/sys/heap` (memory usage)
-  - `dev/sys/ints` (system interrupts)
-- adds hub-level maintenance actions (for example server restart)
-- adds a hub action button to force diagnostics refresh (`Refresh System Stats`)
-- registers integration services once in integration setup (HA-compatible service lifecycle)
+1. **Add the repository to HACS.** In HACS, open **Custom repositories** and add [this repository](https://github.com/ArtifexEt/Loxone-Home-Assistant) with the **Integration** category.
+2. **Download Loxone and restart Home Assistant.** To pick a prerelease, select **Need a different version?** in the HACS download dialog. [GitHub Releases](https://github.com/ArtifexEt/Loxone-Home-Assistant/releases) · [HACS version selection](https://www.hacs.xyz/docs/use/repositories/dashboard/#downloading-a-specific-version-of-a-repository)
+3. **Add the Loxone integration.** Go to **Settings → Devices & services → Add integration → Loxone**. Search the local network or enter the host and port, then sign in with your Miniserver credentials.
+4. **Add the entities you need.** Use the devices and entities created by the integration to build your dashboard. Your Loxone project determines which controls and features appear.
 
-## Refreshing entities after a Loxone project change
+<p>
+  <a href="https://my.home-assistant.io/redirect/hacs_repository/?owner=ArtifexEt&amp;repository=Loxone-Home-Assistant&amp;category=integration"><img src="https://my.home-assistant.io/badges/hacs_repository.svg" alt="Add Loxone to your Home Assistant Community Store"></a>
+  <a href="https://my.home-assistant.io/redirect/config_flow_start/?domain=loxone_home_assistant"><img src="https://my.home-assistant.io/badges/config_flow_start.svg" alt="Set up Loxone in Home Assistant"></a>
+</p>
 
-Save the updated project to the Miniserver. The integration checks for changes after reconnecting and every five minutes while connected. When the project version changes, Home Assistant re-imports the project.
+### Compatibility
 
-To import it immediately, open the Miniserver device in **Settings → Devices & Services → Loxone → Devices** and press **Refresh entities** under **Configuration**. You can also select **Reload** in the Loxone integration entry's menu.
+| Component | Requirement |
+| --- | --- |
+| Home Assistant | **2025.1 or later**. |
+| Loxone | Miniserver Gen 1, Gen 2, Go or Compact with firmware **10.2 or later**. |
+| Connection | Local discovery or manual host and port. Gen 1 requires a firmware-provided Loxone-signed certificate chain for command encryption. Manual setup also supports Remote Connect. |
 
-Existing entities keep their IDs when a Loxone block is renamed or moved. If you remove a block or recreate it with a new ID, Home Assistant may retain its previous registry entry. Check whether any dashboards or automations reference it before removing it.
+For custom ports, TLS verification, Remote Connect and Loxone 17.3 media authentication, see [compatibility and connection](docs/reference.md#compatibility-and-connection).
 
-## Supported platforms
+## Intercom Gen 2
 
-- `switch`
-- `light`
-- `cover`
-- `climate`
-- `sensor`
-- `binary_sensor`
-- `button`
-- `camera`
-- `number`
-- `select`
-- `text`
-- `media_player`
+A locally paired Intercom Gen 2 can expose a **Live** camera with two-way audio and a doorbell history gallery. [Intercom Gen 2 support](https://github.com/ArtifexEt/Loxone-Home-Assistant/pull/4) · [First prerelease with these features](https://github.com/ArtifexEt/Loxone-Home-Assistant/releases/tag/v0.1.1b31)
 
-## Supported Loxone block types
+- **Live video and talk.** Use Home Assistant **2026.11 or later** with a locally paired Intercom Gen 2 and an HTTPS Miniserver connection. Enable **Two-way audio** in Home Assistant Labs and open Home Assistant over HTTPS to use the microphone in a browser. [Home Assistant camera guide](https://www.home-assistant.io/integrations/camera/#talking-through-a-camera)
+- **Doorbell photos.** Choose **Visit** on the Intercom device to open its history gallery. Use **History photo** to select a snapshot for the **Photo preview** camera. [Intercom media and permissions](docs/reference.md#intercom-media)
+- **Dashboard.** Replace the example entity IDs with your own and register the gallery module to use the history view. [Example dashboard](examples/intercom-dashboard.yaml) · [Gallery setup](docs/reference.md#photo-history-and-dashboard)
 
-- `Switch`
-- `TimedSwitch`
-- `Pushbutton`
-- `Dimmer`
-- `ColorPicker`
-- `ColorPickerV2`
-- `LightsceneRGB`
-- `LightController`
-- `LightControllerV2`
-- `Jalousie`
-- `IRoomController`
-- `IRoomControllerV2`
-- `InfoOnlyAnalog`
-- `InfoOnlyDigital`
-- `PresenceDetector`
-- `PowerSupply`
-- `PowerSupplyV2`
-- `Alarm`
-- `AlarmClock`
-- `CarCharger`
-- `Daytimer`
-- `Fronius`
-- `Gate`
-- `Heatmixer`
-- `Hourcounter`
-- `Intercom`
-- `PoolController`
-- `Radio`
-- `Remote`
-- `Sauna`
-- `Tracker`
-- `UpDownLeftRight` (digital and analog)
-- `ValueSelector`
-- `Webpage`
-- `TextState`
-- `Meter`
-- `Slider`
-- `TextInput`
-- `AudioZone`
-- `AudioZoneV2`
-- `CentralAudioZone`
-- `ACControl` (AC Unit Controller / Air Condition)
-- access/keypad-style controls with `access`/`granted` and `wrongCode`/`denied` states (exposed as binary sensors)
+## Send a spoken announcement
 
-Unsupported block types are still exposed, when possible, as disabled-by-default diagnostic sensors or binary sensors based on their raw states.
+On the audio zone's device page, enter your message, set **TTS volume** and press **Send TTS**.
 
-`Webpage` controls that look like intercom "system schema" pages are exposed as diagnostic-only entities (disabled by default), because they are configuration/visualization links rather than runtime sensor values.
+[![Loxone AudioZoneV2 device in Home Assistant with playback, Bluetooth and text-to-speech controls](docs/screenshots/integration.webp)](docs/screenshots/integration.webp)
 
-## LoxAPP3 section coverage
-
-Based on the current integration parser, the following `LoxAPP3.json` sections are consumed directly:
-
-- `msInfo`
-- `lastModified`
-- `controls` (including nested `subControls`)
-- `rooms`
-- `cats`
-- `mediaServer` (audio server metadata/state fallback for `media_player`)
-
-The following documented sections are currently not mapped to dedicated Home Assistant entities:
-
-- `globalStates`
-- `weatherServer`
-- `times`
-- `caller`
-- `autopilot`
-- `messageCenter`
-
-## Miniserver connection
-
-TLS-capable Miniservers use secure WebSocket (WSS). Miniserver Gen 1 uses Loxone command encryption over WebSocket on its configured HTTP port. Gen 1 firmware must provide a valid Loxone-signed chain through `jdev/sys/getcertificate`. The integration verifies it before establishing the encrypted session. That encryption protects authentication and commands. State events and some responses can travel unencrypted, so keep the Gen 1 connection on a trusted local network.
-
-## Supported Loxone server software versions
-
-- minimum supported software version: `10.2`
-- setup validates the detected server software version during initial configuration
-- unsupported versions are blocked with a dedicated config-flow error
-
-## Installation with HACS
-
-1. Open HACS.
-2. Add this repository as a custom repository of type `Integration`.
-3. Install `Loxone`.
-4. Restart Home Assistant.
-5. Add the integration from `Settings -> Devices & Services`.
-6. In manual host mode you can use either:
-   - local host/IP (for example `192.0.2.10`), or
-   - Remote Connect form based on the Miniserver serial (`02AABBCCDDEE` or `https://connect.loxonecloud.com/02AABBCCDDEE`).
-
-
-## Configuration flow
-
-Choose **Search the local network** to discover a Miniserver or **Enter a host and port** to connect directly. Both paths ask for your Loxone username and password. If discovery finds multiple servers, choose the one to connect.
-
-For a Miniserver Gen 1 with a custom port, select **Enter a host and port**. Enter the hostname or IP in **Host** and the configured HTTP port in **Port**, for example `7778`. Manual setup is available even when a Gen 2 Miniserver is already configured.
-
-Miniserver-served images use the configured Loxone user over HTTPS. For a Gen 1 Miniserver, media requests to the Miniserver are anonymous. Direct Intercom endpoints use dedicated credentials from the integration options or the camera configuration supplied by the Miniserver.
-
-If your Intercom camera stream returns `401 Unauthorized`, open integration `Options` and set dedicated Intercom video credentials (some Intercom models use separate video-module login data).
-
-Loxone 17.3 adds optional email MFA for Miniserver users and groups. Loxone disables username/password web services for accounts covered by that policy. Check the account and group policy when HTTP media requests stop authenticating after an upgrade. [Loxone Config changelog](https://www.loxone.com/enen/support/changelog-config/)
-
-After successful connection and validation, the final step asks for startup options:
-
-- mood selection entities for `LightControllerV2` as a separate `select` helper (enabled by default)
-- individual child light entities inside one `LightController` (enabled by default)
-- optional automatic creation of suggested automations
-- optional Loxone icon pictures for entities (disabled by default)
-
-## Services
-
-### `loxone_home_assistant.send_command`
-
-Send a command to a specific `uuidAction`.
-
-Fields:
-
-- `entry_id` optional when only one Loxone entry exists
-- `uuid_action`
-- `command`
-
-### `loxone_home_assistant.send_raw_command`
-
-Send a raw Loxone command over the authenticated WebSocket session.
-
-Fields:
-
-- `entry_id` optional when only one Loxone entry exists
-- `command`
-
-### `loxone_home_assistant.send_tts`
-
-Send text-to-speech to a specific Loxone control UUID (for example Intercom or AudioZone).
-
-Fields:
-
-- `entry_id` optional when only one Loxone entry exists
-- `uuid_action`
-- `message`
-- `volume` optional 0-100 (used for AudioZone; Intercom TTS ignores this value)
-
-### `loxone_home_assistant.call_intercom_function`
-
-Trigger a child function assigned to an Intercom block (for example `Open`, `Close`, `Open and Pull`).
-
-Fields:
-
-- `entry_id` optional when only one Loxone entry exists
-- `uuid_action` parent Intercom UUID action
-- `function` function selector:
-  - child function name (for example `Open`)
-  - full child `uuidAction`
-  - numeric suffix/index (for example `1`)
-
-### `loxone_home_assistant.call_intercom_command`
-
-Send a validated Intercom Gen2 command directly to the parent Intercom control.
-
-Fields:
-
-- `entry_id` optional when only one Loxone entry exists
-- `uuid_action` parent Intercom UUID action
-- `command` supported command name:
-  - `answer` stops the current ringing (with aliases `accept`, `answercall`, `pickup`)
-  - `playTts` (alias `tts`)
-  - `mute` controls the doorbell sound (`0` unmutes and `1` mutes, with aliases `muteMic`, `unmute`, `unmuteMic`)
-  - `setAnswers` (aliases: `setanswer`, `setallanswer`)
-  - `setvideosettings`, `setallvideosettings`
-  - `setframerate`, `setresolution`
-  - `getnumberbellimages`, `setnumberbellimages`
-- `arguments` optional:
-  - slash-separated string (for example `0/20/1`, `Package box/Call owner`)
-  - or YAML list (recommended when text contains special characters)
-
-Examples:
+To send an announcement from an automation, use the action below and replace the example entity ID with yours.
 
 ```yaml
-service: loxone_home_assistant.call_intercom_command
+action: media_player.play_media
+target:
+  entity_id: media_player.example_living_room_audio
 data:
-  uuid_action: intercom-v2-uuid-action
-  command: answer
+  media_content_type: tts
+  media_content_id: "Dinner is ready."
 ```
 
-```yaml
-service: loxone_home_assistant.call_intercom_command
-data:
-  uuid_action: intercom-v2-uuid-action
-  command: mute
-  arguments: "1"
-```
+Audio Player speech synthesis requires internet access. Setup and examples for audio helpers, volume and the original Music Server's event playback are in the audio reference. [Loxone Audio Player](https://www.loxone.com/enen/kb/audio-player/) · [Audio and announcements](docs/reference.md#audio-and-announcements)
 
-```yaml
-service: loxone_home_assistant.call_intercom_command
-data:
-  uuid_action: intercom-v2-uuid-action
-  command: setanswers
-  arguments: "Leave package at box/Call owner"
-```
+## For integrators
 
-## Intercom UI in Home Assistant
+| Topic | Reference |
+| --- | --- |
+| **What is imported** | [LoxAPP3 sections, supported controls and diagnostic entities](docs/reference.md#entity-mapping) |
+| **Commands and services** | [Control UUIDs, raw commands, TTS and Intercom actions](docs/reference.md#home-assistant-actions) |
+| **Automation triggers** | [Doorbell and access event payloads](docs/reference.md#automation-events) |
+| **Maintenance** | [Troubleshooting and debug logs](docs/reference.md#troubleshooting) · [Tests and development](docs/reference.md#development) |
 
-The [example dashboard](examples/intercom-dashboard.yaml) has live video, a **Talk** tile, a doorbell indicator, a TTS message and play button, and a **History** tab with photo thumbnails. It uses a locally paired Intercom Gen 2 with [live video and two-way audio support](#intercom-live-call-scope).
+Home Assistant reads the Miniserver's project structure and receives status updates over WebSocket. The integration checks for project changes after reconnecting and periodically while online.
 
-1. Register the [gallery JavaScript module](#intercom-gen-2-photo-gallery).
-2. Open the Intercom device in **Settings → Devices & Services → Loxone → Devices** and replace the example entity IDs in the YAML with the corresponding IDs from your installation.
+## Help and support
 
-   | Example ID | Intercom entity |
-   | --- | --- |
-   | `camera.example_intercom_live` | **Live** camera for video and two-way audio |
-   | `camera.example_intercom_video` | **Photo preview** camera for the photo gallery |
-   | `binary_sensor.example_intercom_doorbell` | **Doorbell signal** binary sensor |
-   | `text.example_intercom_tts_message` | **TTS Message** text field |
-   | `button.example_intercom_send_tts` | **Send TTS** button |
+[Open an issue](https://github.com/ArtifexEt/Loxone-Home-Assistant/issues/new/choose) with your Home Assistant version, Miniserver model and firmware, and the affected Loxone block type. Remove credentials, serials and private addresses from logs or screenshots before sharing them.
 
-3. Create an empty dashboard and paste the YAML in its **Raw configuration editor**. To add the views to an existing dashboard, append the two items from the example's `views:` list to its `views:` list.
-4. Select **Talk** on the dashboard to open the camera dialog, then select **Start talking** to use the microphone. [Home Assistant camera documentation](https://www.home-assistant.io/integrations/camera/#talking-through-a-camera)
-
-To pick the language for Intercom entity names and the gallery, open **Settings → Devices & Services → Loxone → Configure → Intercom language**. Select **Polski**, **English**, **Deutsch**, or **Home Assistant** to follow Home Assistant's language settings. Device names come from the Loxone project.
-
-### Send a TTS message
-
-The integration creates native Intercom TTS controls. Put the text field and button on
-an Entities card to send a message from a dashboard:
-
-- `text.<intercom>_tts_message`
-- `button.<intercom>_send_tts`
-
-Enter up to 255 characters in the Home Assistant text field, then press `Send TTS`
-to play the message through the Intercom speaker. Loxone requires Internet access
-for this function. [Loxone Intercom documentation](https://www.loxone.com/enen/kb/intercom-2/)
-
-To send a message with the integration action, copy the parent `uuid_action` from an Intercom entity such as the **Photo preview** camera.
-
-```yaml
-service: loxone_home_assistant.send_tts
-data:
-  uuid_action: intercom-v2-uuid-action
-  message: "Kurier jest pod drzwiami"
-```
-
-### Intercom Gen 2 photo gallery
-
-For a locally paired Intercom Gen 2, the integration reads the native activity archive through the authenticated Miniserver connection.
-
-On the Intercom device page in **Settings → Devices & Services → Loxone → Devices**, select **Visit** to open its photo history. Select a thumbnail to view the full photo, then use **Download photo** if you want to save it.
-
-To place the gallery on a dashboard, add `/loxone_home_assistant/intercom-gallery.js` as a **JavaScript module** in **Settings → Dashboards → Resources**. Enable Advanced Mode in your Home Assistant profile if Resources is hidden. Then create a manual card and set `entity` to the Intercom's **Photo preview** camera.
-
-```yaml
-type: custom:loxone-intercom-gallery
-entity: camera.example_intercom_video
-```
-
-Click or tap a thumbnail to open the full photo. Home Assistant serves the photos to users with read access to that camera. Loxone media URLs and credentials stay inside the integration.
-
-On the device page, select a date in **History photo** to update the **Photo preview** thumbnail. Click **Photo preview** to open the selected photo. Select `Live` to return to the current camera image. This selector also supports legacy controllers that publish `lastBellEvents`.
-
-## Audio TTS UI in Home Assistant
-
-For `AudioZone`, `AudioZoneV2` and `CentralAudioZone`, the integration creates native helpers:
-
-- `text.<audio>_tts_message`
-- `number.<audio>_tts_volume`
-- `button.<audio>_send_tts`
-
-Pressing `Send TTS` uses the same routing as `media_player.play_media(..., media_content_type: tts)`,
-including routing through the matched Loxone media server when applicable.
-
-### Optional MJPEG -> HLS wrapper
-
-If a client/player has trouble with MJPEG, you can wrap MJPEG to HLS locally:
-
-```bash
-python3 scripts/mjpeg_hls_wrapper.py \
-  --input-url "http://intercom.local/mjpg/video.mjpg" \
-  --bind 127.0.0.1 \
-  --port 8899
-```
-
-The script prints an HLS URL (for example `http://127.0.0.1:8899/stream.m3u8`).
-You can use this URL as a browser-friendly stream endpoint.
-
-## Logging and troubleshooting
-
-- integration logger namespace: `custom_components.loxone_home_assistant`
-- connection logs are transition-based:
-  - one info log when connection becomes unavailable
-  - one info log when connection is restored
-- to inspect protocol/entity mapping in detail, enable debug logs in Home Assistant:
-
-```yaml
-logger:
-  logs:
-    custom_components.loxone_home_assistant: debug
-```
-
-## Automation events
-
-The integration fires Home Assistant bus events with type:
-
-- `loxone_home_assistant_intercom_event`
-- `loxone_home_assistant_access_event`
-
-Event payload includes:
-
-- `serial`
-- `uuid_action`
-- `control_name`
-- `control_type`
-- `room`
-- `category`
-- `state_name`
-- `event` (for example `doorbell`, `call`, `proximity`, `light`, `access_denied`, `access_granted`, `access_activity`)
-- `value`
-
-Intercom events are emitted on rising edges only (for example `0 -> 1`).
-Access/keypad events are emitted on rising edges for boolean-like states and on value change for log/text-like states.
-
-## Intercom live call scope
-
-On Home Assistant 2026.11 or later, a locally paired Intercom Gen 2 on an HTTPS Miniserver connection exposes a **Live** camera. It uses authenticated WebRTC for live video and can add audio when you start talking. The integration loads its optional WebRTC runtime on first use.
-
-Enable **Two-way audio** in Home Assistant Labs and open Home Assistant over HTTPS. Open the **Live** camera and select **Start talking** to start a conversation. A dashboard tile for the **Live** camera with the **More info** tap action opens the same dialog. The iOS Companion app on an HTTP Home Assistant connection can send microphone audio in a separate session. The **Photo preview** camera can capture a still from WebRTC when no HTTP snapshot is available. [Home Assistant camera documentation](https://www.home-assistant.io/integrations/camera/#talking-through-a-camera) · [iOS Companion implementation](https://github.com/home-assistant/iOS/blob/2524b83/Sources/App/Cameras/CameraPlayer/WebRTC/WebRTCClient.swift#L460)
-
-The `answer` command stops the bell, and `mute` controls the doorbell mute state. [Loxone Intercom documentation](https://www.loxone.com/enus/kb/intercom-2/) · [Network protocols](https://updatefiles.loxone.com/KnowledgeBase/Online/Common/Documents/Loxone-Required-Ports-Domains.pdf)
-
-## Development notes
-
-- local push updates use `jdev/sps/enablebinstatusupdate`
-- state structure comes from `data/LoxAPP3.json`
-- setup uses Home Assistant config flows and Loxone token authentication over WSS or an encrypted Gen 1 command session
-
-## CI
-
-This repository includes a GitHub Actions workflow in `.github/workflows/ci.yml`.
-It validates the integration by:
-
-- running unit tests against fixtures and protocol samples only
-- installing the pinned Home Assistant runtime
-- checking JSON metadata files
-- importing all integration modules
-- compiling the Python sources
-
-## Secrets safety
-
-- GitHub Actions in this repository do not use real Loxone credentials.
-- Automated tests run on static fixtures and mocked protocol payloads only.
-- Local secret files such as `.env`, `secrets.yaml`, and `local_test_credentials.json` are ignored by git.
-- If you ever want to test against a real Loxone server, use GitHub Actions `Secrets` on a self-hosted runner inside your network. Do not commit credentials into the repository.
-
-## Support
-
-If this project is useful to you, you can support development here:
-
-[![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-Support-FFDD00?logo=buymeacoffee&logoColor=000000)](https://buymeacoffee.com/szymonrybka)
+[![Support development on Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-Support-FFDD00?logo=buymeacoffee&amp;logoColor=000000)](https://buymeacoffee.com/szymonrybka)

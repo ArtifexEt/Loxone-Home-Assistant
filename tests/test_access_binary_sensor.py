@@ -117,16 +117,6 @@ class _FakeBridge:
         return self._values.get(state_uuid)
 
 
-class _FakeConfigEntry:
-    def __init__(self, entry_id: str) -> None:
-        self.entry_id = entry_id
-
-
-class _FakeHass:
-    def __init__(self, entry_id: str, bridge, domain: str) -> None:
-        self.data = {domain: {"bridges": {entry_id: bridge}}}
-
-
 _install_homeassistant_stubs()
 models = load_integration_module("custom_components.loxone_home_assistant.models")
 const = load_integration_module("custom_components.loxone_home_assistant.const")
@@ -159,8 +149,8 @@ class AccessBinarySensorTests(unittest.IsolatedAsyncioTestCase):
                 "state-alarm": 1,
             },
         )
-        entry = _FakeConfigEntry("entry-1")
-        hass = _FakeHass(entry.entry_id, bridge, const.DOMAIN)
+        entry = types.SimpleNamespace(entry_id="entry-1", runtime_data=bridge, options={})
+        hass = types.SimpleNamespace(data={})
         entities = []
 
         await binary_sensor_module.async_setup_entry(
@@ -208,8 +198,8 @@ class AccessBinarySensorTests(unittest.IsolatedAsyncioTestCase):
             },
         )
         bridge = _FakeBridge([control], {"state-granted": 0, "state-denied": 1})
-        entry = _FakeConfigEntry("entry-1")
-        hass = _FakeHass(entry.entry_id, bridge, const.DOMAIN)
+        entry = types.SimpleNamespace(entry_id="entry-1", runtime_data=bridge, options={})
+        hass = types.SimpleNamespace(data={})
         entities = []
 
         await binary_sensor_module.async_setup_entry(
@@ -234,8 +224,8 @@ class AccessBinarySensorTests(unittest.IsolatedAsyncioTestCase):
             states={"granted": "state-granted"},
         )
         bridge = _FakeBridge([control], {"state-granted": 1})
-        entry = _FakeConfigEntry("entry-1")
-        hass = _FakeHass(entry.entry_id, bridge, const.DOMAIN)
+        entry = types.SimpleNamespace(entry_id="entry-1", runtime_data=bridge, options={})
+        hass = types.SimpleNamespace(data={})
         entities = []
 
         await binary_sensor_module.async_setup_entry(
@@ -271,8 +261,8 @@ class AccessBinarySensorTests(unittest.IsolatedAsyncioTestCase):
                 "state-temp-target": 22.0,
             },
         )
-        entry = _FakeConfigEntry("entry-1")
-        hass = _FakeHass(entry.entry_id, bridge, const.DOMAIN)
+        entry = types.SimpleNamespace(entry_id="entry-1", runtime_data=bridge, options={})
+        hass = types.SimpleNamespace(data={})
         entities = []
 
         await binary_sensor_module.async_setup_entry(
@@ -308,8 +298,8 @@ class AccessBinarySensorTests(unittest.IsolatedAsyncioTestCase):
                 "state-temp-target": 21.0,
             },
         )
-        entry = _FakeConfigEntry("entry-1")
-        hass = _FakeHass(entry.entry_id, bridge, const.DOMAIN)
+        entry = types.SimpleNamespace(entry_id="entry-1", runtime_data=bridge, options={})
+        hass = types.SimpleNamespace(data={})
         entities = []
 
         await binary_sensor_module.async_setup_entry(
@@ -345,8 +335,8 @@ class AccessBinarySensorTests(unittest.IsolatedAsyncioTestCase):
                 "state-j-locked": {"locked": 1, "reason": "Visualization lock"},
             },
         )
-        entry = _FakeConfigEntry("entry-1")
-        hass = _FakeHass(entry.entry_id, bridge, const.DOMAIN)
+        entry = types.SimpleNamespace(entry_id="entry-1", runtime_data=bridge, options={})
+        hass = types.SimpleNamespace(data={})
         entities = []
 
         await binary_sensor_module.async_setup_entry(
@@ -361,6 +351,86 @@ class AccessBinarySensorTests(unittest.IsolatedAsyncioTestCase):
             if isinstance(entity, binary_sensor_module.LoxoneControlLockBinaryEntity)
         ]
         self.assertEqual(lock_entities, [])
+
+
+class ProtocolBinarySensorTests(unittest.TestCase):
+    def test_alarm_reads_alarm_level_and_never_armed_or_delay(self) -> None:
+        for kind in ("Alarm", "SmokeAlarm"):
+            with self.subTest(kind=kind):
+                control = LoxoneControl(
+                    uuid="alarm", uuid_action="alarm-action", type=kind, name="Alarm",
+                    states={"armed": "armed", "nextLevelDelayTotal": "delay", "level": "level"},
+                )
+                values = {"armed": 1, "delay": 30}
+                bridge = _FakeBridge([control], values)
+                [entity] = binary_sensor_module._build_control_binary_entities(bridge, control)
+                self.assertEqual(entity._attr_unique_id, "1234567890:alarm-action")
+                self.assertEqual(entity.relevant_state_uuids(), ["level"])
+                self.assertIsNone(entity.is_on)
+                values["level"] = 0
+                self.assertFalse(entity.is_on)
+                values["level"] = 2
+                self.assertTrue(entity.is_on)
+
+    def test_smoke_alarm_only_exposes_configured_causes(self) -> None:
+        control = LoxoneControl(
+            uuid="alarm", uuid_action="alarm-action", type="SmokeAlarm", name="Alarm",
+            states={"level": "level", "alarmCause": "cause"}, details={"availableAlarms": 3},
+        )
+        bridge = _FakeBridge([control], {"level": 2, "cause": 2})
+        entities = binary_sensor_module._build_control_binary_entities(bridge, control)
+        causes = {
+            entity._attr_device_class: entity.is_on
+            for entity in entities
+            if isinstance(entity, binary_sensor_module.LoxoneBitmaskBinaryEntity)
+        }
+        self.assertEqual(causes, {"smoke": False, "moisture": True})
+
+    def test_window_monitor_distinguishes_closed_tilted_and_unknown(self) -> None:
+        control = LoxoneControl(
+            uuid="monitor", uuid_action="monitor-action", type="WindowMonitor", name="Monitor",
+            states={"windowStates": "states"},
+            details={"windows": [
+                {"name": "Bedroom", "uuid": "bedroom"},
+                {"name": "Hall"},
+                {"name": "Dining"},
+            ]},
+        )
+        bridge = _FakeBridge([control], {"states": "9,18,0"})
+        closed, tilted, unknown = binary_sensor_module._build_control_binary_entities(bridge, control)
+        self.assertEqual(closed._attr_unique_id, "1234567890:monitor-action:opening_bedroom")
+        self.assertFalse(closed.is_on)
+        self.assertTrue(closed.extra_state_attributes["locked"])
+        self.assertTrue(tilted.is_on)
+        self.assertTrue(tilted.extra_state_attributes["tilted"])
+        self.assertFalse(tilted.extra_state_attributes["locked"])
+        self.assertIsNone(unknown.is_on)
+
+    def test_presence_reports_occupancy_and_live_lock_reason(self) -> None:
+        control = LoxoneControl(
+            uuid="presence", uuid_action="presence-action", type="PresenceDetector", name="Presence",
+            states={"activeSince": "since", "active": "active", "locked": "locked", "infoText": "info"},
+        )
+        bridge = _FakeBridge([control], {"since": 123456, "locked": 1, "info": "Logic input"})
+        lock, presence = binary_sensor_module._build_control_binary_entities(bridge, control)
+        self.assertIsNone(presence.is_on)
+        self.assertEqual(presence._attr_device_class, "occupancy")
+        self.assertTrue(lock.is_on)
+        self.assertEqual(lock.extra_state_attributes["lock_reason"], "Logic input")
+        self.assertEqual(lock.relevant_state_uuids(), ["locked", "info"])
+
+    def test_nfc_reader_connectivity_uses_only_offline_bit(self) -> None:
+        control = LoxoneControl(
+            uuid="keypad", uuid_action="reader-action", type="NfcCodeTouch", name="Keypad",
+            states={"deviceState": "state"},
+        )
+        values = {"state": 4}
+        bridge = _FakeBridge([control], values)
+        [entity] = binary_sensor_module._build_control_binary_entities(bridge, control)
+        self.assertEqual(entity._attr_device_class, "connectivity")
+        self.assertTrue(entity.is_on)
+        values["state"] = 5
+        self.assertFalse(entity.is_on)
 
 
 if __name__ == "__main__":

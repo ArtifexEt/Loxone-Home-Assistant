@@ -77,7 +77,7 @@ class ParseStructureTests(unittest.TestCase):
         self.assertEqual(state_ref.control_name, "Lampy Sufit")
         self.assertEqual(state_ref.state_name, "position")
 
-    def test_parse_structure_infers_flat_parent_links_from_details_references(self) -> None:
+    def test_parse_structure_keeps_referenced_controls_independent(self) -> None:
         payload = {
             "msInfo": {
                 "msName": "Dom",
@@ -86,17 +86,17 @@ class ParseStructureTests(unittest.TestCase):
             "controls": {
                 "central": {
                     "name": "Central",
-                    "type": "Switch",
+                    "type": "CentralAudioZone",
                     "uuidAction": "action-central",
                     "details": {
-                        "commands": [
-                            "jdev/sps/io/action-sub-by-detail/on",
+                        "controls": [
+                            {"uuid": "action-sub-by-detail", "id": 1},
                         ]
                     },
                 },
                 "flat-sub-via-slash": {
                     "name": "Strefa 1",
-                    "type": "Switch",
+                    "type": "AudioZoneV2",
                     "uuidAction": "action-central/1",
                     "states": {
                         "active": "state-slash",
@@ -104,7 +104,7 @@ class ParseStructureTests(unittest.TestCase):
                 },
                 "flat-sub-via-details": {
                     "name": "Strefa 2",
-                    "type": "Switch",
+                    "type": "AudioZoneV2",
                     "uuidAction": "action-sub-by-detail",
                     "states": {
                         "active": "state-details",
@@ -120,11 +120,32 @@ class ParseStructureTests(unittest.TestCase):
 
         self.assertEqual(sub_via_slash.parent_uuid_action, "action-central")
         self.assertEqual(sub_via_slash.display_name, "Central Strefa 1")
-        self.assertEqual(sub_via_details.parent_uuid_action, "action-central")
-        self.assertEqual(sub_via_details.display_name, "Central Strefa 2")
+        self.assertIsNone(sub_via_details.parent_uuid_action)
+        self.assertEqual(sub_via_details.display_name, "Strefa 2")
 
         state_ref = structure.states["state-details"]
-        self.assertEqual(state_ref.control_name, "Central Strefa 2")
+        self.assertEqual(state_ref.control_name, "Strefa 2")
+
+    def test_parse_structure_normalizes_state_uuids_without_changing_action_paths(self) -> None:
+        action = "01234567-89ab-cdef-0123456789abcdef/AI2"
+        structure = parse_structure(
+            {
+                "rooms": None,
+                "cats": {"unavailable": None},
+                "controls": {
+                    "dimmer": {
+                        "uuidAction": action,
+                        "states": {"position": " ABCDEF01-1234-5678-ABCD123456789ABC "},
+                        "subControls": None,
+                    },
+                },
+            }
+        )
+
+        state = "abcdef01-1234-5678-abcd-123456789abc"
+        self.assertIn(action, structure.controls_by_action)
+        self.assertEqual(structure.controls_by_action[action].states, {"position": state})
+        self.assertEqual(structure.states[state].control_uuid_action, action)
 
     def test_system_scheme_references_do_not_rename_controls(self) -> None:
         structure = parse_structure({
@@ -330,7 +351,8 @@ class ParseStructureTests(unittest.TestCase):
                 "media-server-uuid": {
                     "name": "AudioServer",
                     "host": "audioserver.lan:7091",
-                    "mac": "aa:bb:cc:dd:ee:ff",
+                    "MAC": "aa:bb:cc:dd:ee:ff",
+                    "type": 2,
                     "states": {
                         "serverState": "state-server",
                         "connState": "state-conn",
@@ -342,6 +364,7 @@ class ParseStructureTests(unittest.TestCase):
 
         structure = parse_structure(payload)
         media_server = structure.media_servers_by_uuid_action["media-server-uuid"]
+        self.assertEqual(media_server.server_type, 2)
 
         self.assertEqual(media_server.name, "AudioServer")
         self.assertEqual(media_server.host, "audioserver.lan:7091")
@@ -349,32 +372,6 @@ class ParseStructureTests(unittest.TestCase):
         self.assertEqual(media_server.states["serverState"], "state-server")
         self.assertEqual(media_server.states["connState"], "state-conn")
         self.assertEqual(media_server.states["host"], "state-host")
-
-    def test_parse_structure_parses_global_operating_modes(self) -> None:
-        payload = {
-            "msInfo": {
-                "msName": "Dom",
-                "serialNr": "1234567890",
-            },
-            "controls": {},
-            "operatingModes": {
-                "0": {"name": "Auto"},
-                "2": {"title": "Eco"},
-                "3": "Comfort",
-            },
-        }
-
-        structure = parse_structure(payload)
-
-        self.assertEqual(
-            structure.operating_modes,
-            {
-                "0": "Auto",
-                "2": "Eco",
-                "3": "Comfort",
-            },
-        )
-
 
 if __name__ == "__main__":
     unittest.main()

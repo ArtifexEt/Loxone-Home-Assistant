@@ -116,30 +116,6 @@ def _install_homeassistant_stubs() -> None:
     aiohttp_client.async_get_clientsession = async_get_clientsession
     sys.modules["homeassistant.helpers.aiohttp_client"] = aiohttp_client
 
-    aiohttp = types.ModuleType("aiohttp")
-
-    class ClientError(Exception):
-        pass
-
-    class ClientSession:  # noqa: D401
-        """Minimal ClientSession stub for imports."""
-
-    class WSMessage:  # noqa: D401
-        """Minimal websocket message stub for imports."""
-
-    class WSMsgType:
-        BINARY = 2
-        TEXT = 1
-        CLOSE = 8
-        CLOSED = 257
-        ERROR = 258
-
-    aiohttp.ClientError = ClientError
-    aiohttp.ClientSession = ClientSession
-    aiohttp.WSMessage = WSMessage
-    aiohttp.WSMsgType = WSMsgType
-    sys.modules["aiohttp"] = aiohttp
-
 
 _install_homeassistant_stubs()
 bridge = load_integration_module("custom_components.loxone_home_assistant.bridge")
@@ -247,7 +223,6 @@ class DiscoveryHelpersTests(unittest.IsolatedAsyncioTestCase):
             session,
             "198.51.100.101",
             1,
-            probe_legacy=False,
         )
 
         self.assertIsNotNone(result)
@@ -269,7 +244,6 @@ class DiscoveryHelpersTests(unittest.IsolatedAsyncioTestCase):
             session,
             "198.51.100.101",
             1,
-            probe_legacy=False,
         )
 
         self.assertIsNotNone(result)
@@ -294,7 +268,6 @@ class DiscoveryHelpersTests(unittest.IsolatedAsyncioTestCase):
             session,
             "198.51.100.101",
             1,
-            probe_legacy=True,
         )
 
         self.assertIsNotNone(result)
@@ -322,7 +295,6 @@ class DiscoveryHelpersTests(unittest.IsolatedAsyncioTestCase):
             session,
             "198.51.100.102",
             1,
-            probe_legacy=False,
         )
 
         self.assertIsNotNone(result)
@@ -392,6 +364,30 @@ class BridgeConnectionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(connection.miniserver_tls_fingerprint())
         socket.closed = True
         self.assertIsNone(connection.miniserver_tls_fingerprint())
+
+    async def test_older_tls_firmware_authenticates_with_token_proof(self):
+        connection = self._new_bridge()
+        connection.software_version = "11.1.0.0"
+        connection.token = "fixture-token"
+        challenge = b"\xca\xfe"
+        proof = hmac.new(challenge, b"fixture-token", hashlib.sha256).hexdigest()
+        connection._send_loxone_command = AsyncMock(
+            side_effect=[{"value": challenge.hex()}, {"code": 200}]
+        )
+
+        await connection._authenticate()
+
+        self.assertEqual(
+            connection._send_loxone_command.await_args_list,
+            [
+                call("jdev/sys/getkey", ensure_connected=False),
+                call(
+                    f"authwithtoken/{proof}/loxone-user",
+                    ensure_connected=False,
+                    encrypt_response=False,
+                ),
+            ],
+        )
 
     async def test_manual_setup_refuses_untrusted_legacy_certificate_before_ws(self):
         for metadata in (

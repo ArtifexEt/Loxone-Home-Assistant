@@ -1,4 +1,4 @@
-"""Tests for extended Loxone cover mappings (Gate + UpDownLeftRight)."""
+"""Tests for Loxone cover mappings."""
 
 from __future__ import annotations
 
@@ -39,6 +39,14 @@ def _install_homeassistant_stubs() -> None:
     class CoverEntity:
         pass
 
+    class CoverDeviceClass:
+        BLIND = "blind"
+        CURTAIN = "curtain"
+        GARAGE = "garage"
+        GATE = "gate"
+        SHUTTER = "shutter"
+        WINDOW = "window"
+
     class CoverEntityFeature:
         OPEN = 1
         CLOSE = 2
@@ -50,6 +58,7 @@ def _install_homeassistant_stubs() -> None:
         SET_TILT_POSITION = 128
 
     cover.CoverEntity = CoverEntity
+    cover.CoverDeviceClass = CoverDeviceClass
     cover.CoverEntityFeature = CoverEntityFeature
 
     const = types.ModuleType("homeassistant.const")
@@ -133,13 +142,8 @@ class _FakeBridge:
 
 
 class _FakeConfigEntry:
-    def __init__(self, entry_id: str) -> None:
-        self.entry_id = entry_id
-
-
-class _FakeHass:
-    def __init__(self, entry_id: str, bridge, domain: str) -> None:
-        self.data = {domain: {"bridges": {entry_id: bridge}}}
+    def __init__(self, bridge: _FakeBridge) -> None:
+        self.runtime_data = bridge
 
 
 _install_homeassistant_stubs()
@@ -170,6 +174,24 @@ class CoverPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             bridge.commands,
             [("gate-action", "open"), ("gate-action", "close"), ("gate-action", "stop")],
+        )
+
+    async def test_moving_gate_reverses_direction_on_supported_miniserver(self) -> None:
+        control = LoxoneControl(
+            uuid="gate-uuid", uuid_action="gate-action", name="Garage",
+            type="Gate", details={"animation": 0}, states={"active": "moving"},
+        )
+        values = {"moving": -1}
+        bridge = _FakeBridge([control], values)
+        bridge.software_version = "17.0.0.0"
+        gate = cover_module.LoxoneCoverEntity(bridge, control)
+
+        self.assertEqual(gate.device_class, "garage")
+        await gate.async_open_cover()
+        values["moving"] = 1
+        await gate.async_close_cover()
+        self.assertEqual(
+            bridge.commands, [("gate-action", "forceOpen"), ("gate-action", "forceClose")]
         )
 
     async def test_updownleftright_digital_maps_to_cover_commands(self) -> None:
@@ -213,12 +235,11 @@ class CoverPlatformTests(unittest.IsolatedAsyncioTestCase):
             states={"position": "state-position"},
         )
         bridge = _FakeBridge([analog, gate], {})
-        entry = _FakeConfigEntry("entry-1")
-        hass = _FakeHass(entry.entry_id, bridge, const.DOMAIN)
+        entry = _FakeConfigEntry(bridge)
         entities: list = []
 
         await cover_module.async_setup_entry(
-            hass,
+            object(),
             entry,
             lambda new_entities: entities.extend(new_entities),
         )
@@ -326,19 +347,23 @@ class CoverPlatformTests(unittest.IsolatedAsyncioTestCase):
             [("jalousie-details-action", "manualLamelle/60")],
         )
 
-    async def test_jalousie_named_zacienienie_defaults_to_curtain(self) -> None:
+    async def test_jalousie_with_shutter_animation_does_not_offer_tilt(self) -> None:
         control = LoxoneControl(
             uuid="shade-uuid",
             uuid_action="shade-action",
             name="Zacienienie Taras",
             type="Jalousie",
-            states={"position": "state-position"},
+            states={"position": "state-position", "shadePosition": "state-shade"},
             details={"animation": 1},
         )
         bridge = _FakeBridge([control], {"state-position": 20})
         entity = cover_module.LoxoneCoverEntity(bridge, control)
 
-        self.assertEqual(entity.device_class, "curtain")
+        self.assertEqual(entity.device_class, "shutter")
+        self.assertIsNone(entity.current_cover_tilt_position)
+        self.assertFalse(
+            entity.supported_features & cover_module.CoverEntityFeature.SET_TILT_POSITION
+        )
 
     async def test_jalousie_animation_zero_without_hints_defaults_to_blind(self) -> None:
         control = LoxoneControl(
@@ -383,23 +408,41 @@ class CoverPlatformTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(entity.device_class, "curtain")
 
-    async def test_window_is_supported_and_uses_target_position_state(self) -> None:
+    async def test_window_uses_direction_and_window_commands(self) -> None:
         control = LoxoneControl(
             uuid="window-uuid",
             uuid_action="window-action",
             name="Okno",
             type="Window",
-            states={"targetPosition": "state-target-position"},
+            states={"targetPosition": "state-target-position", "direction": "state-direction"},
         )
-        bridge = _FakeBridge([control], {"state-target-position": 73})
+        bridge = _FakeBridge([control], {"state-target-position": 0.73, "state-direction": -1})
         entity = cover_module.LoxoneCoverEntity(bridge, control)
 
-        self.assertEqual(entity.current_cover_position, 73)
+        self.assertIsNone(entity.current_cover_position)
+        self.assertEqual(entity.extra_state_attributes["target_position"], 73)
+        self.assertEqual(entity.device_class, "window")
+        self.assertFalse(entity.is_opening)
+        self.assertTrue(entity.is_closing)
         self.assertTrue(entity.supported_features & cover_module.CoverEntityFeature.OPEN)
         self.assertTrue(entity.supported_features & cover_module.CoverEntityFeature.CLOSE)
         self.assertTrue(entity.supported_features & cover_module.CoverEntityFeature.STOP)
+        self.assertTrue(entity.supported_features & cover_module.CoverEntityFeature.SET_POSITION)
         self.assertFalse(
             entity.supported_features & cover_module.CoverEntityFeature.SET_TILT_POSITION
+        )
+        await entity.async_open_cover()
+        await entity.async_close_cover()
+        await entity.async_set_cover_position(position=35)
+        await entity.async_stop_cover()
+        self.assertEqual(
+            bridge.commands,
+            [
+                ("window-action", "fullopen"),
+                ("window-action", "fullclose"),
+                ("window-action", "moveToPosition/35"),
+                ("window-action", "stop"),
+            ],
         )
 
     async def test_cover_setup_includes_window_controls(self) -> None:
@@ -411,12 +454,11 @@ class CoverPlatformTests(unittest.IsolatedAsyncioTestCase):
             states={"position": "state-position"},
         )
         bridge = _FakeBridge([window], {})
-        entry = _FakeConfigEntry("entry-1")
-        hass = _FakeHass(entry.entry_id, bridge, const.DOMAIN)
+        entry = _FakeConfigEntry(bridge)
         entities: list = []
 
         await cover_module.async_setup_entry(
-            hass,
+            object(),
             entry,
             lambda new_entities: entities.extend(new_entities),
         )

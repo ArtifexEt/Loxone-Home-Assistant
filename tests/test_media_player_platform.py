@@ -5,8 +5,9 @@ from __future__ import annotations
 import sys
 import types
 import unittest
+from unittest.mock import AsyncMock, patch
 
-from tests._loader import load_integration_module
+from tests._loader import install_media_player_stubs, load_integration_module
 
 
 def _install_homeassistant_stubs() -> None:
@@ -35,45 +36,7 @@ def _install_homeassistant_stubs() -> None:
         module.DOMAIN = domain
         sys.modules[f"homeassistant.components.{module_name}"] = module
 
-    media_player = sys.modules["homeassistant.components.media_player"]
-
-    class MediaPlayerEntity:
-        pass
-
-    class MediaPlayerDeviceClass:
-        SPEAKER = "speaker"
-
-    class MediaPlayerState:
-        OFF = "off"
-        IDLE = "idle"
-        PAUSED = "paused"
-        PLAYING = "playing"
-
-    class MediaPlayerEntityFeature:
-        PAUSE = 1 << 0
-        PLAY = 1 << 1
-        STOP = 1 << 2
-        NEXT_TRACK = 1 << 3
-        PREVIOUS_TRACK = 1 << 4
-        VOLUME_SET = 1 << 5
-        VOLUME_STEP = 1 << 6
-        TURN_ON = 1 << 7
-        TURN_OFF = 1 << 8
-        SELECT_SOURCE = 1 << 9
-        PLAY_MEDIA = 1 << 10
-        SHUFFLE_SET = 1 << 11
-        REPEAT_SET = 1 << 12
-        SEEK = 1 << 13
-        BROWSE_MEDIA = 1 << 14
-
-    class MediaType:
-        MUSIC = "music"
-
-    media_player.MediaPlayerEntity = MediaPlayerEntity
-    media_player.MediaPlayerDeviceClass = MediaPlayerDeviceClass
-    media_player.MediaPlayerState = MediaPlayerState
-    media_player.MediaPlayerEntityFeature = MediaPlayerEntityFeature
-    media_player.MediaType = MediaType
+    install_media_player_stubs()
 
     const = types.ModuleType("homeassistant.const")
 
@@ -143,7 +106,7 @@ LoxoneControl = models.LoxoneControl
 LoxoneMediaServer = models.LoxoneMediaServer
 LoxoneAudioZoneEntity = media_player_module.LoxoneAudioZoneEntity
 build_audio_tts_command = media_player_module.build_audio_tts_command
-resolve_audio_tts_target_uuid_action = media_player_module.resolve_audio_tts_target_uuid_action
+audio_tts_target_uuids = media_player_module.audio_tts_target_uuids
 
 
 class _FakeBridge:
@@ -176,8 +139,9 @@ class _FakeBridge:
 
 
 class _FakeConfigEntry:
-    def __init__(self, entry_id: str) -> None:
+    def __init__(self, entry_id: str, bridge) -> None:
         self.entry_id = entry_id
+        self.runtime_data = bridge
 
 
 class _FakeHass:
@@ -254,7 +218,7 @@ class MediaPlayerPlatformTests(unittest.IsolatedAsyncioTestCase):
             states={"active": "state-switch"},
         )
         bridge = _FakeBridge([audio, central, switch], {})
-        entry = _FakeConfigEntry("entry-1")
+        entry = _FakeConfigEntry("entry-1", bridge)
         hass = _FakeHass(entry.entry_id, bridge, const.DOMAIN)
         entities: list = []
 
@@ -310,6 +274,46 @@ class MediaPlayerPlatformTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(entity.state, media_player_module.MediaPlayerState.OFF)
 
+    async def test_audio_zone_volume_is_percent_and_cannot_exceed_reported_max(self) -> None:
+        control = self._audio_zone_v2()
+        control.states["maxVolume"] = "state-max-volume"
+        bridge = _FakeBridge([control], {"state-volume": 1, "state-max-volume": 45})
+        entity = LoxoneAudioZoneEntity(bridge, control)
+
+        self.assertEqual(entity.volume_level, 0.01)
+        self.assertEqual(entity.extra_state_attributes["max_volume"], 45)
+        await entity.async_set_volume_level(0.8)
+        self.assertEqual(bridge.commands, [("audio-action", "volume/45")])
+
+    async def test_audio_zone_pulse_volume_only_supports_steps(self) -> None:
+        control = self._audio_zone_v2()
+        control.details["volumeModes"] = 1 << 2
+        bridge = _FakeBridge([control], {})
+        entity = LoxoneAudioZoneEntity(bridge, control)
+        features = media_player_module.MediaPlayerEntityFeature
+
+        self.assertFalse(entity.supported_features & features.VOLUME_SET)
+        self.assertTrue(entity.supported_features & features.VOLUME_STEP)
+        with self.assertRaises(media_player_module.ServiceValidationError):
+            await entity.async_set_volume_level(0.5)
+        await entity.async_volume_up()
+        self.assertEqual(bridge.commands, [("audio-action", "volUp")])
+
+    def test_audio_zone_without_outputs_is_unavailable(self) -> None:
+        control = self._audio_zone_v2()
+        control.details["validOutputs"] = False
+        entity = LoxoneAudioZoneEntity(_FakeBridge([control], {}), control)
+        self.assertFalse(entity.available)
+
+    def test_unknown_play_state_uses_known_power(self) -> None:
+        control = self._audio_zone_v2()
+        values = {"state-play": -1, "state-power": 1}
+        entity = LoxoneAudioZoneEntity(_FakeBridge([control], values), control)
+
+        self.assertEqual(entity.state, media_player_module.MediaPlayerState.IDLE)
+        values["state-play"] = "offline"
+        self.assertEqual(entity.state, media_player_module.MediaPlayerState.OFF)
+
     def test_audio_zone_v2_idle_playstate_stays_idle_even_when_power_reports_off(self) -> None:
         control = self._audio_zone_v2()
         bridge = _FakeBridge(
@@ -323,7 +327,7 @@ class MediaPlayerPlatformTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(entity.state, media_player_module.MediaPlayerState.IDLE)
 
-    def test_repeat_mode_value_2_is_treated_as_all_for_compatibility(self) -> None:
+    def test_undocumented_repeat_mode_is_unknown(self) -> None:
         control = self._audio_zone_v2()
         bridge = _FakeBridge(
             [control],
@@ -333,7 +337,7 @@ class MediaPlayerPlatformTests(unittest.IsolatedAsyncioTestCase):
         )
         entity = LoxoneAudioZoneEntity(bridge, control)
 
-        self.assertEqual(entity.repeat, "all")
+        self.assertIsNone(entity.repeat)
 
     async def test_audio_zone_v2_commands_match_expected_actions(self) -> None:
         control = self._audio_zone_v2()
@@ -426,6 +430,7 @@ class MediaPlayerPlatformTests(unittest.IsolatedAsyncioTestCase):
         await entity.async_volume_down()
         await entity.async_select_source("Radio")
         await entity.async_play_media("source", "2")
+        await entity.async_set_shuffle(False)
         await entity.async_set_shuffle(True)
         await entity.async_set_repeat("all")
         await entity.async_media_seek(99)
@@ -437,7 +442,7 @@ class MediaPlayerPlatformTests(unittest.IsolatedAsyncioTestCase):
                 ("audio-legacy-action", "volstep/-5"),
                 ("audio-legacy-action", "source/1"),
                 ("audio-legacy-action", "source/2"),
-                ("audio-legacy-action", "shuffle/1"),
+                ("audio-legacy-action", "shuffle"),
                 ("audio-legacy-action", "repeat/1"),
                 ("audio-legacy-action", "progress/99"),
             ],
@@ -465,7 +470,7 @@ class MediaPlayerPlatformTests(unittest.IsolatedAsyncioTestCase):
             bridge.commands,
             [
                 ("audio-action", "playZoneFav/2"),
-                ("audio-action", "tts/Dzień dobry"),
+                ("audio-action", "tts/Dzie%C5%84%20dobry"),
             ],
         )
 
@@ -478,7 +483,7 @@ class MediaPlayerPlatformTests(unittest.IsolatedAsyncioTestCase):
             {
                 "state-source": 1,
                 "state-source-list": (
-                    "{'items':[{'slot':1,'name':'Radio'},{'slot':2,'name':'News'}]}"
+                    """{'items':[{'slot':1,'name':'Radio'},{'slot':2,'name':"Today's News"}]}"""
                 ),
             },
         )
@@ -487,10 +492,10 @@ class MediaPlayerPlatformTests(unittest.IsolatedAsyncioTestCase):
         root = await entity.async_browse_media()
         sources = await entity.async_browse_media("directory", "audio-action:sources")
 
-        self.assertTrue(entity.supported_features & media_player_module.FEATURE_BROWSE_MEDIA)
+        self.assertTrue(entity.supported_features & media_player_module.MediaPlayerEntityFeature.BROWSE_MEDIA)
         self.assertEqual(root.title, "Salon Audio")
         self.assertEqual([child.title for child in root.children], ["Sources"])
-        self.assertEqual([child.title for child in sources.children], ["Radio", "News"])
+        self.assertEqual([child.title for child in sources.children], ["Radio", "Today's News"])
         self.assertTrue(all(child.can_play for child in sources.children))
         self.assertEqual(
             [child.media_content_type for child in sources.children],
@@ -539,7 +544,7 @@ class MediaPlayerPlatformTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(bridge.commands, [("audio-action", "tts/Hall%2FEntry")])
 
-    async def test_audio_zone_tts_routes_to_matched_audio_server(self) -> None:
+    async def test_audio_zone_tts_uses_zone_even_with_matching_audio_server(self) -> None:
         control = self._audio_zone_v2()
         control.details["audioServerHost"] = "audioserver.lan:7091"
         media_server = LoxoneMediaServer(
@@ -557,13 +562,13 @@ class MediaPlayerPlatformTests(unittest.IsolatedAsyncioTestCase):
 
         await entity.async_play_media("tts", "Alarm test", extra={"volume": 35})
 
-        self.assertEqual(bridge.commands, [("media-server-action", "tts/Alarm test/35")])
+        self.assertEqual(bridge.commands, [("audio-action", "tts/Alarm%20test/35")])
 
     def test_build_audio_tts_command_keeps_entity_encoding_rules(self) -> None:
         self.assertEqual(build_audio_tts_command("Hall/Entry", 35), "tts/Hall%2FEntry/35")
-        self.assertEqual(build_audio_tts_command("Alarm test"), "tts/Alarm test")
+        self.assertEqual(build_audio_tts_command("pl|Alarm 100%"), "tts/pl%7CAlarm%20100%25")
 
-    def test_resolve_audio_tts_target_uuid_action_prefers_matched_media_server(self) -> None:
+    def test_audio_tts_target_is_zone_with_matching_media_server(self) -> None:
         control = self._audio_zone_v2()
         control.details["audioServerHost"] = "audioserver.lan:7091"
         media_server = LoxoneMediaServer(
@@ -579,9 +584,82 @@ class MediaPlayerPlatformTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(
-            resolve_audio_tts_target_uuid_action(bridge, control),
-            "media-server-action",
+            audio_tts_target_uuids(bridge, control),
+            ("audio-action",),
         )
+
+    async def test_central_tts_targets_only_mapped_audio_zones(self) -> None:
+        central = self._central_audio_zone()
+        first = self._audio_zone_v2()
+        second = self._audio_zone_v2_event_style()
+        central.details["controls"] = [
+            {"uuid": first.uuid_action, "id": 1},
+            {"uuid": second.uuid, "id": 2},
+            {"uuid": "unavailable-to-current-user", "id": 3},
+        ]
+        bridge = _FakeBridge([central, first, second], {})
+        entity = LoxoneAudioZoneEntity(bridge, central)
+
+        await entity.async_play_media("announce", "pl|Hej! 100%", extra={"volume": 0})
+
+        self.assertEqual(
+            bridge.commands,
+            [
+                (first.uuid_action, "tts/pl%7CHej%21%20100%25/0"),
+                (second.uuid_action, "tts/pl%7CHej%21%20100%25/0"),
+            ],
+        )
+        self.assertEqual(audio_tts_target_uuids(bridge, central), (first.uuid_action, second.uuid_action))
+
+    async def test_legacy_music_server_uses_player_id_for_tts_and_events(self) -> None:
+        control = self._audio_zone_v2()
+        control.type = "AudioZone"
+        control.details.update({"server": "music-server-uuid", "playerid": 3})
+        control.states["ttsVolume"] = "state-tts-volume"
+        server = LoxoneMediaServer(
+            uuid_action="music-server-uuid",
+            name="Original Music Server",
+            host="192.0.2.10",
+            server_type=1,
+        )
+        bridge = _FakeBridge(
+            [control], {"state-volume": 35, "state-tts-volume": 0}, {server.uuid_action: server}
+        )
+        entity = LoxoneAudioZoneEntity(bridge, control)
+        send = AsyncMock(return_value={"code": 200})
+        with patch.object(media_player_module, "_async_send_music_server_command", send):
+            await entity.async_play_media("tts", "pl|Dzień dobry")
+            await entity.async_play_media("event_file", "Gongs/Door bell.mp3", extra={"volume": 25})
+            with self.assertRaises(media_player_module.ServiceValidationError):
+                await entity.async_play_media("event_file", "Event_Sounds/../Door bell.mp3")
+            with self.assertRaises(media_player_module.ServiceValidationError):
+                await entity.async_play_media("tts", "A" * 151)
+
+        self.assertEqual(
+            [(str(call.args[0]), call.args[1]) for call in send.await_args_list],
+            [
+                ("http://192.0.2.10:7091/audio/3", "tts/pl%7CDzie%C5%84%20dobry/0"),
+                ("http://192.0.2.10:7091/audio/3", "playeventfile/Event_Sounds/Gongs/Door%20bell.mp3/25"),
+            ],
+        )
+        self.assertEqual(bridge.commands, [])
+
+    def test_audio_player_group_is_distinct_from_central_control(self) -> None:
+        audio = self._audio_zone_v2()
+        other = self._audio_zone_v2_event_style()
+        central = self._central_audio_zone()
+        audio.details.update({
+            "groupObjects": [{"uuid": other.uuid_action}],
+            "groupName": "Dół",
+        })
+        central.details["controls"] = [{"uuid": audio.uuid_action, "id": 1}]
+        bridge = _FakeBridge([central, audio, other], {})
+        entity = LoxoneAudioZoneEntity(bridge, audio)
+
+        attributes = entity.extra_state_attributes
+        self.assertEqual(attributes["group_member_uuid_actions"], [audio.uuid_action, other.uuid_action])
+        self.assertEqual(attributes["group_name"], "Dół")
+        self.assertNotIn("group_leader_uuid_action", attributes)
 
     def test_media_position_updated_at_changes_only_on_updates(self) -> None:
         control = self._audio_zone_v2()
@@ -599,6 +677,8 @@ class MediaPlayerPlatformTests(unittest.IsolatedAsyncioTestCase):
         entity._handle_bridge_update()
         first_timestamp = entity.media_position_updated_at
         self.assertIsNotNone(first_timestamp)
+        bridge._values["state-volume"] = 18
+        entity._handle_bridge_update()
         self.assertEqual(entity.media_position_updated_at, first_timestamp)
 
     async def test_central_audio_zone_supports_commands_events_and_tts_volume(self) -> None:
@@ -635,7 +715,7 @@ class MediaPlayerPlatformTests(unittest.IsolatedAsyncioTestCase):
                 ("central-audio-action", "voldown"),
                 ("central-audio-action", "mute/1"),
                 ("central-audio-action", "playZoneFav/2"),
-                ("central-audio-action", "tts/Alarm test/35"),
+                ("central-audio-action", "tts/Alarm%20test/35"),
                 ("central-audio-action", "bell"),
                 ("central-audio-action", "selectedcontrols/1,2/alarm"),
             ],
@@ -678,10 +758,12 @@ class MediaPlayerPlatformTests(unittest.IsolatedAsyncioTestCase):
         child.uuid = "child-audio-uuid"
         child.uuid_action = "child-audio-action"
         child.name = "Kuchnia Audio"
-        child.parent_uuid_action = central.uuid_action
+        central.details = {"controls": [{"uuid": child.uuid.upper(), "id": 1}]}
+        unrelated = self._audio_zone_v2()
+        central.details["other_reference"] = unrelated.uuid_action
 
         bridge = _FakeBridge(
-            [child, central],
+            [child, unrelated, central],
             {
                 "state-central-source": 1,
                 "state-central-source-list": "{'items':[{'slot':1,'name':'Radio'}]}",
@@ -689,7 +771,7 @@ class MediaPlayerPlatformTests(unittest.IsolatedAsyncioTestCase):
                 "state-power": 1,
             },
         )
-        entry = _FakeConfigEntry("entry-central")
+        entry = _FakeConfigEntry("entry-central", bridge)
         hass = _FakeHass(entry.entry_id, bridge, const.DOMAIN)
         entities: list = []
 
@@ -719,6 +801,7 @@ class MediaPlayerPlatformTests(unittest.IsolatedAsyncioTestCase):
             child_entity.group_members,
             ["media_player.central_audio", "media_player.kuchnia_audio"],
         )
+        self.assertIsNone(entities_by_uuid_action[unrelated.uuid_action].group_members)
         self.assertEqual(
             [child.title for child in root.children],
             ["Sources", "Linked Zones"],

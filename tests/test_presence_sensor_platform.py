@@ -44,8 +44,10 @@ def _install_homeassistant_stubs() -> None:
         TOTAL_INCREASING = "total_increasing"
 
     class SensorDeviceClass:
+        DURATION = "duration"
         ILLUMINANCE = "illuminance"
         SOUND_PRESSURE = "sound_pressure"
+        TIMESTAMP = "timestamp"
 
     sensor.SensorEntity = SensorEntity
     sensor.SensorStateClass = SensorStateClass
@@ -124,17 +126,6 @@ class _FakeBridge:
         return self._values.get(control.state_uuid(state_name))
 
 
-class _FakeConfigEntry:
-    def __init__(self, entry_id: str) -> None:
-        self.entry_id = entry_id
-        self.options = {}
-
-
-class _FakeHass:
-    def __init__(self, entry_id: str, bridge, domain: str) -> None:
-        self.data = {domain: {"bridges": {entry_id: bridge}}}
-
-
 _install_homeassistant_stubs()
 models = load_integration_module("custom_components.loxone_home_assistant.models")
 const = load_integration_module("custom_components.loxone_home_assistant.const")
@@ -165,8 +156,8 @@ class PresenceSensorPlatformTests(unittest.IsolatedAsyncioTestCase):
                 "state-noise": 38.4,
             },
         )
-        entry = _FakeConfigEntry("entry-1")
-        hass = _FakeHass(entry.entry_id, bridge, const.DOMAIN)
+        entry = types.SimpleNamespace(entry_id="entry-1", runtime_data=bridge, options={})
+        hass = types.SimpleNamespace(data={})
         entities = []
 
         await sensor_module.async_setup_entry(
@@ -222,8 +213,8 @@ class PresenceSensorPlatformTests(unittest.IsolatedAsyncioTestCase):
                 "state-acoustic": 28,
             },
         )
-        entry = _FakeConfigEntry("entry-1")
-        hass = _FakeHass(entry.entry_id, bridge, const.DOMAIN)
+        entry = types.SimpleNamespace(entry_id="entry-1", runtime_data=bridge, options={})
+        hass = types.SimpleNamespace(data={})
         entities = []
 
         await sensor_module.async_setup_entry(
@@ -258,8 +249,8 @@ class PresenceSensorPlatformTests(unittest.IsolatedAsyncioTestCase):
                 "state-sound": 42,
             },
         )
-        entry = _FakeConfigEntry("entry-1")
-        hass = _FakeHass(entry.entry_id, bridge, const.DOMAIN)
+        entry = types.SimpleNamespace(entry_id="entry-1", runtime_data=bridge, options={})
+        hass = types.SimpleNamespace(data={})
         entities = []
 
         await sensor_module.async_setup_entry(
@@ -277,6 +268,23 @@ class PresenceSensorPlatformTests(unittest.IsolatedAsyncioTestCase):
             by_kind[sensor_module.PRESENCE_KIND_SOUND_LEVEL].native_unit_of_measurement,
             "dB",
         )
+
+
+class PresenceTimeStateTests(unittest.TestCase):
+    def test_presence_uses_loxone_epoch_and_duration_seconds(self) -> None:
+        control = LoxoneControl(
+            uuid="presence", uuid_action="presence-action", name="Hallway", type="PresenceDetector",
+            states={"activeSince": "since", "time": "overrun"},
+        )
+        values = {"since": 30, "overrun": 180}
+        bridge = _FakeBridge([control], values)
+        entities = sensor_module._build_control_sensor_entities(bridge, control)
+        sensors = {entity._state_name: entity for entity in entities}
+        self.assertEqual(sensors["time"]._attr_native_unit_of_measurement, "s")
+        self.assertEqual(sensors["time"].native_value, 180)
+        self.assertEqual(sensors["activeSince"].native_value.isoformat(), "2009-01-01T00:00:30+00:00")
+        values["since"] = 0
+        self.assertIsNone(sensors["activeSince"].native_value)
 
 
 if __name__ == "__main__":

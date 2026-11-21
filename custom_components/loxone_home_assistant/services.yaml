@@ -41,7 +41,7 @@ send_raw_command:
 
 send_tts:
   name: Send TTS
-  description: Send a TTS command to a specific Loxone control UUID (for example Intercom or AudioZone).
+  description: Speak text on an Intercom, an audio zone or the mapped zones of Central Audio.
   fields:
     entry_id:
       name: Entry ID
@@ -51,7 +51,7 @@ send_tts:
         text:
     uuid_action:
       name: UUID Action
-      description: The Loxone `uuidAction` to control.
+      description: The Loxone `uuidAction` of the control that should speak.
       required: true
       selector:
         text:
