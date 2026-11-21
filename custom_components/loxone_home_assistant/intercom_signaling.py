@@ -21,6 +21,7 @@ if TYPE_CHECKING:
     from .bridge import LoxoneBridge
 
 _WEBSOCKET_PROTOCOL = "webrtc-signaling"
+_LOCAL_REACH_MODE = 2
 _REQUEST_TIMEOUT = 10
 _CONNECTION_TIMEOUT = 15
 _UUID = re.compile(r"[0-9a-f]{8}-(?:[0-9a-f]{4}-){2}(?:[0-9a-f]{16}|[0-9a-f]{4}-[0-9a-f]{12})", re.I)
@@ -36,6 +37,8 @@ class IntercomSignalingError(Exception):
 
 def intercom_websocket_url(bridge: LoxoneBridge, device_uuid: str) -> str:
     """Resolve a device proxy on the configured Miniserver origin."""
+    if getattr(bridge, "_remote_serial", None):
+        raise IntercomSignalingError("Intercom signaling requires a local Miniserver connection.")
     if not isinstance(device_uuid, str) or not _UUID.fullmatch(device_uuid):
         raise IntercomSignalingError("The Intercom device UUID is invalid or missing.")
 
@@ -67,12 +70,9 @@ def intercom_websocket_url(bridge: LoxoneBridge, device_uuid: str) -> str:
 class IntercomSignaling:
     """One authenticated Intercom WebSocket and its in-flight JSON-RPC requests."""
 
-    def __init__(
-        self, client: ClientSession, websocket: ClientWebSocketResponse, *, reach_mode: int
-    ) -> None:
+    def __init__(self, client: ClientSession, websocket: ClientWebSocketResponse) -> None:
         self._client = client
         self._websocket = websocket
-        self._reach_mode = reach_mode
         self._next_id = 1
         self._pending: dict[int, asyncio.Future[Any]] = {}
         self._notifications: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue(maxsize=256)
@@ -111,8 +111,7 @@ class IntercomSignaling:
                 )
                 if websocket.protocol != _WEBSOCKET_PROTOCOL:
                     raise IntercomSignalingError("The Intercom refused its signaling subprotocol.")
-                reach_mode = 3 if getattr(bridge, "_remote_serial", None) else 2
-                connection = cls(client, websocket, reach_mode=reach_mode)
+                connection = cls(client, websocket)
                 await connection._async_authenticate(bridge.username, token)
         except (Exception, asyncio.CancelledError) as error:
             await client.close()
@@ -137,7 +136,7 @@ class IntercomSignaling:
             elif method == "ready" or message.get("error") or method == "kick":
                 raise IntercomSignalingError("The Intercom did not accept authentication.")
             elif method == "reachMode" and "id" in message:
-                await self._async_respond(message["id"], [self._reach_mode])
+                await self._async_respond(message["id"], [_LOCAL_REACH_MODE])
 
     async def async_request(self, method: str, params: list[Any] | None = None) -> Any:
         """Send a JSON-RPC request and return its result payload."""
@@ -259,7 +258,7 @@ class IntercomSignaling:
     ) -> None:
         if request_id is not None:
             if method == "reachMode":
-                await self._async_respond(request_id, [self._reach_mode])
+                await self._async_respond(request_id, [_LOCAL_REACH_MODE])
                 return
             if method == "addIceCandidate":
                 await self._async_respond(request_id)

@@ -8,19 +8,6 @@ from datetime import datetime, timezone
 import re
 from typing import Any
 
-try:
-    from aiohttp import BasicAuth, ClientError
-except ImportError:  # pragma: no cover - fallback for lightweight test stubs
-    class ClientError(Exception):
-        """Fallback network error type used in tests without aiohttp."""
-
-    class BasicAuth:  # type: ignore[no-redef]
-        """Fallback auth container used in tests without aiohttp."""
-
-        def __init__(self, login: str, password: str) -> None:
-            self.login = login
-            self.password = password
-
 from homeassistant.components.sensor import SensorDeviceClass, SensorEntity, SensorStateClass
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
@@ -46,7 +33,6 @@ from .const import (
     CLIMATE_TARGET_TEMPERATURE_STATE_CANDIDATES,
     DOMAIN,
     HANDLED_CONTROL_TYPES,
-    INTERCOM_HISTORY_STATE_CANDIDATES,
     POWER_SUPPLY_CONTROL_TYPES,
     PRESENCE_ILLUMINANCE_STATE_CANDIDATES,
     PRESENCE_SOUND_STATE_CANDIDATES,
@@ -67,11 +53,11 @@ from .intercom import (
     intercom_history_state_name,
     is_intercom_control,
     is_intercom_system_schema_webpage,
-    resolve_intercom_http_url,
 )
 from .intercom_media import (
     async_intercom_history_entries,
-    intercom_last_bell_events,
+    coerce_intercom_datetime,
+    has_intercom_history_detail,
     intercom_last_bell_timestamp,
 )
 from .models import LoxoneControl
@@ -149,90 +135,6 @@ TIMESTAMP_STATE_CANDIDATES = (
     "lastEventTimestamp",
     "eventTime",
     "timestamp",
-)
-INTERCOM_HISTORY_DETAIL_PATHS = (
-    "lastBellEvents",
-    "eventHistoryUrl",
-    "securedDetails.lastBellEvents",
-    "videoInfo.lastBellEvents",
-    "videoInfo.eventHistoryUrl",
-    "securedDetails.videoInfo.lastBellEvents",
-    "securedDetails.videoInfo.eventHistoryUrl",
-    "videoSettings.lastBellEvents",
-    "videoSettings.eventHistoryUrl",
-)
-INTERCOM_DYNAMIC_HISTORY_STATE_CANDIDATES = (
-    "videoSettingsIntern",
-    "videoSettingsExtern",
-    "videoSettings",
-    "videoInfo",
-    "answers",
-    "events",
-    "history",
-    "lastBellEvents",
-)
-INTERCOM_DYNAMIC_HISTORY_STATE_HINTS = (
-    "history",
-    "event",
-    "bell",
-    "answer",
-    "record",
-    "video",
-    "snapshot",
-    "image",
-)
-INTERCOM_HISTORY_URL_KEY_HINTS = (
-    "history",
-    "event",
-    "bell",
-    "answer",
-    "record",
-    "last",
-)
-INTERCOM_EVENT_COLLECTION_PATHS = (
-    "events",
-    "items",
-    "entries",
-    "records",
-    "answers",
-    "calls",
-    "ringEvents",
-    "history",
-    "lastBellEvents",
-    "value",
-    "result",
-)
-INTERCOM_EVENT_IMAGE_KEY_CANDIDATES = (
-    "imageUrl",
-    "imagePath",
-    "path",
-    "image",
-    "alertImage",
-    "snapshot",
-    "photo",
-    "thumb",
-    "thumbPath",
-    "thumbnailPath",
-    "thumbnail",
-    "thumbnailUrl",
-    "snapshotUrl",
-    "photoUrl",
-    "liveImageUrl",
-)
-INTERCOM_EVENT_TIMESTAMP_KEY_CANDIDATES = (
-    "timestamp",
-    "ts",
-    "time",
-    "date",
-    "historyDate",
-    "historyTimestamp",
-    "eventDate",
-    "datetime",
-    "dateTime",
-    "createdAt",
-    "created",
-    "eventTime",
-    "lastBellTimestamp",
 )
 SYSTEM_DIAGNOSTIC_METRICS = (
     {
@@ -1049,10 +951,14 @@ def _first_non_boolean_state_name(
 
 
 def _build_intercom_sensors(bridge, control: LoxoneControl) -> list[SensorEntity]:
+    entities: list[SensorEntity] = []
     history_state_name = intercom_history_state_name(control)
-    if history_state_name is None and not _has_intercom_history_detail(control):
-        return []
-    return [LoxoneIntercomHistorySensor(bridge, control, history_state_name)]
+    if history_state_name is not None or has_intercom_history_detail(control):
+        entities.append(LoxoneIntercomHistorySensor(bridge, control, history_state_name))
+    device_state_name = first_matching_state_name(control, ("deviceState",))
+    if device_state_name is not None:
+        entities.append(LoxoneIntercomDeviceStatusSensor(bridge, control, device_state_name))
+    return entities
 
 
 def _build_power_supply_sensors(bridge, control: LoxoneControl) -> list[SensorEntity]:
@@ -1776,6 +1682,28 @@ class LoxoneClimateStateSensor(LoxoneSingleStateSensor):
         return SensorStateClass.MEASUREMENT
 
 
+class LoxoneIntercomDeviceStatusSensor(LoxoneEntity, SensorEntity):
+    """Represent the status reported by the Intercom device."""
+
+    _attr_device_class = getattr(SensorDeviceClass, "ENUM", None)
+    _attr_options = ["unknown", "online", "rebooting", "initializing"]
+    _attr_icon = "mdi:doorbell-video"
+
+    def __init__(self, bridge, control: LoxoneControl, state_name: str) -> None:
+        super().__init__(bridge, control, "Device Status")
+        self._state_name = state_name
+
+    def relevant_state_uuids(self) -> tuple[str, ...]:
+        return (self.control.states[self._state_name],)
+
+    @property
+    def native_value(self) -> str | None:
+        status = coerce_float(self.state_value(self._state_name))
+        if status is None or not status.is_integer() or not 0 <= status < len(self._attr_options):
+            return None
+        return self._attr_options[int(status)]
+
+
 class LoxoneIntercomHistorySensor(LoxoneEntity, SensorEntity):
     """Intercom history sensor with latest bell event metadata."""
 
@@ -1791,9 +1719,7 @@ class LoxoneIntercomHistorySensor(LoxoneEntity, SensorEntity):
         super().__init__(bridge, control, "History")
         self._history_state_name = history_state_name
         self._latest_event_time: datetime | None = None
-        self._latest_event_image_url: str | None = None
         self._event_count = 0
-        self._recent_image_urls: list[str] = []
         self._history_timestamps: list[str] = []
 
     @property
@@ -1818,39 +1744,28 @@ class LoxoneIntercomHistorySensor(LoxoneEntity, SensorEntity):
         self.async_schedule_update_ha_state(True)
 
     async def async_update(self) -> None:
-        history_tokens = intercom_last_bell_events(
-            self.bridge,
-            self.control,
-            state_value_getter=self.state_value,
-        )
         history_entries = await async_intercom_history_entries(
             self.bridge,
             self.control,
-            last_bell_events=history_tokens,
             state_value_getter=self.state_value,
         )
 
         self._history_timestamps = [
             entry.raw_timestamp
             for entry in history_entries
-            if not entry.raw_timestamp.startswith("url:")
+            if entry.event_time is not None
         ]
         self._event_count = len(history_entries)
-        self._recent_image_urls = [entry.image_url for entry in history_entries[:10]]
 
         latest_entry = next(iter(history_entries), None)
         self._latest_event_time = (
             latest_entry.event_time if latest_entry is not None else None
-        )
-        self._latest_event_image_url = (
-            latest_entry.image_url if latest_entry is not None else None
         )
 
         if self._latest_event_time is None:
             self._latest_event_time = intercom_last_bell_timestamp(
                 self.bridge,
                 self.control,
-                last_bell_events=history_tokens,
                 state_value_getter=self.state_value,
             )
         if self._latest_event_time is None:
@@ -1866,10 +1781,6 @@ class LoxoneIntercomHistorySensor(LoxoneEntity, SensorEntity):
         if self._history_state_name is not None:
             attrs["history_state"] = self._history_state_name
         attrs["event_count"] = self._event_count
-        if self._latest_event_image_url is not None:
-            attrs["latest_event_image_url"] = self._latest_event_image_url
-        if self._recent_image_urls:
-            attrs["recent_image_urls"] = self._recent_image_urls
         if self._history_timestamps:
             attrs["history_timestamps"] = self._history_timestamps
         return attrs
@@ -1880,7 +1791,7 @@ class LoxoneIntercomHistorySensor(LoxoneEntity, SensorEntity):
             timestamp = _timestamp_state_value(state_name, raw_value)
             if timestamp is not None:
                 return timestamp
-            timestamp = _coerce_datetime(raw_value)
+            timestamp = coerce_intercom_datetime(raw_value)
             if timestamp is not None and normalize_state_name(state_name).endswith("date"):
                 return timestamp
         return None
@@ -1980,539 +1891,11 @@ class LoxoneWebpageSensor(LoxoneEntity, SensorEntity):
         return _truncate_state_text(str(url).strip()) if url is not None else None
 
 
-def _has_intercom_history_detail(control: LoxoneControl) -> bool:
-    if first_matching_state_name(
-        control,
-        ("lastBellEvents", "lastBellTimestamp", "eventHistoryUrl"),
-    ) is not None:
-        return True
-    if first_matching_state_name(
-        control,
-        ("videoInfo", "videoSettings", "videoSettingsExtern", "videoSettingsIntern"),
-    ) is not None:
-        return True
-    return any(
-        _nested_detail_value(control.details, path) is not None
-        for path in (
-            "lastBellEvents",
-            "eventHistoryUrl",
-            "videoInfo.lastBellEvents",
-            "videoInfo.eventHistoryUrl",
-            "securedDetails.videoInfo.eventHistoryUrl",
-        )
-    )
-
-
-def _resolve_intercom_history_url(
-    bridge,
-    control: LoxoneControl,
-    history_state_name: str | None,
-    address_value: Any = None,
-    *,
-    dynamic_state_names: tuple[str, ...] = (),
-) -> str | None:
-    from_state = (
-        bridge.control_state(control, history_state_name)
-        if history_state_name is not None
-        else None
-    )
-    resolved_state = resolve_intercom_http_url(
-        bridge,
-        control,
-        from_state,
-        address_value=address_value,
-    )
-    if resolved_state is not None:
-        return resolved_state
-    from_details = _resolve_control_detail_url(
-        bridge,
-        control,
-        INTERCOM_HISTORY_DETAIL_PATHS,
-        address_value=address_value,
-    )
-    if from_details is not None:
-        return from_details
-
-    from_details_payload = _resolve_url_from_payload_with_key_hints(
-        bridge,
-        control,
-        control.details,
-        key_hints=INTERCOM_HISTORY_URL_KEY_HINTS,
-        address_value=address_value,
-    )
-    if from_details_payload is not None:
-        return from_details_payload
-
-    return _resolve_url_from_intercom_state_payloads(
-        bridge,
-        control,
-        dynamic_state_names,
-        key_hints=INTERCOM_HISTORY_URL_KEY_HINTS,
-        address_value=address_value,
-    )
-
-
-def _intercom_history_url_candidates(
-    bridge,
-    control: LoxoneControl,
-    history_state_name: str | None,
-    address_value: Any = None,
-    *,
-    dynamic_state_names: tuple[str, ...] = (),
-) -> tuple[str, ...]:
-    resolved_url = _resolve_intercom_history_url(
-        bridge,
-        control,
-        history_state_name,
-        address_value,
-        dynamic_state_names=dynamic_state_names,
-    )
-    if resolved_url is None:
-        return ()
-    return (resolved_url,)
-
-
-def _dynamic_intercom_history_state_names(control: LoxoneControl) -> tuple[str, ...]:
-    names: list[str] = []
-    seen: set[str] = set()
-
-    for candidate in INTERCOM_DYNAMIC_HISTORY_STATE_CANDIDATES:
-        state_name = first_matching_state_name(control, (candidate,))
-        if state_name is None or state_name in seen:
-            continue
-        names.append(state_name)
-        seen.add(state_name)
-
-    for state_name in control.states:
-        normalized = normalize_state_name(state_name)
-        if not any(hint in normalized for hint in INTERCOM_DYNAMIC_HISTORY_STATE_HINTS):
-            continue
-        if state_name in seen:
-            continue
-        names.append(state_name)
-        seen.add(state_name)
-
-    return tuple(names)
-
-
-def _intercom_history_timestamp_state_names(
-    control: LoxoneControl,
-    history_state_name: str | None,
-    dynamic_state_names: tuple[str, ...],
-) -> tuple[str, ...]:
-    names: list[str] = []
-    seen: set[str] = set()
-
-    for candidate in (
-        history_state_name,
-        *dynamic_state_names,
-        *control.states,
-    ):
-        if candidate is None or candidate in seen:
-            continue
-        normalized = normalize_state_name(candidate)
-        if normalized in TIMESTAMP_STATE_KEYS or normalized.endswith("timestamp"):
-            names.append(candidate)
-            seen.add(candidate)
-
-    return tuple(names)
-
-
-def _resolve_url_from_intercom_state_payloads(
-    bridge,
-    control: LoxoneControl,
-    state_names: tuple[str, ...],
-    *,
-    key_hints: tuple[str, ...],
-    address_value: Any = None,
-) -> str | None:
-    for state_name in state_names:
-        state_payload = bridge.control_state(control, state_name)
-        resolved = _resolve_url_from_payload_with_key_hints(
-            bridge,
-            control,
-            state_payload,
-            key_hints=key_hints,
-            address_value=address_value,
-        )
-        if resolved is not None:
-            return resolved
-    return None
-
-
-def _resolve_url_from_payload_with_key_hints(
-    bridge,
-    control: LoxoneControl,
-    payload: Any,
-    *,
-    key_hints: tuple[str, ...],
-    address_value: Any = None,
-) -> str | None:
-    if payload is None:
-        return None
-
-    if isinstance(payload, str):
-        raw = payload.strip()
-        if not raw:
-            return None
-        if raw.startswith("{") or raw.startswith("["):
-            try:
-                parsed = json.loads(raw)
-            except ValueError:
-                return resolve_intercom_http_url(
-                    bridge,
-                    control,
-                    raw,
-                    address_value=address_value,
-                )
-            return _resolve_url_from_payload_with_key_hints(
-                bridge,
-                control,
-                parsed,
-                key_hints=key_hints,
-                address_value=address_value,
-            )
-
-        return resolve_intercom_http_url(
-            bridge,
-            control,
-            raw,
-            address_value=address_value,
-        )
-
-    stack: list[Any] = [payload]
-    seen: set[int] = set()
-    while stack:
-        current = stack.pop()
-        current_id = id(current)
-        if current_id in seen:
-            continue
-        seen.add(current_id)
-
-        if isinstance(current, list):
-            stack.extend(current)
-            continue
-        if not isinstance(current, Mapping):
-            continue
-
-        indicator_value = _first_mapping_value(
-            current,
-            ("name", "key", "id", "field", "type", "label"),
-        )
-        candidate_value = _first_mapping_value(
-            current,
-            ("url", "path", "href", "src", "value", "data"),
-        )
-        indicator_text = normalize_state_name(str(indicator_value)) if indicator_value else ""
-        if indicator_text and any(hint in indicator_text for hint in key_hints):
-            resolved = resolve_intercom_http_url(
-                bridge,
-                control,
-                candidate_value,
-                address_value=address_value,
-            )
-            if resolved is not None:
-                return resolved
-
-        for key, value in current.items():
-            normalized_key = normalize_state_name(str(key))
-            key_matches_hints = any(hint in normalized_key for hint in key_hints)
-
-            if isinstance(value, Mapping):
-                if key_matches_hints:
-                    nested_candidate = _first_mapping_value(
-                        value,
-                        ("url", "path", "href", "src", "value", "data"),
-                    )
-                    resolved = resolve_intercom_http_url(
-                        bridge,
-                        control,
-                        nested_candidate,
-                        address_value=address_value,
-                    )
-                    if resolved is not None:
-                        return resolved
-                stack.append(value)
-                continue
-            if isinstance(value, list):
-                stack.append(value)
-                continue
-
-            if key_matches_hints:
-                resolved = resolve_intercom_http_url(
-                    bridge,
-                    control,
-                    value,
-                    address_value=address_value,
-                )
-                if resolved is not None:
-                    return resolved
-
-            if key_matches_hints and isinstance(value, str):
-                stack.append(value)
-                continue
-
-            if isinstance(value, str):
-                stripped = value.strip()
-                if stripped.startswith("{") or stripped.startswith("["):
-                    stack.append(stripped)
-
-    return None
-
-
-def _is_intercom_video_settings_payload(payload: Any) -> bool:
-    if not isinstance(payload, Mapping):
-        return False
-
-    normalized_keys = {
-        normalize_state_name(str(key))
-        for key in payload
-        if isinstance(key, str)
-    }
-    if not normalized_keys:
-        return False
-
-    has_stream_or_snapshot_hint = any(
-        "stream" in key or "video" in key or "image" in key or "snapshot" in key
-        for key in normalized_keys
-    )
-    has_history_pointer_hint = any(
-        "lastbell" in key or "history" in key or "event" in key
-        for key in normalized_keys
-    )
-    has_event_timestamp = _first_mapping_value(
-        payload,
-        INTERCOM_EVENT_TIMESTAMP_KEY_CANDIDATES,
-    ) is not None
-
-    return has_stream_or_snapshot_hint and has_history_pointer_hint and not has_event_timestamp
-
-
-def _intercom_history_payload_from_state(
-    bridge,
-    control: LoxoneControl,
-    history_state_name: str | None,
-) -> Any | None:
-    if history_state_name is None:
-        return None
-    raw_value = bridge.control_state(control, history_state_name)
-    if isinstance(raw_value, (Mapping, list)):
-        return raw_value
-    if not isinstance(raw_value, str):
-        return None
-
-    stripped = raw_value.strip()
-    if not stripped:
-        return None
-    if not (stripped.startswith("{") or stripped.startswith("[")):
-        return None
-    try:
-        return json.loads(stripped)
-    except json.JSONDecodeError:
-        return None
-
-
-async def _async_fetch_json(bridge, url: str) -> Any | None:
-    session = getattr(bridge, "_session", None)
-    if session is None:
-        return None
-
-    auth_username, auth_password = _intercom_auth_credentials(bridge)
-    request_auth = BasicAuth(auth_username, auth_password) if auth_username is not None else None
-    try:
-        async with session.get(url, auth=request_auth) as response:
-            response.raise_for_status()
-            try:
-                return await response.json(content_type=None)
-            except (TypeError, ValueError):
-                raw = await response.text()
-                return json.loads(raw)
-    except (ClientError, TimeoutError, ValueError, json.JSONDecodeError):
-        return None
-
-
-def _intercom_auth_credentials(bridge) -> tuple[str | None, str]:
-    configured_username = _coerce_text(getattr(bridge, "intercom_username", None))
-    configured_password = getattr(bridge, "intercom_password", None)
-    default_username = _coerce_text(getattr(bridge, "username", None))
-    default_password = getattr(bridge, "password", None)
-
-    username = configured_username or default_username
-    if username is None:
-        return None, ""
-
-    password_source = configured_password if configured_password is not None else default_password
-    password = "" if password_source is None else str(password_source)
-    return username, password
-
-
-def _extract_intercom_events(
-    payload: Any,
-    bridge,
-    control: LoxoneControl,
-    address_value: Any = None,
-) -> list[dict[str, Any]]:
-    events = _find_event_mappings(payload)
-    normalized: list[dict[str, Any]] = []
-    for event in events:
-        timestamp = _event_timestamp(event)
-        image_url = _event_image_url(
-            event,
-            bridge,
-            control,
-            address_value=address_value,
-        )
-        if timestamp is None and image_url is None:
-            continue
-        normalized.append(
-            {
-                "timestamp": timestamp,
-                "image_url": image_url,
-            }
-        )
-
-    # Prefer newest first when timestamps are available.
-    normalized.sort(
-        key=lambda item: (
-            item["timestamp"] is not None,
-            item["timestamp"] or datetime.min.replace(tzinfo=timezone.utc),
-        ),
-        reverse=True,
-    )
-    return normalized
-
-
-def _find_event_mappings(raw: Any) -> list[Mapping[str, Any]]:
-    stack: list[Any] = [raw]
-    event_mappings: list[Mapping[str, Any]] = []
-    seen: set[int] = set()
-
-    while stack:
-        current = stack.pop()
-        current_id = id(current)
-        if current_id in seen:
-            continue
-        seen.add(current_id)
-
-        if isinstance(current, list):
-            stack.extend(current)
-            continue
-        if not isinstance(current, Mapping):
-            continue
-
-        if _looks_like_intercom_event_mapping(current):
-            event_mappings.append(current)
-
-        for key in INTERCOM_EVENT_COLLECTION_PATHS:
-            nested = _mapping_get_case_insensitive(current, key)
-            if nested is not None:
-                stack.append(nested)
-
-        stack.extend(current.values())
-
-    return event_mappings
-
-
-def _looks_like_intercom_event_mapping(value: Mapping[str, Any]) -> bool:
-    if _first_mapping_value(value, INTERCOM_EVENT_IMAGE_KEY_CANDIDATES) is not None:
-        return True
-    if _first_mapping_value(value, INTERCOM_EVENT_TIMESTAMP_KEY_CANDIDATES) is not None:
-        return True
-    return False
-
-
-def _event_image_url(
-    event: Mapping[str, Any],
-    bridge,
-    control: LoxoneControl,
-    *,
-    address_value: Any = None,
-) -> str | None:
-    image_value = _first_mapping_value(event, INTERCOM_EVENT_IMAGE_KEY_CANDIDATES)
-    return resolve_intercom_http_url(
-        bridge,
-        control,
-        image_value,
-        address_value=address_value,
-    )
-
-
-def _event_timestamp(event: Mapping[str, Any]) -> datetime | None:
-    timestamp_raw = _first_mapping_value(event, INTERCOM_EVENT_TIMESTAMP_KEY_CANDIDATES)
-    return _coerce_datetime(timestamp_raw)
-
-
-def _coerce_datetime(value: Any) -> datetime | None:
-    if value is None:
-        return None
-    if isinstance(value, datetime):
-        return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
-    if isinstance(value, (int, float)):
-        timestamp = float(value)
-        if timestamp > 10_000_000_000:
-            timestamp = timestamp / 1000
-        return datetime.fromtimestamp(timestamp, tz=timezone.utc)
-    if isinstance(value, str):
-        raw = value.strip()
-        if not raw:
-            return None
-        if raw.isdigit():
-            if len(raw) == 14:
-                return datetime.strptime(raw, "%Y%m%d%H%M%S").replace(tzinfo=timezone.utc)
-            return _coerce_datetime(float(raw))
-        iso_candidate = raw.replace("Z", "+00:00")
-        try:
-            parsed = datetime.fromisoformat(iso_candidate)
-        except ValueError:
-            return None
-        if parsed.tzinfo is None:
-            return parsed.replace(tzinfo=timezone.utc)
-        return parsed
-    return None
-
-
 def _timestamp_state_value(state_name: str, value: Any) -> datetime | None:
     normalized = normalize_state_name(state_name)
     if normalized not in TIMESTAMP_STATE_KEYS and not normalized.endswith("timestamp"):
         return None
-    return _coerce_datetime(value)
-
-
-def _resolve_control_detail_url(
-    bridge,
-    control: LoxoneControl,
-    detail_paths: tuple[str, ...],
-    *,
-    address_value: Any = None,
-) -> str | None:
-    for path in detail_paths:
-        raw_value = _nested_detail_value(control.details, path)
-        resolved = resolve_intercom_http_url(
-            bridge,
-            control,
-            raw_value,
-            address_value=address_value,
-        )
-        if resolved is not None:
-            return resolved
-    return None
-
-
-def _nested_detail_value(details: Mapping[str, Any], path: str) -> Any:
-    current: Any = details
-    for part in path.split("."):
-        if not isinstance(current, Mapping):
-            return None
-        current = _mapping_get_case_insensitive(current, part)
-    return current
-
-
-def _first_mapping_value(mapping: Mapping[str, Any], keys: tuple[str, ...]) -> Any:
-    for key in keys:
-        value = _mapping_get_case_insensitive(mapping, key)
-        if value is not None:
-            return value
-    return None
+    return coerce_intercom_datetime(value)
 
 
 def _mapping_get_case_insensitive(mapping: Mapping[str, Any], key: str) -> Any:
@@ -2524,10 +1907,3 @@ def _mapping_get_case_insensitive(mapping: Mapping[str, Any], key: str) -> Any:
         if isinstance(current_key, str) and normalize_state_name(current_key) == wanted:
             return value
     return None
-
-
-def _coerce_text(value: Any) -> str | None:
-    if value is None:
-        return None
-    text = str(value).strip()
-    return text or None

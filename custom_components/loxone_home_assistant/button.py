@@ -16,9 +16,10 @@ from .const import BUTTON_CONTROL_TYPES, INTERCOM_CONTROL_TYPES, MEDIA_PLAYER_CO
 from .entity import LoxoneEntity, miniserver_device_info, normalize_state_name
 from .intercom import (
     build_intercom_tts_command,
+    intercom_mute_state_name,
     intercom_tts_message,
-    is_intercom_control,
     intercom_tts_volume,
+    is_intercom_gen2_control,
     resolve_intercom_command,
 )
 from .media_player import (
@@ -30,8 +31,10 @@ from .media_player import (
 from .models import LoxoneControl
 from .runtime import entry_bridge
 
-INTERCOM_GEN2_BUTTON_SPECS = (
+INTERCOM_BUTTON_SPECS = (
     ("Answer Call", "Stop Ringing", "answer", None, "mdi:bell-cancel-outline"),
+)
+INTERCOM_GEN2_MUTE_BUTTON_SPECS = (
     ("Mute Microphone", "Mute Doorbell", "mute", ("1",), "mdi:bell-off-outline"),
     ("Unmute Microphone", "Unmute Doorbell", "mute", ("0",), "mdi:bell-outline"),
 )
@@ -54,8 +57,15 @@ def _build_control_buttons(bridge) -> list[ButtonEntity]:
 def _build_intercom_command_buttons(bridge) -> list[ButtonEntity]:
     entities: list[ButtonEntity] = []
     for control in bridge.controls:
-        if not _is_intercom_gen2_control(control):
+        gen2 = is_intercom_gen2_control(control)
+        if not gen2 and normalize_state_name(control.type) not in INTERCOM_TTS_CONTROL_TYPES_NORMALIZED:
             continue
+        specs = (
+            INTERCOM_BUTTON_SPECS + INTERCOM_GEN2_MUTE_BUTTON_SPECS
+            if gen2
+            else INTERCOM_BUTTON_SPECS
+        )
+        has_mute_switch = intercom_mute_state_name(control) is not None
         entities.extend(
             LoxoneIntercomCommandButton(
                 bridge,
@@ -65,6 +75,7 @@ def _build_intercom_command_buttons(bridge) -> list[ButtonEntity]:
                 command_name,
                 command_args,
                 icon,
+                enabled_by_default=command_name != "mute" or not has_mute_switch,
             )
             for (
                 legacy_suffix,
@@ -72,7 +83,7 @@ def _build_intercom_command_buttons(bridge) -> list[ButtonEntity]:
                 command_name,
                 command_args,
                 icon,
-            ) in INTERCOM_GEN2_BUTTON_SPECS
+            ) in specs
         )
     return entities
 
@@ -121,7 +132,7 @@ class LoxoneButtonEntity(LoxoneEntity, ButtonEntity):
 
 
 class LoxoneIntercomCommandButton(LoxoneEntity, ButtonEntity):
-    """Action button for a predefined Intercom Gen2 command."""
+    """Action button for a predefined Intercom command."""
 
     def __init__(
         self,
@@ -132,11 +143,14 @@ class LoxoneIntercomCommandButton(LoxoneEntity, ButtonEntity):
         command: str,
         arguments: Sequence[str] | None,
         icon: str,
+        *,
+        enabled_by_default: bool = True,
     ) -> None:
         super().__init__(bridge, control, legacy_suffix)
         self._attr_name = f"{control.display_name} {name_suffix}"
         self._command = resolve_intercom_command(command, list(arguments or []))
         self._attr_icon = icon
+        self._attr_entity_registry_enabled_default = enabled_by_default
 
     async def async_press(self) -> None:
         await self.bridge.async_send_action(self.control.uuid_action, self._command)
@@ -262,20 +276,6 @@ class LoxoneHubRefreshSystemStatsButton(LoxoneHubActionButton):
 
     async def async_press(self) -> None:
         await self.bridge.async_refresh_system_stats(force=True)
-
-
-def _is_intercom_gen2_control(control: LoxoneControl) -> bool:
-    if not is_intercom_control(control):
-        return False
-
-    normalized_type = normalize_state_name(control.type)
-    if "v2" in normalized_type:
-        return True
-
-    normalized_states = {
-        normalize_state_name(state_name) for state_name in control.states
-    }
-    return "trustaddress" in normalized_states
 
 
 def _supports_intercom_tts_controls(control: LoxoneControl) -> bool:

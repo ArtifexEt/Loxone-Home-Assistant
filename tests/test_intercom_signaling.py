@@ -167,6 +167,13 @@ class IntercomSignalingTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.client.closed)
         self.assertFalse(self.websocket.sent)
 
+    async def test_remote_connect_cannot_open_intercom_signaling(self):
+        self.bridge._remote_serial = "0123456789AB"
+        with self.assertRaisesRegex(signaling.IntercomSignalingError, "local Miniserver"):
+            await signaling.IntercomSignaling.async_connect(self.bridge, DEVICE_UUID)
+        self.assertIsNone(self.client.connect_call)
+        self.assertFalse(self.websocket.sent)
+
     async def test_ready_without_authentication_is_rejected(self):
         self.websocket.receive(method="ready")
         with self.assertRaisesRegex(signaling.IntercomSignalingError, "did not accept"):

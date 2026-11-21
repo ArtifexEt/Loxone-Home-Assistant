@@ -347,7 +347,7 @@ class ButtonPlatformTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
-    async def test_setup_skips_legacy_intercom_command_buttons(self) -> None:
+    async def test_setup_only_adds_stop_ringing_for_legacy_intercom(self) -> None:
         legacy_intercom = LoxoneControl(
             uuid="intercom-legacy-uuid",
             uuid_action="intercom-legacy-action",
@@ -373,7 +373,24 @@ class ButtonPlatformTests(unittest.IsolatedAsyncioTestCase):
             for entity in entities
             if isinstance(entity, button_module.LoxoneIntercomCommandButton)
         ]
-        self.assertEqual(intercom_buttons, [])
+        self.assertEqual(len(intercom_buttons), 1)
+        self.assertEqual(intercom_buttons[0]._attr_name, "Furtka Legacy Stop Ringing")
+        await intercom_buttons[0].async_press()
+        self.assertEqual(bridge.commands, [("intercom-legacy-action", "answer")])
+
+    async def test_existing_mute_buttons_are_optional_with_stateful_mute(self) -> None:
+        control = LoxoneControl(
+            uuid="intercom-uuid",
+            uuid_action="intercom-action",
+            name="Intercom",
+            type="IntercomV2",
+            states={"muted": "state-muted"},
+        )
+        buttons = button_module._build_intercom_command_buttons(_FakeBridge([control]))
+        self.assertEqual(
+            [button._attr_entity_registry_enabled_default for button in buttons],
+            [True, False, False],
+        )
 
     async def test_setup_adds_intercom_tts_button_and_sends_tts(self) -> None:
         intercom = LoxoneControl(

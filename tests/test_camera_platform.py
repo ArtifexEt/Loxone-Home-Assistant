@@ -361,8 +361,9 @@ class CameraPlatformTests(unittest.IsolatedAsyncioTestCase):
         )
         entity = LoxoneIntercomCameraEntity(bridge, control)
 
-        self.assertEqual(entity.extra_state_attributes["stream_url"], expected_stream_url)
-        self.assertEqual(entity.extra_state_attributes["snapshot_url"], expected_snapshot_url)
+        self.assertEqual(entity._stream_url(), expected_stream_url)
+        self.assertNotIn("stream_url", entity.extra_state_attributes)
+        self.assertNotIn("snapshot_url", entity.extra_state_attributes)
 
         image = await entity.async_camera_image()
 
@@ -385,7 +386,7 @@ class CameraPlatformTests(unittest.IsolatedAsyncioTestCase):
         expected_snapshot_url = "https://198.51.100.70/rest/live.jpg"
         session = _FakeSession(
             {
-                (expected_snapshot_url, True): (200, b"external-live"),
+                (expected_snapshot_url, False): (200, b"external-live"),
             }
         )
         bridge = _FakeBridge(
@@ -401,8 +402,8 @@ class CameraPlatformTests(unittest.IsolatedAsyncioTestCase):
         )
         entity = LoxoneIntercomCameraEntity(bridge, control)
 
-        self.assertEqual(entity.extra_state_attributes["stream_url"], expected_stream_url)
-        self.assertEqual(entity.extra_state_attributes["snapshot_url"], expected_snapshot_url)
+        self.assertEqual(entity._stream_url(), expected_stream_url)
+        self.assertEqual(entity._snapshot_url(), expected_snapshot_url)
         self.assertEqual(await entity.async_camera_image(), b"external-live")
 
     async def test_camera_extracts_first_jpeg_frame_from_mjpeg_stream(self) -> None:
@@ -510,10 +511,7 @@ class CameraPlatformTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(image, b"history-image")
         self.assertEqual(session.calls, [(expected_history_url, True)])
-        self.assertEqual(
-            entity.extra_state_attributes["selected_history_image_url"],
-            expected_history_url,
-        )
+        self.assertNotIn("selected_history_image_url", entity.extra_state_attributes)
 
     async def test_history_selection_returns_still_response_from_live_endpoint(self) -> None:
         control = LoxoneControl(
@@ -555,7 +553,7 @@ class CameraPlatformTests(unittest.IsolatedAsyncioTestCase):
             name="Intercom Front",
             type="DoorController",
             states={"lastBellEvents": "state-events"},
-            details={},
+            details={"securedDetails": True},
         )
         expected_snapshot_url = "https://mini.local/dev/secured-alert.jpg"
         bridge = _FakeBridge(
@@ -580,10 +578,7 @@ class CameraPlatformTests(unittest.IsolatedAsyncioTestCase):
             bridge.action_calls,
             [("door-controller-action", "securedDetails")],
         )
-        self.assertEqual(
-            entity.extra_state_attributes["snapshot_url"],
-            expected_snapshot_url,
-        )
+        self.assertNotIn("snapshot_url", entity.extra_state_attributes)
 
     async def test_camera_retries_secured_details_after_connection_failure(self) -> None:
         control = LoxoneControl(
@@ -695,7 +690,7 @@ class CameraPlatformTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(session.auth_logins, ["camuser"])
 
-    async def test_live_stream_falls_back_to_current_user_credentials(self) -> None:
+    async def test_live_stream_never_sends_miniserver_credentials_to_camera(self) -> None:
         control = LoxoneControl(
             uuid="intercom-uuid",
             uuid_action="intercom-action",
@@ -706,7 +701,7 @@ class CameraPlatformTests(unittest.IsolatedAsyncioTestCase):
         )
         session = _FakeSession(
             {
-                ("http://192.0.2.10/mjpg/video.mjpg", True): (
+                ("http://192.0.2.10/mjpg/video.mjpg", False): (
                     200,
                     b"\xff\xd8\xff\xe0frame\xff\xd9",
                     "multipart/x-mixed-replace",
@@ -718,7 +713,7 @@ class CameraPlatformTests(unittest.IsolatedAsyncioTestCase):
 
         await entity.async_camera_image()
 
-        self.assertEqual(session.auth_logins, ["user"])
+        self.assertEqual(session.auth_logins, [None])
 
     async def test_snapshot_uses_dedicated_credentials_on_alternate_miniserver_port(self) -> None:
         url = "https://mini.local:8443/snapshot.jpg"

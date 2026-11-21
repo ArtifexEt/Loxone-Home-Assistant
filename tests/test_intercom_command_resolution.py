@@ -136,6 +136,35 @@ class IntercomCommandResolutionTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "must be an integer"):
             resolve_intercom_command("mute", "abc")
 
+    def test_rejects_out_of_range_flags(self) -> None:
+        for command, arguments in (
+            ("mute", [2]),
+            ("setframerate", [-1, 5]),
+            ("setresolution", [2, 720]),
+            ("setvideosettings", [2, 5, 720]),
+        ):
+            with self.subTest(command=command):
+                with self.assertRaisesRegex(ValueError, "must be 0 or 1"):
+                    resolve_intercom_command(command, arguments)
+
+    def test_history_and_config_are_not_boolean_intercom_states(self) -> None:
+        control = LoxoneControl(
+            uuid="intercom-uuid",
+            uuid_action="intercom-action",
+            name="Intercom",
+            type="IntercomV2",
+            states={
+                "answers": "state-answers",
+                "bellDuration": "state-duration",
+                "lastBellTimestamp": "state-timestamp",
+                "lightSettings": "state-light-settings",
+            },
+        )
+        self.assertEqual(intercom_module.intercom_boolean_state_roles(control), {})
+        self.assertEqual(intercom_module.intercom_history_state_name(control), "lastBellTimestamp")
+        del control.states["lastBellTimestamp"]
+        self.assertIsNone(intercom_module.intercom_history_state_name(control))
+
     def test_address_state_prefers_trust_address(self) -> None:
         control = LoxoneControl(
             uuid="intercom-uuid",

@@ -73,6 +73,7 @@ from .intercom_media import (
     LAST_BELL_EVENTS_DETAIL_PATHS,
     SNAPSHOT_DETAIL_PATHS,
     STREAM_DETAIL_PATHS,
+    async_intercom_secured_details,
     get_media_response,
     intercom_history_image_url,
     intercom_last_bell_events,
@@ -89,6 +90,7 @@ _LOGGER = logging.getLogger(__name__)
 _SNAPSHOT_TIMEOUT = 4
 _MJPEG_CHUNK_SIZE = 16 * 1024
 _MJPEG_MAX_SCAN_BYTES = 4 * 1024 * 1024
+_IMAGE_MEDIA_TYPES = frozenset({"image/jpeg", "image/png", "image/webp", "image/gif"})
 INTERCOM_CAMERA_DETAIL_PATHS = (
     *STREAM_DETAIL_PATHS,
     *SNAPSHOT_DETAIL_PATHS,
@@ -112,7 +114,11 @@ async def async_setup_entry(
     bridge = entry_bridge(hass, entry)
     entities = []
     loader = None
-    if CameraEntityCapabilities is not None and getattr(bridge, "use_tls", True):
+    if (
+        CameraEntityCapabilities is not None
+        and getattr(bridge, "use_tls", True)
+        and not getattr(bridge, "_remote_serial", None)
+    ):
         from .intercom_webrtc_camera import (
             IntercomRtcLoader,
             IntercomSnapshots,
@@ -146,9 +152,7 @@ class LoxoneIntercomCameraEntity(LoxoneEntity, Camera):
     def __init__(self, bridge, control: LoxoneControl, *, native_snapshot=None) -> None:
         Camera.__init__(self)
         super().__init__(bridge, control, "Video")
-        self._secured_details: dict[str, Any] | None = None
-        self._secured_details_loaded = False
-        self._secured_details_lock = asyncio.Lock()
+        self._secured_details: Mapping[str, Any] | None = None
         self._last_live_image: bytes | None = None
         self._native_snapshot = native_snapshot
         self._attr_entity_picture = None
@@ -160,29 +164,9 @@ class LoxoneIntercomCameraEntity(LoxoneEntity, Camera):
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         attrs = super().extra_state_attributes
-        stream_url = self._stream_url()
-        if stream_url is not None:
-            attrs["stream_url"] = stream_url
-
-        snapshot_url = self._snapshot_url()
-        if snapshot_url is not None:
-            attrs["snapshot_url"] = snapshot_url
-
         history_tokens = self._history_timestamps()
         if history_tokens:
-            attrs["history_timestamps"] = list(history_tokens)
             attrs["history_count"] = len(history_tokens)
-
-        selected_timestamp = self._selected_history_timestamp()
-        if selected_timestamp is not None:
-            attrs["selected_history_timestamp"] = selected_timestamp
-            selected_image_url = intercom_history_image_url(
-                self.bridge,
-                self.control,
-                selected_timestamp,
-            )
-            if selected_image_url is not None:
-                attrs["selected_history_image_url"] = selected_image_url
 
         return attrs
 
@@ -228,8 +212,10 @@ class LoxoneIntercomCameraEntity(LoxoneEntity, Camera):
             return _web_response(status=503)
 
         try:
-            request_auth = intercom_request_auth(self.bridge, stream_url)
-            async with get_media_response(self.bridge, session, stream_url, request_auth) as upstream:
+            request_auth = intercom_request_auth(
+                self.bridge, stream_url, control=self.control, secured_details=self._secured_details
+            )
+            async with get_media_response(session, stream_url, request_auth) as upstream:
                 if upstream.status != 200:
                     return _web_response(status=upstream.status if upstream.status >= 400 else 502)
                 if web is None:
@@ -237,8 +223,8 @@ class LoxoneIntercomCameraEntity(LoxoneEntity, Camera):
 
                 content_type = upstream.headers.get("Content-Type")
                 media_type = _response_content_type(upstream)
-                if content_type is None or media_type is None or not (
-                    media_type.startswith("image/") or media_type == "multipart/x-mixed-replace"
+                if content_type is None or not (
+                    media_type in _IMAGE_MEDIA_TYPES or media_type == "multipart/x-mixed-replace"
                 ):
                     return _web_response(status=502)
                 response = web.StreamResponse(
@@ -246,6 +232,7 @@ class LoxoneIntercomCameraEntity(LoxoneEntity, Camera):
                     headers={
                         "Content-Type": content_type,
                         "Cache-Control": "no-store",
+                        "X-Content-Type-Options": "nosniff",
                     },
                 )
                 await response.prepare(request)
@@ -261,15 +248,11 @@ class LoxoneIntercomCameraEntity(LoxoneEntity, Camera):
         except asyncio.CancelledError:
             raise
         except ClientError:
-            _LOGGER.debug(
-                "Intercom MJPEG proxy failed for %s",
-                self.control.uuid_action,
-            )
+            _LOGGER.debug("Intercom MJPEG proxy failed")
             return _web_response(status=502)
         except Exception as err:  # noqa: BLE001
             _LOGGER.debug(
-                "Intercom MJPEG proxy errored for %s (%s)",
-                self.control.uuid_action,
+                "Intercom MJPEG proxy errored (%s)",
                 type(err).__name__,
             )
             return _web_response(status=500)
@@ -301,16 +284,6 @@ class LoxoneIntercomCameraEntity(LoxoneEntity, Camera):
     def _selected_history_timestamp(self) -> str | None:
         return intercom_selected_history_timestamp(self.bridge, self.control.uuid_action)
 
-    def _current_image_url(self) -> str | None:
-        selected_timestamp = self._selected_history_timestamp()
-        if selected_timestamp is not None:
-            return intercom_history_image_url(self.bridge, self.control, selected_timestamp)
-
-        snapshot_url = self._snapshot_url()
-        if snapshot_url is not None:
-            return snapshot_url
-        return self._stream_url()
-
     def _image_url_candidates(self) -> tuple[str, ...]:
         selected_timestamp = self._selected_history_timestamp()
         if selected_timestamp is not None:
@@ -334,63 +307,36 @@ class LoxoneIntercomCameraEntity(LoxoneEntity, Camera):
             return None
 
         try:
-            request_auth = intercom_request_auth(self.bridge, image_url)
+            request_auth = intercom_request_auth(
+                self.bridge, image_url, control=self.control, secured_details=self._secured_details
+            )
             async with asyncio.timeout(_SNAPSHOT_TIMEOUT), get_media_response(
-                self.bridge, session, image_url, request_auth
+                session, image_url, request_auth
             ) as response:
                 if response.status != 200:
                     return None
                 content_type = _response_content_type(response)
                 if content_type in (None, "application/octet-stream", "multipart/x-mixed-replace"):
                     return await _extract_first_mjpeg_frame(response)
-                if content_type.startswith("image/"):
-                    payload = await response.read()
-                    return payload or None
+                if content_type in _IMAGE_MEDIA_TYPES:
+                    return await _read_still_image(response)
         except asyncio.CancelledError:
             raise
         except (ClientError, TimeoutError, ValueError) as err:
             _LOGGER.debug(
-                "Intercom image fetch failed for %s (%s)",
-                self.control.uuid_action,
+                "Intercom image fetch failed (%s)",
                 type(err).__name__,
             )
         except Exception as err:  # noqa: BLE001
             _LOGGER.debug(
-                "Intercom image fetch errored for %s (%s)",
-                self.control.uuid_action,
+                "Intercom image fetch errored (%s)",
                 type(err).__name__,
             )
         return None
 
     async def _ensure_secured_details_loaded(self) -> None:
-        if self._secured_details_loaded:
-            return
-
-        async with self._secured_details_lock:
-            if self._secured_details_loaded:
-                return
-
-            send_action = getattr(self.bridge, "async_send_action", None)
-            if send_action is None:
-                self._secured_details_loaded = True
-                return
-
-            try:
-                response = await send_action(self.control.uuid_action, "securedDetails")
-            except Exception as err:  # noqa: BLE001
-                _LOGGER.debug(
-                    "Could not load securedDetails for %s (%s)",
-                    self.control.uuid_action,
-                    err,
-                )
-                return
-
-            value = response.get("value") if isinstance(response, Mapping) else None
-            if isinstance(value, Mapping):
-                self._secured_details = dict(value)
-                self._secured_details_loaded = True
-            elif self.control.details.get("securedDetails") is not True:
-                self._secured_details_loaded = True
+        if self._secured_details is None:
+            self._secured_details = await async_intercom_secured_details(self.bridge, self.control)
 
 
 def _is_intercom_camera_control(control: LoxoneControl) -> bool:
@@ -474,6 +420,15 @@ async def _extract_first_mjpeg_frame(response: Any) -> bytes | None:
         if len(buffer) >= _MJPEG_MAX_SCAN_BYTES:
             break
     return _extract_jpeg_from_bytes(buffer)
+
+
+async def _read_still_image(response: Any) -> bytes | None:
+    image = bytearray()
+    async for chunk in response.content.iter_chunked(_MJPEG_CHUNK_SIZE):
+        if len(image) + len(chunk) > _MJPEG_MAX_SCAN_BYTES:
+            return None
+        image.extend(chunk)
+    return bytes(image) if image else None
 
 
 def _extract_jpeg_from_bytes(payload: bytes | bytearray) -> bytes | None:

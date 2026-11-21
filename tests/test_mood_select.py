@@ -161,6 +161,8 @@ LoxoneIntercomHistorySelectEntity = select_module.LoxoneIntercomHistorySelectEnt
 
 
 class _FakeHistoryResponse:
+    status = 200
+
     def __init__(self, payload) -> None:
         self._payload = payload
 
@@ -182,8 +184,8 @@ class _FakeHistorySession:
     def __init__(self, payload_by_url: dict[str, object]) -> None:
         self._payload_by_url = payload_by_url
 
-    def get(self, url: str, auth=None):
-        del auth
+    def get(self, url: str, auth=None, *, allow_redirects=True):
+        del auth, allow_redirects
         return _FakeHistoryResponse(self._payload_by_url[url])
 
 
@@ -417,6 +419,38 @@ class MoodSelectTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             media_module.intercom_history_image_url(bridge, intercom, selected_value),
             image_url,
+        )
+
+    async def test_untimed_history_selection_stays_private_and_preserves_photo(self) -> None:
+        archive = "https://mini.local/history/events.json"
+        original_photo = {"imageUrl": "https://mini.local/jpg/b.jpg?signature=example"}
+        events = [original_photo]
+        intercom = LoxoneControl(
+            uuid="intercom-uuid",
+            uuid_action="intercom-action",
+            name="Doorbell",
+            type="IntercomV2",
+            details={"eventHistoryUrl": archive},
+        )
+        session = _FakeHistorySession({archive: {"events": events}})
+        bridge = _FakeBridge([intercom], {}, session=session)
+        entity = LoxoneIntercomHistorySelectEntity(bridge, intercom)
+        await entity.async_update()
+        await entity.async_select_option("Photo 1")
+
+        self.assertNotIn("selected_timestamp", entity.extra_state_attributes)
+        self.assertNotIn("example", repr(entity.extra_state_attributes))
+
+        events.append({"imageUrl": "https://mini.local/jpg/c.jpg"})
+        await entity.async_update()
+
+        self.assertEqual(entity.current_option, "Photo 2")
+        selected_value = media_module.intercom_selected_history_timestamp(
+            bridge, intercom.uuid_action
+        )
+        self.assertEqual(
+            media_module.intercom_history_image_url(bridge, intercom, selected_value),
+            original_photo["imageUrl"],
         )
 
 

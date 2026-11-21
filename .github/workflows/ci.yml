@@ -29,7 +29,7 @@ jobs:
       - name: Install Home Assistant runtime dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install homeassistant==2025.1.0 numpy
+          pip install homeassistant==2025.1.0 numpy aiortc==1.16.0 pillow
 
       - name: Run unit tests without live credentials
         run: |

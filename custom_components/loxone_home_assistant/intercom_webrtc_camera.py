@@ -6,6 +6,7 @@ import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from importlib import import_module
+import logging
 from time import monotonic
 from typing import Any
 
@@ -18,7 +19,9 @@ from .const import DOMAIN
 from .entity import LoxoneEntity
 from .intercom_peer import IntercomPeer, IntercomPeerError, async_intercom_snapshot
 
+_LOGGER = logging.getLogger(__name__)
 _MEDIA_REQUIREMENT = "aiortc==1.16.0"
+_MEDIA_RETRY_INTERVAL = 30
 _SNAPSHOT_INTERVAL = 10
 _OFFER_TIMEOUT = 16
 _MAX_QUEUED_CANDIDATES = 64
@@ -30,8 +33,12 @@ class IntercomRtcLoader:
     def __init__(self, hass) -> None:
         self._hass = hass
         self._task: asyncio.Task | None = None
+        self._retry_at = 0.0
 
     async def async_load(self):
+        if self._task is not None and self._retry_at and monotonic() >= self._retry_at:
+            self._task = None
+            self._retry_at = 0.0
         if self._task is None:
             self._task = self._hass.async_create_background_task(
                 self._async_install_and_import(), name="loxone_intercom_media"
@@ -45,6 +52,7 @@ class IntercomRtcLoader:
             )
             return await self._hass.async_add_executor_job(_import_rtc)
         except Exception:
+            self._retry_at = monotonic() + _MEDIA_RETRY_INTERVAL
             raise IntercomPeerError("The Intercom WebRTC media dependency is unavailable.") from None
 
 
@@ -88,6 +96,7 @@ class _ClientSession:
     intercom: IntercomPeer | None = None
     discarded_media: Any = None
     negotiation: asyncio.Task | None = None
+    disconnect_watch: asyncio.Task | None = None
     parse_candidate: Callable | None = None
     remote_description_set: bool = False
     candidates: list = field(default_factory=list)
@@ -105,6 +114,7 @@ class LoxoneIntercomWebRTCCamera(LoxoneEntity, Camera):
         LoxoneEntity.__init__(self, bridge, control, "Live")
         self._snapshots = snapshots
         self._sessions: dict[str, _ClientSession] = {}
+        self._closing_tasks: set[asyncio.Task] = set()
 
     async def async_camera_image(
         self, width: int | None = None, height: int | None = None
@@ -126,9 +136,11 @@ class LoxoneIntercomWebRTCCamera(LoxoneEntity, Camera):
                 raise
 
     async def _async_negotiate(self, session_id, session, offer_sdp, send_message) -> None:
+        stage = "loading the media runtime"
         try:
             async with asyncio.timeout(_OFFER_TIMEOUT):
                 rtc, media, sdp = await self._snapshots.loader.async_load()
+                stage = "processing the Home Assistant offer"
                 session.parse_candidate = sdp.candidate_from_sdp
                 connection = session.connection = rtc.RTCPeerConnection(
                     rtc.RTCConfiguration(iceServers=[])
@@ -178,21 +190,39 @@ class LoxoneIntercomWebRTCCamera(LoxoneEntity, Camera):
                     await _async_add_candidate(session, candidate)
                 session.candidates.clear()
 
+                stage = "opening Intercom video"
                 intercom = session.intercom = await IntercomPeer.async_connect(
                     self.bridge, self._snapshots.device_uuid
                 )
                 await route_to_client(intercom.video_track)
                 if microphone is not None:
+                    stage = "opening Intercom audio"
                     doorbell_audio = await intercom.async_add_audio(
                         relay.subscribe(microphone, buffered=False)
                     )
                     await route_to_client(doorbell_audio)
 
+                stage = "answering the Home Assistant offer"
                 await connection.setLocalDescription(await connection.createAnswer())
                 send_message(WebRTCAnswer(connection.localDescription.sdp))
-        except Exception:
+            session.disconnect_watch = self.hass.async_create_background_task(
+                self._async_watch_disconnect(session_id, session, intercom, send_message),
+                name="loxone_intercom_watch",
+            )
+        except Exception as error:
+            _LOGGER.debug("Intercom WebRTC setup failed while %s (%s).", stage, type(error).__name__)
             if self._sessions.get(session_id) is session:
-                send_message(WebRTCError("loxone_intercom", "Could not start the Loxone Intercom stream."))
+                try:
+                    send_message(WebRTCError("loxone_intercom", "Could not start the Loxone Intercom stream."))
+                finally:
+                    self.close_webrtc_session(session_id)
+
+    async def _async_watch_disconnect(self, session_id, session, intercom, send_message) -> None:
+        await intercom.async_wait_disconnected()
+        if self._sessions.get(session_id) is session:
+            try:
+                send_message(WebRTCError("loxone_intercom", "The Loxone Intercom stream disconnected."))
+            finally:
                 self.close_webrtc_session(session_id)
 
     async def async_on_webrtc_candidate(self, session_id, candidate) -> None:
@@ -208,14 +238,16 @@ class LoxoneIntercomWebRTCCamera(LoxoneEntity, Camera):
     def close_webrtc_session(self, session_id: str) -> None:
         session = self._sessions.pop(session_id, None)
         if session is not None:
-            self.hass.async_create_task(
+            task = self.hass.async_create_task(
                 _async_close_session(session), name="loxone_intercom_close"
             )
+            self._closing_tasks.add(task)
+            task.add_done_callback(self._closing_tasks.discard)
 
     async def async_will_remove_from_hass(self) -> None:
-        sessions = tuple(self._sessions.values())
-        self._sessions.clear()
-        await asyncio.gather(*(_async_close_session(session) for session in sessions))
+        for session_id in tuple(self._sessions):
+            self.close_webrtc_session(session_id)
+        await asyncio.gather(*self._closing_tasks)
         await super().async_will_remove_from_hass()
 
 
@@ -235,9 +267,13 @@ async def _async_add_candidate(session: _ClientSession, candidate) -> None:
 
 
 async def _async_close_session(session: _ClientSession) -> None:
-    if session.negotiation is not None and not session.negotiation.done():
-        session.negotiation.cancel()
-        await asyncio.gather(session.negotiation, return_exceptions=True)
+    tasks = [
+        task for task in (session.negotiation, session.disconnect_watch)
+        if task is not None and not task.done()
+    ]
+    for task in tasks:
+        task.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
     resources = []
     if session.connection is not None:
         resources.append(session.connection.close())

@@ -33,6 +33,7 @@ class IntercomPeer:
         self._negotiation_lock = asyncio.Lock()
         self._notification_task: asyncio.Task[None] | None = None
         self._close_task: asyncio.Task[None] | None = None
+        self._disconnected = asyncio.Event()
         self._call_active = False
         self.video_track: Any | None = None
         self.audio_track: Any | None = None
@@ -109,6 +110,10 @@ class IntercomPeer:
         """Release both media and signaling, including after cancellation."""
         await asyncio.shield(self._start_close())
 
+    async def async_wait_disconnected(self) -> None:
+        """Wait until the Intercom stream has stopped or is being closed."""
+        await self._disconnected.wait()
+
     async def _async_negotiate(self, action: str) -> None:
         offer = await self._connection.createOffer()
         await self._connection.setLocalDescription(offer)
@@ -142,6 +147,7 @@ class IntercomPeer:
 
     def _start_close(self) -> asyncio.Task[None]:
         if self._close_task is None:
+            self._disconnected.set()
             self._close_task = asyncio.create_task(self._async_close_resources(), name="loxone_intercom_peer_close")
         return self._close_task
 

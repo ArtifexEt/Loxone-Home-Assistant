@@ -32,8 +32,9 @@ If the button does not open the flow directly, use `Settings -> Devices & Servic
 - exposes Intercom/IntercomV2 (and DoorController/DoorStation variants) as dedicated doorbell entities:
   - camera stream + snapshot preview when available
   - binary sensors for ring, call, proximity, and intercom light state
-  - Intercom Gen2 action buttons (`Stop Ringing`, `Mute Doorbell`, `Unmute Doorbell`)
-  - intercom history sensor based on `lastBellEvents` (latest event timestamp + recent image URLs)
+  - `Stop Ringing` button for Intercom Gen 1 and Gen 2, plus a Gen 2 doorbell mute switch when Loxone reports the mute state
+  - Gen 2 device status, when provided by the Miniserver
+  - intercom history sensor based on `lastBellEvents` and a photo selector for the camera preview
   - Home Assistant bus events (`loxone_home_assistant_intercom_event`) for automation triggers
 - exposes access/keypad-style activity events as Home Assistant bus events (`loxone_home_assistant_access_event`) so automations can react to granted/denied attempts (for example wrong PIN)
 - exposes `AudioZone`/`AudioZoneV2`/`CentralAudioZone` as `media_player` with source selection, browseable source library, seek/progress, shuffle/repeat, TTS and event/command passthrough via `play_media`
@@ -165,7 +166,7 @@ Choose **Search the local network** to discover a Miniserver or **Enter a host a
 
 For a Miniserver Gen 1 with a custom port, select **Enter a host and port**. Enter the hostname or IP in **Host** and the configured HTTP port in **Port**, for example `7778`. Manual setup is available even when a Gen 2 Miniserver is already configured.
 
-On TLS-capable Miniservers, Intercom video uses the configured Loxone user by default. With Gen 1, Miniserver media requests are anonymous. A direct Intercom endpoint can use its own separate credentials.
+Miniserver-served images use the configured Loxone user over HTTPS. For a Gen 1 Miniserver, media requests to the Miniserver are anonymous. Direct Intercom endpoints use dedicated credentials from the integration options or the camera configuration supplied by the Miniserver.
 
 If your Intercom camera stream returns `401 Unauthorized`, open integration `Options` and set dedicated Intercom video credentials (some Intercom models use separate video-module login data).
 
@@ -311,9 +312,9 @@ cards:
 
 The camera can show a live JPEG or MJPEG feed when the controller provides a compatible HTTP endpoint. History images are built
 from `lastBellEvents` and fetched from Miniserver `camimage/{uuidAction}/{timestamp}`.
-The `select.<name>_history_photo` entity is enabled by default so you can switch the camera
-preview between `Live` and historical snapshots. When the Intercom also exposes an
-`eventHistoryUrl` payload, the selector includes the full history returned by that endpoint.
+The `select.<name>_history_photo` entity switches the **Video** camera between `Live`
+and the historical snapshots made available by Loxone. Home Assistant serves the camera
+preview through its own camera proxy and keeps the original media URLs internal.
 
 ## Audio TTS UI in Home Assistant
 
@@ -380,7 +381,7 @@ Access/keypad events are emitted on rising edges for boolean-like states and on 
 
 On Home Assistant 2026.11 or later, a locally paired Intercom Gen 2 on an HTTPS Miniserver connection exposes a **Live** camera. It uses authenticated WebRTC for live video and can add audio when you start talking. The integration loads its optional WebRTC runtime on first use.
 
-Enable **Two-way audio** in Home Assistant Labs to get the microphone button. Use HTTPS or a supported Home Assistant companion app for microphone access. The existing **Video** camera can capture a live still from WebRTC when the Intercom provides no HTTP snapshot. Its history selection continues to use the available image URLs from Loxone. [Home Assistant camera documentation](https://www.home-assistant.io/integrations/camera/#talking-through-a-camera)
+Enable **Two-way audio** in Home Assistant Labs and open Home Assistant over HTTPS for a conversation with the Intercom. The iOS Companion app on an HTTP Home Assistant connection can send microphone audio in a separate session. The **Video** camera can capture a still from WebRTC when no HTTP snapshot is available. [Home Assistant camera documentation](https://www.home-assistant.io/integrations/camera/#talking-through-a-camera) · [iOS Companion implementation](https://github.com/home-assistant/iOS/blob/2524b83/Sources/App/Cameras/CameraPlayer/WebRTC/WebRTCClient.swift#L460)
 
 The `answer` command stops the bell, and `mute` controls the doorbell mute state. [Loxone Intercom documentation](https://www.loxone.com/enus/kb/intercom-2/) · [Network protocols](https://updatefiles.loxone.com/KnowledgeBase/Online/Common/Documents/Loxone-Required-Ports-Domains.pdf)
 

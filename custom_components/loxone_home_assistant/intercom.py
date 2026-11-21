@@ -33,6 +33,9 @@ INTERCOM_TYPE_HINTS = (
 INTERCOM_TYPE_HINTS_NORMALIZED = {
     normalize_state_name(value) for value in (*INTERCOM_CONTROL_TYPES, *INTERCOM_TYPE_HINTS)
 }
+_INTERCOM_GEN2_TYPES = {
+    normalize_state_name(value) for value in INTERCOM_CONTROL_TYPES if value.endswith("V2")
+}
 INTERCOM_VIDEO_STATE_CANDIDATES = (
     "streamUrl",
     "videoStream",
@@ -46,7 +49,17 @@ _DOORBELL_HINTS = ("bell", "ring", "doorbell", "call", "dzwonek")
 _PROXIMITY_HINTS = ("prox", "near", "approach", "person", "presence", "motion", "distance")
 _CALL_HINTS = ("call", "talk", "conversation", "voice")
 _LIGHT_HINTS = ("light", "illum", "led", "flash", "flood")
-_HISTORY_HINTS = ("lastbell", "history", "event", "snapshot", "answer", "record")
+_HISTORY_HINTS = ("lastbell", "history", "event", "snapshot", "record")
+_NON_BOOLEAN_STATE_HINTS = (
+    "lastbell",
+    "history",
+    "timestamp",
+    "image",
+    "snapshot",
+    "volume",
+    "duration",
+    "settings",
+)
 _ADDRESS_HINTS = ("address", "host", "hostname", "ip", "ipaddr", "ipaddress")
 _ADDRESS_STATE_CANDIDATES = (
     "trustAddress",
@@ -219,6 +232,10 @@ def resolve_intercom_command(command: str, arguments: Any = None) -> str:
                 f"Argument {index + 1} for '{canonical_command}' must be an integer."
             ) from err
 
+    if canonical_command in {"mute", "setvideosettings", "setframerate", "setresolution"}:
+        if int(resolved_arguments[0], 10) not in {0, 1}:
+            raise ValueError(f"Argument 1 for '{canonical_command}' must be 0 or 1.")
+
     encoded_arguments = [
         quote(argument, safe="(),:%._-") for argument in resolved_arguments
     ]
@@ -263,7 +280,9 @@ def _clean_intercom_argument_list(arguments: Sequence[Any]) -> list[str]:
 
 
 def intercom_doorbell_state_name(control: LoxoneControl) -> str | None:
-    return _first_state_with_fallback(control, DOORBELL_STATE_CANDIDATES, _DOORBELL_HINTS)
+    return _first_state_with_fallback(
+        control, DOORBELL_STATE_CANDIDATES, _DOORBELL_HINTS, _NON_BOOLEAN_STATE_HINTS
+    )
 
 
 def intercom_proximity_state_name(control: LoxoneControl) -> str | None:
@@ -271,19 +290,41 @@ def intercom_proximity_state_name(control: LoxoneControl) -> str | None:
         control,
         INTERCOM_PROXIMITY_STATE_CANDIDATES,
         _PROXIMITY_HINTS,
+        _NON_BOOLEAN_STATE_HINTS,
     )
 
 
 def intercom_call_state_name(control: LoxoneControl) -> str | None:
-    return _first_state_with_fallback(control, INTERCOM_CALL_STATE_CANDIDATES, _CALL_HINTS)
+    return _first_state_with_fallback(
+        control, INTERCOM_CALL_STATE_CANDIDATES, _CALL_HINTS, _NON_BOOLEAN_STATE_HINTS
+    )
 
 
 def intercom_light_state_name(control: LoxoneControl) -> str | None:
-    return _first_state_with_fallback(control, INTERCOM_LIGHT_STATE_CANDIDATES, _LIGHT_HINTS)
+    return _first_state_with_fallback(
+        control, INTERCOM_LIGHT_STATE_CANDIDATES, _LIGHT_HINTS, _NON_BOOLEAN_STATE_HINTS
+    )
 
 
 def intercom_history_state_name(control: LoxoneControl) -> str | None:
-    return _first_state_with_fallback(control, INTERCOM_HISTORY_STATE_CANDIDATES, _HISTORY_HINTS)
+    return _first_state_with_fallback(
+        control, (*INTERCOM_HISTORY_STATE_CANDIDATES, "eventHistoryUrl"), _HISTORY_HINTS
+    )
+
+
+def is_intercom_gen2_control(control: LoxoneControl) -> bool:
+    """Identify Gen 2 Intercom blocks by type or firmware-specific state."""
+    return normalize_state_name(control.type) in _INTERCOM_GEN2_TYPES or (
+        is_intercom_control(control)
+        and first_matching_state_name(control, ("trustAddress",)) is not None
+    )
+
+
+def intercom_mute_state_name(control: LoxoneControl) -> str | None:
+    """Find the Gen 2 doorbell mute state."""
+    if not is_intercom_gen2_control(control):
+        return None
+    return first_matching_state_name(control, ("muted",))
 
 
 def intercom_last_bell_events_state_name(control: LoxoneControl) -> str | None:
@@ -341,7 +382,7 @@ def intercom_boolean_state_roles(control: LoxoneControl) -> dict[str, str]:
     )
     for role, state_name in candidates_by_role:
         if state_name is not None:
-            roles[state_name] = role
+            roles.setdefault(state_name, role)
     return roles
 
 
@@ -381,6 +422,7 @@ def _first_state_with_fallback(
     control: LoxoneControl,
     candidates: tuple[str, ...],
     keyword_hints: tuple[str, ...],
+    excluded_hints: tuple[str, ...] = (),
 ) -> str | None:
     direct_match = first_matching_state_name(control, candidates)
     if direct_match is not None:
@@ -388,6 +430,8 @@ def _first_state_with_fallback(
 
     for state_name in control.states:
         normalized = normalize_state_name(state_name)
+        if any(hint in normalized for hint in excluded_hints):
+            continue
         if any(hint in normalized for hint in keyword_hints):
             return state_name
     return None
