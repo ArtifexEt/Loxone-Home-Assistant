@@ -16,6 +16,7 @@ _FRAME_TIMEOUT = 4
 _CLOSE_TIMEOUT = 2
 _ICE_ACK_TIMEOUT = 2
 _HANGUP_TIMEOUT = 1
+_INTERCOM_H264_PAYLOAD_TYPES = frozenset({99, 101})
 
 
 class IntercomPeerError(Exception):
@@ -51,7 +52,7 @@ class IntercomPeer:
             async with asyncio.timeout(_NEGOTIATION_TIMEOUT):
                 signaling = await IntercomSignaling.async_connect(bridge, device_uuid)
                 peer = cls(signaling, rtc, parse_candidate)
-                video = peer._connection.addTransceiver("video", direction="recvonly")
+                video = peer._connection.addTransceiver("video", direction="sendrecv")
                 codecs = rtc.RTCRtpReceiver.getCapabilities("video").codecs
                 video.setCodecPreferences([codec for codec in codecs if codec.mimeType.lower() == "video/h264"])
                 await peer._async_negotiate("new")
@@ -119,12 +120,12 @@ class IntercomPeer:
         await self._connection.setLocalDescription(offer)
         # aiortc gathers local ICE candidates before setting localDescription.
         sdp = self._connection.localDescription.sdp
-        answer = await self._signaling.async_call(sdp, action=action)
+        answer = await self._signaling.async_call(_trickle_offer(offer.sdp), action=action)
         self._call_active = True
+        answer = _accept_intercom_h264_payload_alias(sdp, answer)
         await self._connection.setRemoteDescription(self._rtc.RTCSessionDescription(sdp=answer, type="answer"))
 
-        # Also send gathered candidates after the answer, as the Loxone app does.
-        # The full SDP already contains them, so missing duplicate ACKs are harmless.
+        # The Intercom exchanges candidates separately from the SDP offer.
         try:
             async with asyncio.timeout(_ICE_ACK_TIMEOUT):
                 await asyncio.gather(
@@ -133,7 +134,6 @@ class IntercomPeer:
                 )
         except TimeoutError:
             _LOGGER.debug("The Intercom did not acknowledge its explicit ICE updates in time.")
-        await self._signaling.async_ice_gathering_finished()
 
     def _on_track(self, track: Any) -> None:
         if track.kind == "video":
@@ -234,6 +234,52 @@ def _load_media_runtime() -> tuple[Any, Any]:
     except (ImportError, OSError):
         raise IntercomPeerError("The Intercom WebRTC media runtime is unavailable.") from None
     return aiortc, candidate_from_sdp
+
+
+def _trickle_offer(sdp: str) -> str:
+    lines = sdp.splitlines()
+    first_media = next((i for i, line in enumerate(lines) if line.startswith("m=")), None)
+    if first_media is None:
+        return sdp
+    if "a=ice-options:trickle" not in lines[:first_media]:
+        lines.insert(first_media, "a=ice-options:trickle")
+    return "".join(
+        line + "\r\n" for line in lines
+        if not line.startswith(("a=candidate:", "a=end-of-candidates"))
+    )
+
+
+def _accept_intercom_h264_payload_alias(offer_sdp: str, answer_sdp: str) -> str:
+    """Accept both offered H.264 payloads when firmware announces only one."""
+    if "m=video " not in answer_sdp:
+        return answer_sdp
+
+    from aiortc.sdp import SessionDescription
+
+    offer = SessionDescription.parse(offer_sdp)
+    answer = SessionDescription.parse(answer_sdp)
+    changed = False
+    for offered, negotiated in zip(offer.media, answer.media):
+        if offered.kind != "video" or negotiated.kind != "video" or negotiated.port == 0:
+            continue
+        accepted = {codec.payloadType for codec in negotiated.rtp.codecs}
+        if not any(
+            codec.mimeType.lower() == "video/h264" and codec.payloadType in _INTERCOM_H264_PAYLOAD_TYPES
+            for codec in negotiated.rtp.codecs
+        ):
+            continue
+
+        # Some Gen 2 firmware answers with H.264 payload 101 and sends 99.
+        # Keep the advertised mapping and register the other offered H.264 payload.
+        for codec in offered.rtp.codecs:
+            if (
+                codec.mimeType.lower() == "video/h264"
+                and codec.payloadType in _INTERCOM_H264_PAYLOAD_TYPES - accepted
+            ):
+                negotiated.rtp.codecs.append(codec)
+                negotiated.fmt.append(codec.payloadType)
+                changed = True
+    return str(answer) if changed else answer_sdp
 
 
 def _sdp_ice_candidates(sdp: str) -> list[tuple[str, int, str | None]]:

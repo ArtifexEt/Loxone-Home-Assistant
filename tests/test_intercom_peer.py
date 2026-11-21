@@ -66,7 +66,6 @@ class IntercomPeerTests(unittest.IsolatedAsyncioTestCase):
         self.signaling = SimpleNamespace(
             async_call=AsyncMock(side_effect=self._answer),
             async_add_ice_candidate=AsyncMock(),
-            async_ice_gathering_finished=AsyncMock(),
             async_hangup=AsyncMock(),
             async_close=AsyncMock(),
             async_next_notification=self.notifications.get,
@@ -117,9 +116,9 @@ class IntercomPeerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result, b"image bytes")
         image.thumbnail.assert_called_once_with((320, 360))
         self.assertEqual(self.connection_configs[0].iceServers, [])
-        self.assertEqual(self.connection.transceivers[0].direction, "recvonly")
-        self.signaling.async_call.assert_awaited_once_with("offer 1 with gathered ICE", action="new")
-        self.signaling.async_ice_gathering_finished.assert_awaited_once()
+        self.assertEqual(self.connection.transceivers[0].direction, "sendrecv")
+        self.assertEqual(self.connection.transceivers[0].source, "video")
+        self.signaling.async_call.assert_awaited_once_with("offer 1", action="new")
         self.connection.close.assert_awaited_once()
         self.signaling.async_hangup.assert_awaited_once()
         self.signaling.async_close.assert_awaited_once()
@@ -134,7 +133,7 @@ class IntercomPeerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(self.connection.transceivers[1].source, microphone)
         self.assertEqual(self.connection.transceivers[1].direction, "sendrecv")
         self.assertIs(peer.audio_sender, self.connection.transceivers[1].sender)
-        self.signaling.async_call.assert_awaited_with("offer 2 with gathered ICE", action="add_audio")
+        self.signaling.async_call.assert_awaited_with("offer 2", action="add_audio")
         await asyncio.gather(peer.async_close(), peer.async_close())
         self.connection.close.assert_awaited_once()
 
@@ -182,25 +181,21 @@ class IntercomPeerTests(unittest.IsolatedAsyncioTestCase):
         self.signaling.async_hangup.assert_not_called()
         self.signaling.async_close.assert_awaited_once()
 
-    async def test_trickles_full_sdp_candidates_before_reporting_gathering_finished(self) -> None:
+    async def test_trickles_gathered_candidates_separately_from_the_offer(self) -> None:
         self.connection.createOffer = AsyncMock(return_value=SimpleNamespace(sdp=(
             "v=0\r\nm=video 123 UDP/TLS/RTP/SAVPF 99\r\n"
-            "a=candidate:video-host\r\na=mid:camera\r\n"
+            "a=candidate:video-host\r\na=end-of-candidates\r\na=mid:camera\r\n"
         )))
-        events = []
-
-        async def add_candidate(*candidate):
-            events.append(candidate)
-
-        async def gathering_finished():
-            events.append("finished")
-
-        self.signaling.async_add_ice_candidate.side_effect = add_candidate
-        self.signaling.async_ice_gathering_finished.side_effect = gathering_finished
         peer = await peer_module.IntercomPeer.async_connect(object(), "device-id")
         self.addAsyncCleanup(peer.async_close)
 
-        self.assertEqual(events, [("candidate:video-host", 0, "camera"), "finished"])
+        self.signaling.async_call.assert_awaited_once_with(
+            "v=0\r\na=ice-options:trickle\r\nm=video 123 UDP/TLS/RTP/SAVPF 99\r\na=mid:camera\r\n",
+            action="new",
+        )
+        self.signaling.async_add_ice_candidate.assert_awaited_once_with(
+            "candidate:video-host", 0, "camera"
+        )
 
 class RealIntercomPeerTests(unittest.IsolatedAsyncioTestCase):
     async def test_h264_preview_and_audio_in_both_directions(self) -> None:
@@ -212,6 +207,7 @@ class RealIntercomPeerTests(unittest.IsolatedAsyncioTestCase):
                 RTCSessionDescription,
                 VideoStreamTrack,
             )
+            from aiortc.sdp import SessionDescription, candidate_from_sdp
             from PIL import Image
         except ImportError:
             self.skipTest("optional aiortc and Pillow media runtime is unavailable")
@@ -246,6 +242,7 @@ class RealIntercomPeerTests(unittest.IsolatedAsyncioTestCase):
             actions.append(action)
             self.assertIn("H264/90000", sdp)
             self.assertNotIn("VP8/90000", sdp)
+            self.assertNotIn("a=candidate:", sdp)
             await doorbell.setRemoteDescription(RTCSessionDescription(sdp=sdp, type="offer"))
             if action == "new":
                 self.assertNotIn("m=audio", sdp)
@@ -253,13 +250,24 @@ class RealIntercomPeerTests(unittest.IsolatedAsyncioTestCase):
             elif action == "add_audio":
                 doorbell.addTrack(ToneTrack(1000))
             await doorbell.setLocalDescription(await doorbell.createAnswer())
-            return doorbell.localDescription.sdp
+            answer = SessionDescription.parse(doorbell.localDescription.sdp)
+            video = next(section for section in answer.media if section.kind == "video")
+            self.assertEqual(video.fmt, [99, 101])
+            # Reproduce the firmware advertising 101 while transmitting on 99.
+            video.fmt.remove(99)
+            video.rtp.codecs = [codec for codec in video.rtp.codecs if codec.payloadType != 99]
+            return str(answer)
+
+        async def add_candidate(value, index, mid):
+            candidate = candidate_from_sdp(value.removeprefix("candidate:"))
+            candidate.sdpMLineIndex = index
+            candidate.sdpMid = mid
+            await doorbell.addIceCandidate(candidate)
 
         signaling = SimpleNamespace(
             async_call=answer_offer,
             async_next_notification=notifications.get,
-            async_add_ice_candidate=AsyncMock(),
-            async_ice_gathering_finished=AsyncMock(),
+            async_add_ice_candidate=add_candidate,
             async_hangup=AsyncMock(),
             async_close=AsyncMock(),
         )

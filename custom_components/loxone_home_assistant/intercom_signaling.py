@@ -169,14 +169,13 @@ class IntercomSignaling:
         sdp: str,
         *,
         action: str = "new",
-        static_video: bool = False,
     ) -> str:
         """Send a WebRTC offer for a new call or renegotiate its audio tracks."""
         if action not in {"new", "add_audio", "remove_audio"}:
             raise ValueError("Unsupported Intercom call action.")
         result = await self.async_request(
             "call",
-            [{"type": "offer", "sdp": sdp}, action, False, int(static_video)],
+            [{"type": "offer", "sdp": sdp}, action, False],
         )
         answer = result.get("sdp") if isinstance(result, dict) else None
         if not isinstance(answer, str) or not answer:
@@ -195,15 +194,6 @@ class IntercomSignaling:
         if sdp_mid is not None:
             params.append(sdp_mid)
         await self.async_request("addIceCandidate", params)
-
-    async def async_ice_gathering_finished(self) -> None:
-        """Notify the Intercom that the local peer finished gathering candidates."""
-        if self._closed:
-            raise IntercomSignalingError("The Intercom signaling connection is closed.")
-        try:
-            await self._websocket.send_json({"jsonrpc": "2.0", "method": "iceGatheringFinished"})
-        except (OSError, RuntimeError):
-            raise IntercomSignalingError("The Intercom signaling notification could not be sent.") from None
 
     async def async_next_notification(self) -> dict[str, Any]:
         """Read the next unsolicited notification, including remote ICE candidates."""

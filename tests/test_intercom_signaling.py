@@ -126,7 +126,7 @@ class IntercomSignalingTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(call.cancel)
         offer = await asyncio.wait_for(self.websocket.sent_messages.get(), 1)
         self.assertEqual(offer["method"], "call")
-        self.assertEqual(offer["params"], [{"type": "offer", "sdp": "offer SDP"}, "add_audio", False, 0])
+        self.assertEqual(offer["params"], [{"type": "offer", "sdp": "offer SDP"}, "add_audio", False])
 
         ice = ["candidate:abc", 0, "video"]
         self.websocket.receive(id=99, method="addIceCandidate", params=ice)
@@ -138,10 +138,7 @@ class IntercomSignalingTests(unittest.IsolatedAsyncioTestCase):
             "jsonrpc": "2.0", "id": 99, "result": {"code": 200, "message": "Ok"},
         })
 
-        await session.async_ice_gathering_finished()
-        self.assertEqual(self.websocket.sent[-1], {"jsonrpc": "2.0", "method": "iceGatheringFinished"})
         await self.websocket.sent_messages.get()  # Acknowledgement of the device's candidate.
-        await self.websocket.sent_messages.get()  # Local ICE gathering notification.
 
         teardown = asyncio.create_task(session.async_hangup())
         self.addCleanup(teardown.cancel)
