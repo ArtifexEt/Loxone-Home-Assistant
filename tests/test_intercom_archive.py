@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import hmac
+import json
 import unittest
 from importlib import import_module
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, call, patch
 
 from tests._loader import load_integration_module
 
@@ -17,6 +20,11 @@ DEVICE_UUID = "01234567-89ab-cdef-0123456789abcdef"
 NEWER = 1_800_000_100
 OLDER = 1_800_000_000
 JPEG = b"\xff\xd8synthetic JPEG payload\xff\xd9"
+
+
+def _test_jwt(claims: dict) -> str:
+    payload = base64.urlsafe_b64encode(json.dumps(claims).encode()).decode().rstrip("=")
+    return f"eyJhbGciOiJIUzI1NiJ9.{payload}.synthetic-signature"
 
 
 class Gen2ArchiveTests(unittest.IsolatedAsyncioTestCase):
@@ -98,6 +106,50 @@ class Gen2ArchiveTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(archive.is_gen2_archive_control(self.bridge, self.control))
         self.connect.assert_not_awaited()
 
+    async def test_modern_photo_uses_permission_zero_jwt_from_token_challenge(self) -> None:
+        token = _test_jwt({"msSerial": "000000000001", "tokenRights": 0})
+        key = "a3ff0061"
+        self.bridge.client_uuid = "00000000-0000-0000-0000-000000000001"
+        self.bridge.username = "Dummy User"
+        self.bridge.async_send_raw_command = AsyncMock(side_effect=[
+            {"value": {"key": key, "hashAlg": "SHA256"}},
+            {"value": {"token": token, "tokenRights": 0, "validUntil": 900_000_000}},
+        ])
+
+        for timestamp in (NEWER, OLDER):
+            self.assertEqual(
+                await archive.async_gen2_archive_image(self.bridge, self.control, f"gen2:{timestamp}"), JPEG
+            )
+
+        self.bridge.async_send_raw_command.assert_any_await("jdev/sys/getkey2/Dummy%20User")
+        proof = hmac.digest(bytes.fromhex(key), b"synthetic-token", "sha256").hex()
+        command = self.bridge.async_send_raw_command.await_args_list[1].args[0]
+        self.assertEqual(self.bridge.async_send_raw_command.await_count, 2)
+        self.assertRegex(command, rf"^jdev/sys/getjwt/{proof}/Dummy%20User/0/"
+                         r"[0-9a-f]{8}(-[0-9a-f]{4}){2}-[0-9a-f]{16}/"
+                         r"Home%20Assistant%20Intercom\?tokenHash=true$")
+        self.session.async_get_archive_photo.assert_has_awaits([
+            call(self.photo_path, auth_token=token), call("snapshots/older.jpg", auth_token=token),
+        ])
+        self.assertNotIn(token, repr(self.bridge._intercom_archive_access))
+
+    async def test_rejected_modern_token_uses_the_existing_intercom_challenge(self) -> None:
+        self.bridge.client_uuid = "test-client"
+        self.bridge.username = "test user"
+        self.bridge.async_send_raw_command = AsyncMock(side_effect=[
+            {"value": {"key": "00000000"}},
+            {"value": {"token": _test_jwt({"tokenRights": 0})}},
+        ])
+        self.assertEqual(
+            await archive.async_gen2_archive_image(self.bridge, self.control, f"gen2:{NEWER}"), JPEG
+        )
+        self.session.async_get_archive_photo.assert_awaited_once_with(self.photo_path)
+
+    async def test_does_not_accept_a_token_with_broad_rights(self) -> None:
+        self.assertIsNone(archive._archive_token_payload(_test_jwt({
+            "msSerial": "000000000001", "tokenRights": 4,
+        })))
+
 
 class ArchiveDownloadTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
@@ -142,6 +194,20 @@ class ArchiveDownloadTests(unittest.IsolatedAsyncioTestCase):
             "?signature=%2f%2B&version=1&autht=synthetic+photo+token",
             {"ssl": self.tls, "allow_redirects": False},
         )])
+
+    async def test_explicit_photo_token_replaces_the_session_challenge(self) -> None:
+        token = _test_jwt({"msSerial": "000000000001", "tokenRights": 0})
+        self.status = 401
+        with self.assertLogs(signaling.__name__, "DEBUG") as logs:
+            self.assertIsNone(await self.session.async_get_archive_photo("photo.jpg", auth_token=token))
+
+        self.assertEqual(self.calls, [(
+            f"https://example.invalid:8443/base/proxy/{DEVICE_UUID}/photo.jpg?autht={token}",
+            {"ssl": self.tls, "allow_redirects": False},
+        )])
+        self.assertIn("HTTP status 401", logs.output[0])
+        self.assertNotIn(token, logs.output[0])
+        self.assertNotIn("example.invalid", logs.output[0])
 
     async def test_external_and_traversal_paths_are_rejected(self) -> None:
         for path in (

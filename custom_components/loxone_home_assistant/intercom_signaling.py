@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import logging
 import re
 import secrets
 from typing import TYPE_CHECKING, Any
@@ -20,6 +21,7 @@ if TYPE_CHECKING:
 
     from .bridge import LoxoneBridge
 
+_LOGGER = logging.getLogger(__name__)
 _WEBSOCKET_PROTOCOL = "webrtc-signaling"
 _LOCAL_REACH_MODE = 2
 _REQUEST_TIMEOUT = 10
@@ -203,26 +205,30 @@ class IntercomSignaling:
         """End the WebRTC call belonging to this authenticated session."""
         await self.async_request("hangup")
 
-    async def async_get_archive_photo(self, image_path: str) -> bytes | None:
+    async def async_get_archive_photo(self, image_path: str, *, auth_token: str | None = None) -> bytes | None:
         """Download a private archive JPEG over the authenticated proxy origin."""
         from aiohttp import ClientError
         from yarl import URL
 
-        if self._closed or self._photo_token is None:
+        token = self._photo_token if auth_token is None else auth_token
+        if self._closed or token is None:
             return None
-        url = _archive_photo_url(self._proxy_url, image_path, self._photo_token)
+        url = _archive_photo_url(self._proxy_url, image_path, token)
         if url is None:
+            _LOGGER.debug("Rejected an invalid Loxone Intercom archive photo path")
             return None
 
         try:
             async with asyncio.timeout(_REQUEST_TIMEOUT), self._client.get(
                 URL(url, encoded=True), ssl=self._tls, allow_redirects=False
             ) as response:
-                if (
-                    response.status != 200
-                    or response.content_type not in {"image/jpeg", "image/jpg", "application/octet-stream"}
-                    or (response.content_length or 0) > _MAX_PHOTO_BYTES
-                ):
+                if response.status != 200:
+                    _LOGGER.debug("Loxone Intercom archive photo HTTP status %d", response.status)
+                    return None
+                if response.content_type not in {"image/jpeg", "image/jpg", "application/octet-stream"}:
+                    _LOGGER.debug("Loxone Intercom archive photo response did not contain a JPEG")
+                    return None
+                if (response.content_length or 0) > _MAX_PHOTO_BYTES:
                     return None
                 photo = bytearray()
                 async for chunk in response.content.iter_chunked(64 * 1024):
@@ -231,6 +237,7 @@ class IntercomSignaling:
                     photo.extend(chunk)
                 return bytes(photo) if photo.startswith(b"\xff\xd8") else None
         except (ClientError, OSError, RuntimeError, TimeoutError, ValueError):
+            _LOGGER.debug("Loxone Intercom archive photo request failed")
             return None
 
     async def async_add_ice_candidate(

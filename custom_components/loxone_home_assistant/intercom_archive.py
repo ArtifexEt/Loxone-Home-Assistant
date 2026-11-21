@@ -3,21 +3,32 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import hmac
+import json
+import logging
+import re
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from time import monotonic
+from time import monotonic, time
 from typing import Any
+from urllib.parse import quote
+from uuid import NAMESPACE_URL, uuid5
 
 from .intercom_signaling import IntercomSignaling, IntercomSignalingError
 from .models import LoxoneControl
 
 GEN2_ARCHIVE_SELECTION_PREFIX = "gen2:"
+_LOGGER = logging.getLogger(__name__)
 _ARCHIVE_LIMIT = 100
 _ARCHIVE_TIMEOUT = 15
 _ARCHIVE_REFRESH_INTERVAL = 25
 _PHOTO_CACHE_INTERVAL = 15
 _LATEST_TIMESTAMP = 253_402_300_799  # Last second representable by Python datetime.
+_LOXONE_EPOCH = 1_230_768_000
+_PHOTO_TOKEN_RETRY = 30
+_JWT = re.compile(r"[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+")
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,6 +51,13 @@ class _ArchiveCache:
     photo_timestamp: int | None = None
     photo_expires_at: float = 0
     photo: bytes | None = None
+
+
+@dataclass(slots=True)
+class _ArchiveAccess:
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    expires_at: float = 0
+    token: str | None = field(default=None, repr=False)
 
 
 def is_gen2_archive_control(bridge, control: LoxoneControl) -> bool:
@@ -101,7 +119,7 @@ async def async_gen2_archive_image(bridge, control: LoxoneControl, selection_val
                 cache.next_refresh = monotonic() + _ARCHIVE_REFRESH_INTERVAL
                 cache.refreshed_for = hint
                 path = paths.get(timestamp)
-                photo = await signaling.async_get_archive_photo(path) if path is not None else None
+                photo = await _async_download_photo(bridge, signaling, path) if path is not None else None
         except (IntercomSignalingError, OSError, TimeoutError):
             photo = None
 
@@ -109,6 +127,89 @@ async def async_gen2_archive_image(bridge, control: LoxoneControl, selection_val
         cache.photo_expires_at = monotonic() + _PHOTO_CACHE_INTERVAL
         cache.photo = photo
         return photo
+
+
+async def _async_download_photo(bridge, signaling: IntercomSignaling, path: str) -> bytes | None:
+    token = await _async_archive_token(bridge)
+    if token is not None:
+        photo = await signaling.async_get_archive_photo(path, auth_token=token)
+        if photo is not None:
+            return photo
+    return await signaling.async_get_archive_photo(path)
+
+
+async def _async_archive_token(bridge) -> str | None:
+    send = getattr(bridge, "async_send_raw_command", None)
+    client_uuid = getattr(bridge, "client_uuid", None)
+    username = getattr(bridge, "username", None)
+    if send is None or not client_uuid or not isinstance(username, str):
+        return None
+    access = getattr(bridge, "_intercom_archive_access", None)
+    if access is None:
+        access = bridge._intercom_archive_access = _ArchiveAccess()
+
+    async with access.lock:
+        if monotonic() < access.expires_at:
+            return access.token
+        access.token = None
+        access.expires_at = monotonic() + _PHOTO_TOKEN_RETRY
+        username = quote(username.strip(), safe="")
+        # Keep this permission-0 credential separate from the integration's login token.
+        parts = str(uuid5(NAMESPACE_URL, f"loxone-intercom-archive:{client_uuid}")).split("-")
+        archive_uuid = "-".join((*parts[:3], parts[3] + parts[4]))
+        try:
+            challenge = (await send(f"jdev/sys/getkey2/{username}")).get("value")
+            if not isinstance(challenge, Mapping):
+                return None
+            algorithm = challenge.get("hashAlg", "SHA256")
+            if algorithm not in ("SHA256", "SHA1") or not bridge.token:
+                return None
+            proof = hmac.digest(bytes.fromhex(challenge["key"]), bridge.token.encode(), algorithm.lower()).hex()
+            response = await send(
+                f"jdev/sys/getjwt/{proof}/{username}/0/{archive_uuid}/"
+                "Home%20Assistant%20Intercom?tokenHash=true"
+            )
+        except Exception:  # The bridge may raise connection/authentication errors or return a malformed challenge.
+            _LOGGER.debug("Could not request a scoped Loxone Intercom photo token")
+            return None
+
+        value = response.get("value")
+        if not isinstance(value, Mapping):
+            return None
+        token = value.get("token")
+        payload = _archive_token_payload(token)
+        if payload is None or value.get("tokenRights", 0) not in (0, "0"):
+            _LOGGER.debug("Miniserver did not provide a scoped Loxone Intercom photo token")
+            return None
+
+        expires_at = value.get("validUntil")
+        try:
+            duration = int(expires_at) + _LOXONE_EPOCH - time() - 10
+        except (TypeError, ValueError, OverflowError):
+            duration = _PHOTO_TOKEN_RETRY
+        if duration <= 0:
+            return None
+        access.token = token
+        access.expires_at = monotonic() + duration
+        _LOGGER.debug("Miniserver issued a scoped Loxone Intercom photo token")
+        return token
+
+
+def _archive_token_payload(token: Any) -> Mapping[str, Any] | None:
+    if not isinstance(token, str) or len(token) > 8192 or not _JWT.fullmatch(token):
+        return None
+    payload = token.split(".")[1]
+    try:
+        claims = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
+    except (UnicodeError, ValueError, RecursionError):
+        return None
+    if (
+        not isinstance(claims, Mapping)
+        or not claims.get("msSerial")
+        or claims.get("tokenRights", 0) not in (0, "0")
+    ):
+        return None
+    return claims
 
 
 def _archive_cache(bridge, control: LoxoneControl) -> _ArchiveCache:
