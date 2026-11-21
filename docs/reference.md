@@ -46,6 +46,8 @@ The following table describes the mappings in this source tree. Your project det
 
 Existing alarm and media-controller switch entities keep their registry settings. Some unsupported blocks expose raw diagnostic sensors or binary sensors, disabled by default. A `Webpage` with a system diagram can also appear as a disabled diagnostic.
 
+When the media controller reports a selected mode without a power state, Home Assistant marks the remote state as assumed. It uses the reported mode and remembers power commands sent from the remote entity until the connection is lost.
+
 The parser reads `msInfo`, `lastModified`, `controls` and nested `subControls`, `rooms`, `cats`, and `mediaServer` from `LoxAPP3.json`. Sections such as `globalStates`, `weatherServer`, `times`, `caller`, `autopilot`, and `messageCenter` remain outside the dedicated entity mappings. [Loxone structure file specification](https://www.loxone.com/enen/wp-content/uploads/sites/3/2026/04/1700_Structure-File.pdf)
 
 ## Home Assistant actions
