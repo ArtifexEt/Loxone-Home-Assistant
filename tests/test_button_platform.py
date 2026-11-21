@@ -428,6 +428,7 @@ class ButtonPlatformTests(unittest.IsolatedAsyncioTestCase):
         intercom_module.set_intercom_tts_message(bridge, "intercom-action", "Test message")
         intercom_module.set_intercom_tts_volume(bridge, "intercom-action", 75)
 
+        self.assertNotIn("intercom_tts_message", tts_button.extra_state_attributes)
         await tts_button.async_press()
         self.assertEqual(
             bridge.commands,

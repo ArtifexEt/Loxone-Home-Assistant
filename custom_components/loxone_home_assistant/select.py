@@ -21,12 +21,12 @@ from .const import (
     RADIO_SELECT_CONTROL_TYPES,
 )
 from .entity import LoxoneEntity, control_entity_unique_id
-from .intercom import intercom_history_state_name, is_intercom_control
+from .intercom import is_intercom_control
 from .intercom_media import (
     IntercomHistoryEntry,
     async_intercom_history_entries,
-    has_intercom_history_detail,
     set_intercom_selected_history_timestamp,
+    supports_intercom_history,
 )
 from .light import CONTROLLER_TYPES
 from .models import LoxoneControl
@@ -68,7 +68,7 @@ async def async_setup_entry(
     intercom_controls = [
         control
         for control in bridge.controls
-        if is_intercom_control(control) and _supports_intercom_history_select(control)
+        if is_intercom_control(control) and supports_intercom_history(bridge, control)
     ]
 
     entities = [LoxoneMoodSelectEntity(bridge, control) for control in controls]
@@ -322,10 +322,6 @@ def _extract_radio_outputs(control: LoxoneControl) -> list[tuple[int, str]]:
 
     outputs.sort(key=lambda item: item[0])
     return outputs
-
-
-def _supports_intercom_history_select(control: LoxoneControl) -> bool:
-    return intercom_history_state_name(control) is not None or has_intercom_history_detail(control)
 
 
 def _build_intercom_history_options(

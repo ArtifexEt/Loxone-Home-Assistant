@@ -67,6 +67,11 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .entity import LoxoneEntity, normalize_state_name
 from .intercom import is_intercom_control
+from .intercom_archive import (
+    GEN2_ARCHIVE_SELECTION_PREFIX,
+    async_gen2_archive_image,
+    is_gen2_archive_control,
+)
 from .intercom_media import (
     HISTORY_URL_DETAIL_PATHS,
     INTERCOM_DYNAMIC_PAYLOAD_STATE_NAMES,
@@ -134,7 +139,11 @@ async def async_setup_entry(
             if isinstance(device_uuid, str) and device_uuid and not control.details.get("trustMember"):
                 snapshots = IntercomSnapshots(loader, bridge, device_uuid)
                 entities.append(LoxoneIntercomWebRTCCamera(bridge, control, snapshots))
-        if snapshots is not None or _is_intercom_camera_control(control):
+        if (
+            snapshots is not None
+            or is_gen2_archive_control(bridge, control)
+            or _is_intercom_camera_control(control)
+        ):
             entities.append(
                 LoxoneIntercomCameraEntity(
                     bridge, control, native_snapshot=snapshots.async_image if snapshots else None
@@ -175,16 +184,19 @@ class LoxoneIntercomCameraEntity(LoxoneEntity, Camera):
     ) -> bytes | None:
         del width, height
 
+        selected_history = self._selected_history_timestamp()
+        if selected_history is not None and selected_history.startswith(GEN2_ARCHIVE_SELECTION_PREFIX):
+            return await async_gen2_archive_image(self.bridge, self.control, selected_history)
+
         await self._ensure_secured_details_loaded()
-        selected_history = self._selected_history_timestamp() is not None
-        for image_url in self._image_url_candidates():
+        for image_url in self._image_url_candidates(selected_history):
             image = await self._async_fetch_image(image_url)
             if image is None:
                 continue
-            if not selected_history:
+            if selected_history is None:
                 self._last_live_image = image
             return image
-        if selected_history:
+        if selected_history is not None:
             return None
         if self._native_snapshot is not None:
             image = await self._native_snapshot()
@@ -284,8 +296,7 @@ class LoxoneIntercomCameraEntity(LoxoneEntity, Camera):
     def _selected_history_timestamp(self) -> str | None:
         return intercom_selected_history_timestamp(self.bridge, self.control.uuid_action)
 
-    def _image_url_candidates(self) -> tuple[str, ...]:
-        selected_timestamp = self._selected_history_timestamp()
+    def _image_url_candidates(self, selected_timestamp: str | None) -> tuple[str, ...]:
         if selected_timestamp is not None:
             selected_url = intercom_history_image_url(
                 self.bridge,

@@ -5,6 +5,8 @@ from __future__ import annotations
 import sys
 import types
 import unittest
+from datetime import datetime, timezone
+from unittest.mock import AsyncMock, patch
 
 from tests._loader import load_integration_module
 
@@ -237,6 +239,44 @@ class IntercomSensorTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(value=value):
                 values["state-device"] = value
                 self.assertEqual(status.native_value, expected)
+
+    async def test_setup_adds_gen2_archive_sensor_without_legacy_history_metadata(self) -> None:
+        control = LoxoneControl(
+            uuid="intercom-uuid",
+            uuid_action="intercom-action",
+            name="Sample Intercom",
+            type="IntercomV2",
+            states={"bell": "state-bell"},
+            details={"deviceUuid": "00000000-0000-4000-8000-000000000001"},
+        )
+        bridge = _FakeBridge([control], {"state-bell": False})
+        entry = _FakeConfigEntry("entry-1")
+        entities = []
+        await sensor_module.async_setup_entry(
+            _FakeHass(entry.entry_id, bridge, const.DOMAIN), entry, entities.extend
+        )
+        history_sensor, = entities
+        self.assertIsInstance(history_sensor, sensor_module.LoxoneIntercomHistorySensor)
+        self.assertEqual(history_sensor.relevant_state_uuids(), ["state-bell"])
+
+        timestamp = 1_773_491_445
+        archive = AsyncMock(return_value=(types.SimpleNamespace(
+            timestamp=timestamp, selection_value=f"gen2:{timestamp}",
+        ),))
+        with patch.dict(
+            sensor_module.async_intercom_history_entries.__globals__,
+            {"async_gen2_archive_entries": archive},
+        ):
+            await history_sensor.async_update()
+
+        archive.assert_awaited_once_with(bridge, control)
+        self.assertEqual(
+            history_sensor.native_value, datetime.fromtimestamp(timestamp, timezone.utc)
+        )
+        attrs = history_sensor.extra_state_attributes
+        self.assertEqual(attrs["event_count"], 1)
+        self.assertEqual(attrs["history_timestamps"], [str(timestamp)])
+        self.assertNotIn("gen2:", repr(attrs))
 
     async def test_setup_adds_intercom_history_sensor_from_last_bell_events(self) -> None:
         control = LoxoneControl(

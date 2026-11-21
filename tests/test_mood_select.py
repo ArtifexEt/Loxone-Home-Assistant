@@ -5,6 +5,8 @@ from __future__ import annotations
 import sys
 import types
 import unittest
+from datetime import datetime, timezone
+from unittest.mock import AsyncMock, patch
 
 from tests._loader import load_integration_module
 
@@ -347,6 +349,44 @@ class MoodSelectTests(unittest.IsolatedAsyncioTestCase):
         await entity.async_select_option("Live")
         self.assertEqual(entity.current_option, "Live")
         self.assertNotIn("intercom-action", bridge._intercom_selected_history_timestamps)  # noqa: SLF001
+
+    async def test_gen2_archive_photo_replaces_duplicate_legacy_entry_and_stays_selected(self) -> None:
+        control = LoxoneControl(
+            uuid="intercom-uuid",
+            uuid_action="intercom-action",
+            name="Sample Intercom",
+            type="IntercomV2",
+            states={"bell": "state-bell", "lastBellEvents": "state-events"},
+            details={"deviceUuid": "00000000-0000-4000-8000-000000000001"},
+        )
+        event_time = datetime(2026, 3, 14, 12, 30, 45, tzinfo=timezone.utc)
+        timestamp = int(event_time.timestamp())
+        selection_value = f"gen2:{timestamp}"
+        bridge = _FakeBridge(
+            [control], {"state-events": "20260314123045|20260314100000"}
+        )
+        entity = LoxoneIntercomHistorySelectEntity(bridge, control)
+        archive = AsyncMock(return_value=(types.SimpleNamespace(
+            timestamp=timestamp, selection_value=selection_value,
+        ),))
+        with patch.dict(
+            select_module.async_intercom_history_entries.__globals__,
+            {"async_gen2_archive_entries": archive},
+        ):
+            await entity.async_update()
+            self.assertEqual(len(entity._attr_options), 3)
+            photo_option = entity._attr_options[1]
+            await entity.async_select_option(photo_option)
+            await entity.async_update()
+
+        self.assertEqual(entity.current_option, photo_option)
+        self.assertEqual(
+            media_module.intercom_selected_history_timestamp(bridge, control.uuid_action),
+            selection_value,
+        )
+        self.assertIsNone(media_module.intercom_history_image_url(bridge, control, selection_value))
+        self.assertEqual(entity.extra_state_attributes["selected_timestamp"], str(timestamp))
+        self.assertNotIn(selection_value, repr(entity.extra_state_attributes))
 
     async def test_intercom_history_select_loads_full_history_from_event_history_url(self) -> None:
         intercom = LoxoneControl(

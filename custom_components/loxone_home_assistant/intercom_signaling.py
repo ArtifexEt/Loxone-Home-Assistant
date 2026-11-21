@@ -7,7 +7,7 @@ import base64
 import re
 import secrets
 from typing import TYPE_CHECKING, Any
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import unquote_plus, urlencode, urlsplit, urlunsplit
 
 from cryptography import x509
 from cryptography.hazmat.primitives import padding, serialization
@@ -16,7 +16,7 @@ from cryptography.hazmat.primitives.asymmetric.rsa import RSAPublicKey, RSAPubli
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
 if TYPE_CHECKING:
-    from aiohttp import ClientSession, ClientWebSocketResponse
+    from aiohttp import ClientSession, ClientWebSocketResponse, Fingerprint
 
     from .bridge import LoxoneBridge
 
@@ -25,6 +25,8 @@ _LOCAL_REACH_MODE = 2
 _REQUEST_TIMEOUT = 10
 _CONNECTION_TIMEOUT = 15
 _UUID = re.compile(r"[0-9a-f]{8}-(?:[0-9a-f]{4}-){2}(?:[0-9a-f]{16}|[0-9a-f]{4}-[0-9a-f]{12})", re.I)
+_PHOTO_PATH = re.compile(r"[A-Za-z0-9._~+=/-]+")
+_MAX_PHOTO_BYTES = 4 * 1024 * 1024
 
 
 class IntercomSignalingError(Exception):
@@ -70,9 +72,18 @@ def intercom_websocket_url(bridge: LoxoneBridge, device_uuid: str) -> str:
 class IntercomSignaling:
     """One authenticated Intercom WebSocket and its in-flight JSON-RPC requests."""
 
-    def __init__(self, client: ClientSession, websocket: ClientWebSocketResponse) -> None:
+    def __init__(
+        self,
+        client: ClientSession,
+        websocket: ClientWebSocketResponse,
+        proxy_url: str,
+        tls: bool | Fingerprint,
+    ) -> None:
         self._client = client
         self._websocket = websocket
+        self._proxy_url = proxy_url
+        self._tls = tls
+        self._photo_token: str | None = None
         self._next_id = 1
         self._pending: dict[int, asyncio.Future[Any]] = {}
         self._notifications: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue(maxsize=256)
@@ -111,7 +122,7 @@ class IntercomSignaling:
                 )
                 if websocket.protocol != _WEBSOCKET_PROTOCOL:
                     raise IntercomSignalingError("The Intercom refused its signaling subprotocol.")
-                connection = cls(client, websocket)
+                connection = cls(client, websocket, url, tls)
                 await connection._async_authenticate(bridge.username, token)
         except (Exception, asyncio.CancelledError) as error:
             await client.close()
@@ -128,8 +139,10 @@ class IntercomSignaling:
             message = await self._async_receive()
             method = message.get("method")
             if method == "authenticate" and "id" in message and not authenticated:
-                response = _authentication_response(message.get("params"), username, token)
+                params = message.get("params")
+                response = _authentication_response(params, username, token)
                 await self._async_respond(message["id"], response)
+                self._photo_token = params[0]
                 authenticated = True
             elif method == "ready" and authenticated:
                 return
@@ -189,6 +202,36 @@ class IntercomSignaling:
     async def async_hangup(self) -> None:
         """End the WebRTC call belonging to this authenticated session."""
         await self.async_request("hangup")
+
+    async def async_get_archive_photo(self, image_path: str) -> bytes | None:
+        """Download a private archive JPEG over the authenticated proxy origin."""
+        from aiohttp import ClientError
+        from yarl import URL
+
+        if self._closed or self._photo_token is None:
+            return None
+        url = _archive_photo_url(self._proxy_url, image_path, self._photo_token)
+        if url is None:
+            return None
+
+        try:
+            async with asyncio.timeout(_REQUEST_TIMEOUT), self._client.get(
+                URL(url, encoded=True), ssl=self._tls, allow_redirects=False
+            ) as response:
+                if (
+                    response.status != 200
+                    or response.content_type not in {"image/jpeg", "image/jpg", "application/octet-stream"}
+                    or (response.content_length or 0) > _MAX_PHOTO_BYTES
+                ):
+                    return None
+                photo = bytearray()
+                async for chunk in response.content.iter_chunked(64 * 1024):
+                    if len(photo) + len(chunk) > _MAX_PHOTO_BYTES:
+                        return None
+                    photo.extend(chunk)
+                return bytes(photo) if photo.startswith(b"\xff\xd8") else None
+        except (ClientError, OSError, RuntimeError, TimeoutError, ValueError):
+            return None
 
     async def async_add_ice_candidate(
         self, candidate: str, sdp_mline_index: int, sdp_mid: str | None = None
@@ -285,12 +328,45 @@ class IntercomSignaling:
         if self._closed:
             return
         self._closed = True
+        self._photo_token = None
         for future in self._pending.values():
             if not future.done():
                 future.set_exception(IntercomSignalingError("The Intercom signaling connection was closed."))
         if self._notifications.full():
             self._notifications.get_nowait()
         self._notifications.put_nowait(None)
+
+
+def _archive_photo_url(proxy_url: str, image_path: str, token: str) -> str | None:
+    if len(image_path) > 4096 or any(ord(char) <= 32 for char in image_path):
+        return None
+    try:
+        photo = urlsplit(image_path)
+    except ValueError:
+        return None
+
+    path = photo.path.removeprefix("/")
+    lower_path = path.lower()
+    if (
+        photo.scheme
+        or photo.netloc
+        or photo.fragment
+        or image_path.startswith("//")
+        or not _PHOTO_PATH.fullmatch(path)
+        or not (
+            lower_path.startswith(("snapshots/", "jpg/"))
+            or lower_path.endswith((".jpg", ".jpeg"))
+        )
+        or any(part in {"", ".", ".."} for part in path.split("/"))
+    ):
+        return None
+    query = [
+        pair for pair in photo.query.split("&")
+        if pair and unquote_plus(pair.partition("=")[0]).casefold() != "autht"
+    ]
+    query.append(urlencode({"autht": token}))
+    proxy = urlsplit(proxy_url)
+    return urlunsplit(("https", proxy.netloc, proxy.path + path, "&".join(query), ""))
 
 
 def _authentication_response(params: Any, username: str, token: str) -> list[str]:

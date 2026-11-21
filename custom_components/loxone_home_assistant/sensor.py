@@ -57,8 +57,8 @@ from .intercom import (
 from .intercom_media import (
     async_intercom_history_entries,
     coerce_intercom_datetime,
-    has_intercom_history_detail,
     intercom_last_bell_timestamp,
+    supports_intercom_history,
 )
 from .models import LoxoneControl
 from .runtime import entry_bridge
@@ -953,7 +953,7 @@ def _first_non_boolean_state_name(
 def _build_intercom_sensors(bridge, control: LoxoneControl) -> list[SensorEntity]:
     entities: list[SensorEntity] = []
     history_state_name = intercom_history_state_name(control)
-    if history_state_name is not None or has_intercom_history_detail(control):
+    if supports_intercom_history(bridge, control):
         entities.append(LoxoneIntercomHistorySensor(bridge, control, history_state_name))
     device_state_name = first_matching_state_name(control, ("deviceState",))
     if device_state_name is not None:

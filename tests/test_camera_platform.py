@@ -6,6 +6,7 @@ import sys
 import types
 import unittest
 from enum import IntFlag
+from unittest.mock import AsyncMock, patch
 
 from tests._loader import load_integration_module
 
@@ -545,6 +546,35 @@ class CameraPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status, 200)
         self.assertEqual(response.body, b"history-image")
         self.assertEqual(response.content_type, "image/jpeg")
+
+    async def test_native_archive_selection_uses_private_photo_client(self) -> None:
+        control = LoxoneControl(
+            uuid="intercom-uuid",
+            uuid_action="intercom-action",
+            name="Doorbell",
+            type="IntercomV2",
+            details={"deviceUuid": "12345678-1234-1234-1234567890123456"},
+        )
+        session = _FakeSession()
+        bridge = _FakeBridge([control], {}, session)
+        entry = _FakeConfigEntry("entry-1")
+        hass = _FakeHass(entry.entry_id, bridge, const.DOMAIN)
+        entities = []
+        await camera_module.async_setup_entry(hass, entry, entities.extend)
+        self.assertEqual(len(entities), 1)
+
+        selection = "gen2:1773451234"
+        media_module.set_intercom_selected_history_timestamp(bridge, control.uuid_action, selection)
+        with patch.object(
+            camera_module, "async_gen2_archive_image",
+            AsyncMock(side_effect=(b"\xff\xd8archive-photo\xff\xd9", None)),
+        ) as archive_image:
+            response = await entities[0].handle_async_mjpeg_stream(request=None)
+            self.assertEqual(response.status, 200)
+            self.assertEqual(response.body, b"\xff\xd8archive-photo\xff\xd9")
+            self.assertIsNone(await entities[0].async_camera_image())
+            archive_image.assert_awaited_with(bridge, control, selection)
+        self.assertEqual(session.calls, [])
 
     async def test_camera_uses_secured_details_for_media_urls(self) -> None:
         control = LoxoneControl(

@@ -26,9 +26,15 @@ except ImportError:  # pragma: no cover - fallback for lightweight test stubs
 from .entity import first_matching_state_name, normalize_state_name
 from .intercom import (
     intercom_address_state_name,
+    intercom_history_state_name,
     intercom_last_bell_events_state_name,
     intercom_last_bell_timestamp_state_name,
     resolve_intercom_http_url,
+)
+from .intercom_archive import (
+    GEN2_ARCHIVE_SELECTION_PREFIX,
+    async_gen2_archive_entries,
+    is_gen2_archive_control,
 )
 from .models import LoxoneControl
 
@@ -132,7 +138,7 @@ class IntercomHistoryEntry:
     """One Loxone Intercom history image reference."""
 
     raw_timestamp: str
-    image_url: str
+    image_url: str | None
     event_time: datetime | None
     selection_value: str
 
@@ -179,6 +185,15 @@ def has_intercom_history_detail(control: LoxoneControl) -> bool:
     return _mapping_value(
         control.details, LAST_BELL_EVENTS_DETAIL_PATHS + HISTORY_URL_DETAIL_PATHS
     ) is not None
+
+
+def supports_intercom_history(bridge, control: LoxoneControl) -> bool:
+    """Identify controls providing a device archive or legacy history metadata."""
+    return (
+        is_gen2_archive_control(bridge, control)
+        or intercom_history_state_name(control) is not None
+        or has_intercom_history_detail(control)
+    )
 
 
 async def async_intercom_secured_details(
@@ -346,8 +361,23 @@ async def async_intercom_history_entries(
     last_bell_events: tuple[str, ...] | None = None,
     state_value_getter,
 ) -> tuple[IntercomHistoryEntry, ...]:
-    """Return merged Intercom history from `lastBellEvents` and event-history payloads."""
+    """Merge the Gen 2 activity archive and legacy history metadata."""
     merged: dict[str, IntercomHistoryEntry] = {}
+    archive_timestamps: set[datetime] = set()
+    if is_gen2_archive_control(bridge, control):
+        for record in await async_gen2_archive_entries(bridge, control):
+            event_time = coerce_intercom_datetime(record.timestamp)
+            if event_time is None:
+                continue
+            archive_timestamps.add(event_time)
+            entry = IntercomHistoryEntry(
+                raw_timestamp=str(record.timestamp),
+                image_url=None,
+                event_time=event_time,
+                selection_value=record.selection_value,
+            )
+            merged.setdefault(_history_entry_key(entry), entry)
+
     if secured_details is None:
         secured_details = await async_intercom_secured_details(bridge, control)
     if last_bell_events is None:
@@ -361,7 +391,8 @@ async def async_intercom_history_entries(
         last_bell_events=last_bell_events,
         state_value_getter=state_value_getter,
     ):
-        merged.setdefault(_history_entry_key(entry), entry)
+        if entry.event_time not in archive_timestamps:
+            merged.setdefault(_history_entry_key(entry), entry)
 
     history_payload_url = intercom_history_payload_url(
         bridge,
@@ -384,6 +415,8 @@ async def async_intercom_history_entries(
         address_value=address_value,
         media_base_url=history_payload_url,
     ):
+        if event_entry.event_time in archive_timestamps:
+            continue
         key = _history_entry_key(event_entry)
         existing = merged.get(key)
         # Prefer a server-provided image URL over an inferred Miniserver path.
@@ -452,7 +485,7 @@ def intercom_history_image_url(
     raw_timestamp: str | None,
 ) -> str | None:
     text = _coerce_text(raw_timestamp)
-    if text is None:
+    if text is None or text.startswith(GEN2_ARCHIVE_SELECTION_PREFIX):
         return None
     if text.startswith(INTERCOM_HISTORY_DIRECT_URL_PREFIX):
         return resolve_intercom_http_url(
@@ -654,7 +687,7 @@ def _payload_value(payload: Any, detail_paths: tuple[str, ...]) -> Any:
 
 
 def _history_entry_key(entry: IntercomHistoryEntry) -> str:
-    return entry.raw_timestamp or entry.image_url
+    return entry.raw_timestamp or entry.image_url or entry.selection_value
 
 
 def _sorted_history_entries(
@@ -667,7 +700,7 @@ def _sorted_history_entries(
                 entry.event_time is not None,
                 entry.event_time or datetime.min.replace(tzinfo=timezone.utc),
                 entry.raw_timestamp,
-                entry.image_url,
+                entry.image_url or "",
             ),
             reverse=True,
         )

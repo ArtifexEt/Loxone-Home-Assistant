@@ -180,10 +180,6 @@ class LoxoneIntercomTtsButton(LoxoneEntity, ButtonEntity):
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         attrs = super().extra_state_attributes
-        attrs["intercom_tts_message"] = intercom_tts_message(
-            self.bridge,
-            self.control.uuid_action,
-        )
         attrs["intercom_tts_volume"] = intercom_tts_volume(
             self.bridge,
             self.control.uuid_action,

@@ -273,13 +273,15 @@ data:
 
 Use parent Intercom `uuid_action` (you can copy it from any Intercom entity attributes, for example `camera.<name>_video`).
 
-The integration now creates native Intercom TTS controls automatically (per Intercom):
+The integration creates native Intercom TTS controls. Put the text field and button on
+an Entities card to send a message from a dashboard:
 
 - `text.<intercom>_tts_message`
-- `number.<intercom>_tts_volume`
 - `button.<intercom>_send_tts`
 
-Pressing `Send TTS` sends only message text to the parent Intercom `uuid_action`.
+Enter up to 255 characters in the Home Assistant text field, then press `Send TTS`
+to play the message through the Intercom speaker. Loxone requires Internet access
+for this function. [Loxone Intercom documentation](https://www.loxone.com/enen/kb/intercom-2/)
 
 You can still call service directly if needed:
 
@@ -288,7 +290,6 @@ service: loxone_home_assistant.send_tts
 data:
   uuid_action: intercom-v2-uuid-action
   message: "Kurier jest pod drzwiami"
-  volume: 60
 ```
 
 Lovelace card example (`camera_view: live` is important for video stream):
@@ -310,11 +311,11 @@ cards:
       - button.furtka_send_tts
 ```
 
-The camera can show a live JPEG or MJPEG feed when the controller provides a compatible HTTP endpoint. History images are built
-from `lastBellEvents` and fetched from Miniserver `camimage/{uuidAction}/{timestamp}`.
-The `select.<name>_history_photo` entity switches the **Video** camera between `Live`
-and the historical snapshots made available by Loxone. Home Assistant serves the camera
-preview through its own camera proxy and keeps the original media URLs internal.
+The camera can show a live JPEG or MJPEG feed when the controller provides a compatible HTTP endpoint.
+For a locally paired Intercom Gen 2, the integration reads the native activity archive through the authenticated Miniserver connection.
+On controllers that publish `lastBellEvents`, legacy photos are fetched from Miniserver `camimage/{uuidAction}/{timestamp}`.
+The `select.<name>_history_photo` entity switches the **Video** camera between `Live` and the available photos.
+Put that selector and the **Video** camera on a dashboard to browse the archive. Home Assistant serves the image through its camera proxy and keeps the original media URLs internal.
 
 ## Audio TTS UI in Home Assistant
 
