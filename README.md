@@ -287,7 +287,7 @@ The [example dashboard](examples/intercom-dashboard.yaml) has live video, a **Ta
    | Example ID | Intercom entity |
    | --- | --- |
    | `camera.example_intercom_live` | **Live** camera for video and two-way audio |
-   | `camera.example_intercom_video` | **Video** camera for the photo gallery |
+   | `camera.example_intercom_video` | **Photo preview** camera for the photo gallery |
    | `binary_sensor.example_intercom_doorbell` | **Doorbell signal** binary sensor |
    | `text.example_intercom_tts_message` | **TTS Message** text field |
    | `button.example_intercom_send_tts` | **Send TTS** button |
@@ -309,7 +309,7 @@ Enter up to 255 characters in the Home Assistant text field, then press `Send TT
 to play the message through the Intercom speaker. Loxone requires Internet access
 for this function. [Loxone Intercom documentation](https://www.loxone.com/enen/kb/intercom-2/)
 
-To send a message with the integration action, copy the parent `uuid_action` from an Intercom entity such as the **Video** camera.
+To send a message with the integration action, copy the parent `uuid_action` from an Intercom entity such as the **Photo preview** camera.
 
 ```yaml
 service: loxone_home_assistant.send_tts
@@ -324,7 +324,7 @@ For a locally paired Intercom Gen 2, the integration reads the native activity a
 
 On the Intercom device page in **Settings → Devices & Services → Loxone → Devices**, select **Visit** to open its photo history. Select a thumbnail to view the full photo, then use **Download photo** if you want to save it.
 
-To place the gallery on a dashboard, add `/loxone_home_assistant/intercom-gallery.js` as a **JavaScript module** in **Settings → Dashboards → Resources**. Enable Advanced Mode in your Home Assistant profile if Resources is hidden. Then create a manual card and set `entity` to the Intercom's **Video** camera.
+To place the gallery on a dashboard, add `/loxone_home_assistant/intercom-gallery.js` as a **JavaScript module** in **Settings → Dashboards → Resources**. Enable Advanced Mode in your Home Assistant profile if Resources is hidden. Then create a manual card and set `entity` to the Intercom's **Photo preview** camera.
 
 ```yaml
 type: custom:loxone-intercom-gallery
@@ -333,7 +333,7 @@ entity: camera.example_intercom_video
 
 Click or tap a thumbnail to open the full photo. Home Assistant serves the photos to users with read access to that camera. Loxone media URLs and credentials stay inside the integration.
 
-The `select.<name>_history_photo` entity also lets you switch the **Video** camera between `Live` and the available photos. This selector supports legacy controllers that publish `lastBellEvents`.
+On the device page, select a date in **History photo** to update the **Photo preview** thumbnail. Click **Photo preview** to open the selected photo. Select `Live` to return to the current camera image. This selector also supports legacy controllers that publish `lastBellEvents`.
 
 ## Audio TTS UI in Home Assistant
 
@@ -400,7 +400,7 @@ Access/keypad events are emitted on rising edges for boolean-like states and on 
 
 On Home Assistant 2026.11 or later, a locally paired Intercom Gen 2 on an HTTPS Miniserver connection exposes a **Live** camera. It uses authenticated WebRTC for live video and can add audio when you start talking. The integration loads its optional WebRTC runtime on first use.
 
-Enable **Two-way audio** in Home Assistant Labs and open Home Assistant over HTTPS. Open the **Live** camera and select **Start talking** to start a conversation. A dashboard tile for the **Live** camera with the **More info** tap action opens the same dialog. The iOS Companion app on an HTTP Home Assistant connection can send microphone audio in a separate session. The **Video** camera can capture a still from WebRTC when no HTTP snapshot is available. [Home Assistant camera documentation](https://www.home-assistant.io/integrations/camera/#talking-through-a-camera) · [iOS Companion implementation](https://github.com/home-assistant/iOS/blob/2524b83/Sources/App/Cameras/CameraPlayer/WebRTC/WebRTCClient.swift#L460)
+Enable **Two-way audio** in Home Assistant Labs and open Home Assistant over HTTPS. Open the **Live** camera and select **Start talking** to start a conversation. A dashboard tile for the **Live** camera with the **More info** tap action opens the same dialog. The iOS Companion app on an HTTP Home Assistant connection can send microphone audio in a separate session. The **Photo preview** camera can capture a still from WebRTC when no HTTP snapshot is available. [Home Assistant camera documentation](https://www.home-assistant.io/integrations/camera/#talking-through-a-camera) · [iOS Companion implementation](https://github.com/home-assistant/iOS/blob/2524b83/Sources/App/Cameras/CameraPlayer/WebRTC/WebRTCClient.swift#L460)
 
 The `answer` command stops the bell, and `mute` controls the doorbell mute state. [Loxone Intercom documentation](https://www.loxone.com/enus/kb/intercom-2/) · [Network protocols](https://updatefiles.loxone.com/KnowledgeBase/Online/Common/Documents/Loxone-Required-Ports-Domains.pdf)
 

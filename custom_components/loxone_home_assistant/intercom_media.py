@@ -7,6 +7,7 @@ import json
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from hashlib import sha256
 from typing import Any
 from urllib.parse import quote, urljoin, urlsplit, urlunsplit
 
@@ -506,21 +507,35 @@ def intercom_selected_history_timestamp(bridge, uuid_action: str) -> str | None:
     return _coerce_text(selected.get(str(uuid_action)))
 
 
+def intercom_history_selection_signal(bridge, uuid_action: str) -> str:
+    """Identify selection changes for one Intercom on this bridge."""
+    action_digest = sha256(str(uuid_action).encode()).hexdigest()
+    return f"loxone_intercom_history_selection_{id(bridge)}_{action_digest}"
+
+
 def set_intercom_selected_history_timestamp(
     bridge,
     uuid_action: str,
     raw_timestamp: str | None,
 ) -> None:
+    text = _coerce_text(raw_timestamp)
+    if intercom_selected_history_timestamp(bridge, uuid_action) == text:
+        return
+
     selected = getattr(bridge, INTERCOM_HISTORY_SELECTED_ATTR, None)
     if not isinstance(selected, dict):
         selected = {}
         setattr(bridge, INTERCOM_HISTORY_SELECTED_ATTR, selected)
 
-    text = _coerce_text(raw_timestamp)
     if text is None:
         selected.pop(str(uuid_action), None)
-        return
-    selected[str(uuid_action)] = text
+    else:
+        selected[str(uuid_action)] = text
+
+    if (hass := getattr(bridge, "hass", None)) is not None:
+        from homeassistant.helpers.dispatcher import async_dispatcher_send
+
+        async_dispatcher_send(hass, intercom_history_selection_signal(bridge, uuid_action))
 
 
 def coerce_intercom_datetime(value: Any) -> datetime | None:

@@ -85,6 +85,7 @@ def _install_homeassistant_stubs() -> None:
         pass
 
     core.HomeAssistant = HomeAssistant
+    core.callback = lambda func: func
     sys.modules["homeassistant.core"] = core
 
     helpers = types.ModuleType("homeassistant.helpers")
@@ -513,6 +514,74 @@ class CameraPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(image, b"history-image")
         self.assertEqual(session.calls, [(expected_history_url, True)])
         self.assertNotIn("selected_history_image_url", entity.extra_state_attributes)
+
+    async def test_camera_refreshes_thumbnail_only_when_its_selection_changes(self) -> None:
+        control = LoxoneControl(
+            uuid="intercom-uuid",
+            uuid_action="intercom-action",
+            name="Doorbell",
+            type="IntercomV2",
+        )
+        bridge = _FakeBridge([control], {}, _FakeSession())
+        other_bridge = _FakeBridge([control], {}, _FakeSession())
+        entity = LoxoneIntercomCameraEntity(bridge, control)
+        hass = _FakeHass("entry-1", bridge, const.DOMAIN)
+        bridge.hass = other_bridge.hass = entity.hass = hass
+        entity.registry_entry = None
+        listeners = {}
+        cleanups = []
+        updates = []
+
+        def connect(_hass, signal, listener):
+            listeners[signal] = listener
+            return lambda: listeners.pop(signal, None)
+
+        def send(_hass, signal):
+            if signal in listeners:
+                listeners[signal]()
+
+        def record(operation):
+            selection = media_module.intercom_selected_history_timestamp(
+                bridge, control.uuid_action
+            )
+            updates.append((operation, selection))
+
+        entity.async_on_remove = cleanups.append
+        entity.async_update_token = lambda: record("token")
+        entity.async_write_ha_state = lambda: record("state")
+        dependency_stubs = {
+            "homeassistant.helpers.dispatcher": types.SimpleNamespace(
+                async_dispatcher_connect=connect, async_dispatcher_send=send,
+            ),
+            "custom_components.loxone_home_assistant.intercom_gallery": types.SimpleNamespace(
+                async_add_intercom_history_device_link=lambda *args: None,
+            ),
+        }
+        first_photo = "gen2:1773451234"
+        second_photo = "gen2:1773451235"
+        with patch.dict(sys.modules, dependency_stubs):
+            await entity.async_added_to_hass()
+            media_module.set_intercom_selected_history_timestamp(
+                bridge, "other-intercom", first_photo
+            )
+            media_module.set_intercom_selected_history_timestamp(
+                other_bridge, control.uuid_action, first_photo
+            )
+            for selection in (first_photo, first_photo, second_photo, None, None):
+                media_module.set_intercom_selected_history_timestamp(
+                    bridge, control.uuid_action, selection
+                )
+            (unsubscribe,) = cleanups
+            unsubscribe()
+            media_module.set_intercom_selected_history_timestamp(
+                bridge, control.uuid_action, first_photo
+            )
+
+        self.assertEqual(updates, [
+            ("token", first_photo), ("state", first_photo),
+            ("token", second_photo), ("state", second_photo),
+            ("token", None), ("state", None),
+        ])
 
     async def test_history_selection_returns_still_response_from_live_endpoint(self) -> None:
         control = LoxoneControl(

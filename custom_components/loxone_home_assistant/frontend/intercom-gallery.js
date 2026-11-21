@@ -246,7 +246,7 @@ class LoxoneIntercomGallery extends HTMLElement {
 
   setConfig(config) {
     if (typeof config?.entity !== "string" || !/^camera\.[a-z0-9_]+$/.test(config.entity)) {
-      throw new Error("Set entity to the Loxone Intercom Video camera.");
+      throw new Error("Set entity to the Loxone Intercom Photo preview camera.");
     }
     if (config.entity === this._entity) return;
     this._entity = config.entity;

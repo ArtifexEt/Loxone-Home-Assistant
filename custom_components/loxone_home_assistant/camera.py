@@ -62,7 +62,7 @@ try:
 except TypeError:  # pragma: no cover - defensive for minimal stubs
     CAMERA_FEATURE_NONE = 0
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .entity import LoxoneEntity, normalize_state_name
@@ -81,6 +81,7 @@ from .intercom_media import (
     async_intercom_secured_details,
     get_media_response,
     intercom_history_image_url,
+    intercom_history_selection_signal,
     intercom_last_bell_events,
     intercom_request_auth,
     intercom_selected_history_timestamp,
@@ -169,10 +170,23 @@ class LoxoneIntercomCameraEntity(LoxoneEntity, Camera):
 
     async def async_added_to_hass(self) -> None:
         """Publish the Home Assistant history link once this camera is registered."""
+        from homeassistant.helpers.dispatcher import async_dispatcher_connect
+
         from .intercom_gallery import async_add_intercom_history_device_link
 
         await super().async_added_to_hass()
+        self.async_on_remove(async_dispatcher_connect(
+            self.hass,
+            intercom_history_selection_signal(self.bridge, self.control.uuid_action),
+            self._async_history_selection_changed,
+        ))
         async_add_intercom_history_device_link(self.hass, self.registry_entry, self.bridge, self.control)
+
+    @callback
+    def _async_history_selection_changed(self) -> None:
+        """Refresh Home Assistant's camera thumbnail for the selected photo."""
+        self.async_update_token()
+        self.async_write_ha_state()
 
     async def stream_source(self) -> str | None:
         """Disable Home Assistant stream/WebRTC for the Intercom."""
