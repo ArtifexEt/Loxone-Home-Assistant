@@ -279,7 +279,23 @@ data:
 
 ## Intercom UI in Home Assistant
 
-Use parent Intercom `uuid_action` (you can copy it from any Intercom entity attributes, for example `camera.<name>_video`).
+The [example dashboard](examples/intercom-dashboard.yaml) has live video, a **Talk** tile, a doorbell indicator, a TTS message and play button, and a **History** tab with photo thumbnails. It uses a locally paired Intercom Gen 2 with [live video and two-way audio support](#intercom-live-call-scope).
+
+1. Register the [gallery JavaScript module](#intercom-gen-2-photo-gallery).
+2. Open the Intercom device in **Settings → Devices & Services → Loxone → Devices** and replace the example entity IDs in the YAML with the corresponding IDs from your installation.
+
+   | Example ID | Intercom entity |
+   | --- | --- |
+   | `camera.example_intercom_live` | **Live** camera for video and two-way audio |
+   | `camera.example_intercom_video` | **Video** camera for the photo gallery |
+   | `binary_sensor.example_intercom_doorbell` | **Doorbell** binary sensor |
+   | `text.example_intercom_tts_message` | **TTS Message** text field |
+   | `button.example_intercom_send_tts` | **Send TTS** button |
+
+3. Create an empty dashboard and paste the YAML in its **Raw configuration editor**. To add the views to an existing dashboard, append the two items from the example's `views:` list to its `views:` list.
+4. Select **Talk** on the dashboard to open the camera dialog, then select **Start talking** to use the microphone. [Home Assistant camera documentation](https://www.home-assistant.io/integrations/camera/#talking-through-a-camera)
+
+### Send a TTS message
 
 The integration creates native Intercom TTS controls. Put the text field and button on
 an Entities card to send a message from a dashboard:
@@ -291,7 +307,7 @@ Enter up to 255 characters in the Home Assistant text field, then press `Send TT
 to play the message through the Intercom speaker. Loxone requires Internet access
 for this function. [Loxone Intercom documentation](https://www.loxone.com/enen/kb/intercom-2/)
 
-You can still call service directly if needed:
+To send a message with the integration action, copy the parent `uuid_action` from an Intercom entity such as the **Video** camera.
 
 ```yaml
 service: loxone_home_assistant.send_tts
@@ -300,37 +316,17 @@ data:
   message: "Kurier jest pod drzwiami"
 ```
 
-Lovelace card example (`camera_view: live` is important for video stream):
-
-```yaml
-type: vertical-stack
-cards:
-  - type: picture-entity
-    entity: camera.furtka_video
-    camera_view: live
-    show_state: false
-    show_name: true
-  - type: entities
-    entities:
-      - binary_sensor.furtka_doorbell
-      - sensor.furtka_history
-      - text.furtka_tts_message
-      - number.furtka_tts_volume
-      - button.furtka_send_tts
-```
-
-The camera can show a live JPEG or MJPEG feed when the controller provides a compatible HTTP endpoint.
-
 ### Intercom Gen 2 photo gallery
 
 For a locally paired Intercom Gen 2, the integration reads the native activity archive through the authenticated Miniserver connection.
 
-1. In **Settings → Dashboards → Resources**, add `/loxone_home_assistant/intercom-gallery.js` as a **JavaScript module**. Enable Advanced Mode in your Home Assistant profile if Resources is hidden.
-2. Add a manual card to your dashboard and select the Intercom's **Video** camera in the `entity` field.
+In **Settings → Dashboards → Resources**, add `/loxone_home_assistant/intercom-gallery.js` as a **JavaScript module**. Enable Advanced Mode in your Home Assistant profile if Resources is hidden.
+
+To add the gallery by itself, create a manual card and set `entity` to the Intercom's **Video** camera.
 
 ```yaml
 type: custom:loxone-intercom-gallery
-entity: camera.furtka_video
+entity: camera.example_intercom_video
 ```
 
 Click or tap a thumbnail to open the full photo. Home Assistant serves the photos to users with read access to that camera. Loxone media URLs and credentials stay inside the integration.

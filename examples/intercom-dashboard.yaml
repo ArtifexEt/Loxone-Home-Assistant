@@ -1,0 +1,71 @@
+# Replace the example entity IDs with those on your Intercom device.
+# See the repository README for gallery and microphone setup.
+title: Intercom
+views:
+  - title: Intercom
+    path: intercom
+    type: sections
+    max_columns: 2
+    sections:
+      - type: grid
+        column_span: 2
+        cards:
+          - type: picture-entity
+            entity: camera.example_intercom_live
+            camera_view: live
+            aspect_ratio: '16:9'
+            show_name: false
+            show_state: false
+            tap_action:
+              action: more-info
+            grid_options:
+              columns: full
+          - type: tile
+            entity: camera.example_intercom_live
+            name: Talk
+            icon: mdi:microphone
+            hide_state: true
+            tap_action:
+              action: more-info
+            icon_tap_action:
+              action: more-info
+            grid_options:
+              columns: full
+          - type: tile
+            entity: binary_sensor.example_intercom_doorbell
+            name: Doorbell
+            icon: mdi:doorbell
+            tap_action:
+              action: more-info
+            icon_tap_action:
+              action: more-info
+            grid_options:
+              columns: full
+          - type: entities
+            title: Voice message
+            entities:
+              - entity: text.example_intercom_tts_message
+                name: Message
+              - type: button
+                name: Intercom speaker
+                icon: mdi:bullhorn-outline
+                action_name: Play
+                tap_action:
+                  action: perform-action
+                  perform_action: button.press
+                  target:
+                    entity_id: button.example_intercom_send_tts
+            grid_options:
+              columns: full
+  - title: History
+    path: history
+    type: sections
+    max_columns: 2
+    sections:
+      - type: grid
+        column_span: 2
+        cards:
+          - type: custom:loxone-intercom-gallery
+            entity: camera.example_intercom_video
+            grid_options:
+              columns: full
