@@ -158,13 +158,14 @@ async def _async_archive_token(bridge) -> str | None:
         parts = str(uuid5(NAMESPACE_URL, f"loxone-intercom-archive:{client_uuid}")).split("-")
         archive_uuid = "-".join((*parts[:3], parts[3] + parts[4]))
         try:
-            challenge = (await send(f"jdev/sys/getkey2/{username}")).get("value")
-            if not isinstance(challenge, Mapping):
+            # The vendor uses a fresh getkey challenge for an existing login token.
+            key = (await send("jdev/sys/getkey")).get("value")
+            if not isinstance(key, str) or not re.fullmatch(r"(?:[\da-fA-F]{2}){1,128}", key, re.ASCII):
+                _LOGGER.debug("Miniserver returned an invalid Loxone Intercom photo token challenge")
                 return None
-            algorithm = challenge.get("hashAlg", "SHA256")
-            if algorithm not in ("SHA256", "SHA1") or not bridge.token:
+            if not bridge.token:
                 return None
-            proof = hmac.digest(bytes.fromhex(challenge["key"]), bridge.token.encode(), algorithm.lower()).hex()
+            proof = hmac.digest(bytes.fromhex(key), bridge.token.encode(), "sha256").hex()
             response = await send(
                 f"jdev/sys/getjwt/{proof}/{username}/0/{archive_uuid}/"
                 "Home%20Assistant%20Intercom?tokenHash=true"

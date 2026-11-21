@@ -112,7 +112,7 @@ class Gen2ArchiveTests(unittest.IsolatedAsyncioTestCase):
         self.bridge.client_uuid = "00000000-0000-0000-0000-000000000001"
         self.bridge.username = "Dummy User"
         self.bridge.async_send_raw_command = AsyncMock(side_effect=[
-            {"value": {"key": key, "hashAlg": "SHA256"}},
+            {"value": key},
             {"value": {"token": token, "tokenRights": 0, "validUntil": 900_000_000}},
         ])
 
@@ -121,7 +121,7 @@ class Gen2ArchiveTests(unittest.IsolatedAsyncioTestCase):
                 await archive.async_gen2_archive_image(self.bridge, self.control, f"gen2:{timestamp}"), JPEG
             )
 
-        self.bridge.async_send_raw_command.assert_any_await("jdev/sys/getkey2/Dummy%20User")
+        self.bridge.async_send_raw_command.assert_any_await("jdev/sys/getkey")
         proof = hmac.digest(bytes.fromhex(key), b"synthetic-token", "sha256").hex()
         command = self.bridge.async_send_raw_command.await_args_list[1].args[0]
         self.assertEqual(self.bridge.async_send_raw_command.await_count, 2)
@@ -137,7 +137,7 @@ class Gen2ArchiveTests(unittest.IsolatedAsyncioTestCase):
         self.bridge.client_uuid = "test-client"
         self.bridge.username = "test user"
         self.bridge.async_send_raw_command = AsyncMock(side_effect=[
-            {"value": {"key": "00000000"}},
+            {"value": "00000000"},
             {"value": {"token": _test_jwt({"tokenRights": 0})}},
         ])
         self.assertEqual(
