@@ -268,6 +268,7 @@ class LoxoneBridge:
         )
 
         self.serial: str = str(data.get(CONF_SERIAL, "unknown"))
+        self.miniserver_device_id: str | None = None
         self.loxapp_version: str = str(data.get(CONF_LOXAPP_VERSION, ""))
         self.software_version: str | None = (
             str(data.get(CONF_SOFTWARE_VERSION))

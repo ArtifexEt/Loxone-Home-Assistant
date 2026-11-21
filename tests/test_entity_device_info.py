@@ -5,6 +5,7 @@ from __future__ import annotations
 import sys
 import types
 import unittest
+from unittest.mock import patch
 from urllib.parse import quote
 
 from tests._loader import load_integration_module
@@ -150,7 +151,9 @@ class EntityDeviceInfoTests(unittest.TestCase):
             room_name="Salon",
         )
 
-        info = LoxoneEntity(_FakeBridge(), control).device_info
+        bridge = _FakeBridge()
+        bridge.miniserver_device_id = "hub-registry-id"
+        info = LoxoneEntity(bridge, control).device_info
 
         self.assertEqual(
             info["identifiers"],
@@ -164,6 +167,34 @@ class EntityDeviceInfoTests(unittest.TestCase):
         self.assertEqual(info["model"], "IRoomControllerV2")
         self.assertEqual(info["name"], "Termostat")
         self.assertEqual(info["suggested_area"], "Salon")
+
+    def test_modern_control_device_info_uses_registered_hub_id(self) -> None:
+        class DeviceInfoWithViaDeviceID(dict):
+            via_device_id: str
+
+        bridge = _FakeBridge()
+        control = LoxoneControl(
+            uuid="intercom-uuid",
+            uuid_action="intercom-action",
+            name="Intercom",
+            type="IntercomV2",
+        )
+        intercom = LoxoneEntity(bridge, control, "Device Status")
+
+        with patch.object(entity, "DeviceInfo", DeviceInfoWithViaDeviceID):
+            self.assertNotIn("via_device", intercom.device_info)
+            self.assertNotIn("via_device_id", intercom.device_info)
+
+            bridge.miniserver_device_id = "hub-registry-id"
+            info = intercom.device_info
+
+        self.assertEqual(info["via_device_id"], "hub-registry-id")
+        self.assertNotIn("via_device", info)
+        self.assertEqual(
+            info["identifiers"],
+            {control_device_identifier(bridge.serial, "intercom-action")},
+        )
+        self.assertEqual(intercom._attr_unique_id, "1234567890:intercom-action:device_status")
 
     def test_miniserver_device_info_is_stable(self) -> None:
         info = miniserver_device_info(_FakeBridge())
