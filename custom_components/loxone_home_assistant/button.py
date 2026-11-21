@@ -32,11 +32,11 @@ from .models import LoxoneControl
 from .runtime import entry_bridge
 
 INTERCOM_BUTTON_SPECS = (
-    ("Answer Call", "Stop Ringing", "answer", None, "mdi:bell-cancel-outline"),
+    ("Answer Call", "intercom_stop_ringing", "answer", None, "mdi:bell-cancel-outline"),
 )
 INTERCOM_GEN2_MUTE_BUTTON_SPECS = (
-    ("Mute Microphone", "Mute Doorbell", "mute", ("1",), "mdi:bell-off-outline"),
-    ("Unmute Microphone", "Unmute Doorbell", "mute", ("0",), "mdi:bell-outline"),
+    ("Mute Microphone", "intercom_mute_doorbell", "mute", ("1",), "mdi:bell-off-outline"),
+    ("Unmute Microphone", "intercom_unmute_doorbell", "mute", ("0",), "mdi:bell-outline"),
 )
 INTERCOM_TTS_CONTROL_TYPES_NORMALIZED = {
     normalize_state_name(value) for value in INTERCOM_CONTROL_TYPES
@@ -71,7 +71,7 @@ def _build_intercom_command_buttons(bridge) -> list[ButtonEntity]:
                 bridge,
                 control,
                 legacy_suffix,
-                name_suffix,
+                translation_key,
                 command_name,
                 command_args,
                 icon,
@@ -79,7 +79,7 @@ def _build_intercom_command_buttons(bridge) -> list[ButtonEntity]:
             )
             for (
                 legacy_suffix,
-                name_suffix,
+                translation_key,
                 command_name,
                 command_args,
                 icon,
@@ -142,7 +142,7 @@ class LoxoneIntercomCommandButton(LoxoneEntity, ButtonEntity):
         bridge,
         control: LoxoneControl,
         legacy_suffix: str,
-        name_suffix: str,
+        translation_key: str,
         command: str,
         arguments: Sequence[str] | None,
         icon: str,
@@ -150,7 +150,7 @@ class LoxoneIntercomCommandButton(LoxoneEntity, ButtonEntity):
         enabled_by_default: bool = True,
     ) -> None:
         super().__init__(bridge, control, legacy_suffix)
-        self._attr_name = f"{control.display_name} {name_suffix}"
+        self._set_intercom_entity_name("button", translation_key)
         self._command = resolve_intercom_command(command, list(arguments or []))
         self._attr_icon = icon
         self._attr_entity_registry_enabled_default = enabled_by_default
@@ -172,6 +172,7 @@ class LoxoneIntercomTtsButton(LoxoneEntity, ButtonEntity):
 
     def __init__(self, bridge, control: LoxoneControl) -> None:
         super().__init__(bridge, control, "Send TTS")
+        self._set_intercom_entity_name("button", "intercom_send_tts")
 
     async def async_press(self) -> None:
         message = intercom_tts_message(self.bridge, self.control.uuid_action)

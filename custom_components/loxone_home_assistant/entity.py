@@ -98,6 +98,16 @@ class LoxoneEntity(Entity):
             self._attr_entity_picture = icon_url
         self._remove_listener = None
 
+    def _set_intercom_entity_name(self, platform: str, key: str) -> None:
+        """Use a short translated Intercom label independently of the unique ID."""
+        translations = getattr(self.bridge, "intercom_entity_translations", {})
+        name = translations.get(f"component.{DOMAIN}.entity.{platform}.{key}.name")
+        if name:
+            self._attr_name = name
+        else:
+            del self._attr_name
+            self._attr_translation_key = key
+
     @property
     def available(self) -> bool:
         return self.bridge.available

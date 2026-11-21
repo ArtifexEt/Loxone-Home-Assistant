@@ -1691,6 +1691,7 @@ class LoxoneIntercomDeviceStatusSensor(LoxoneEntity, SensorEntity):
 
     def __init__(self, bridge, control: LoxoneControl, state_name: str) -> None:
         super().__init__(bridge, control, "Device Status")
+        self._set_intercom_entity_name("sensor", "intercom_device_status")
         self._state_name = state_name
 
     def relevant_state_uuids(self) -> tuple[str, ...]:
@@ -1717,6 +1718,7 @@ class LoxoneIntercomHistorySensor(LoxoneEntity, SensorEntity):
         history_state_name: str | None,
     ) -> None:
         super().__init__(bridge, control, "History")
+        self._set_intercom_entity_name("sensor", "intercom_history")
         self._history_state_name = history_state_name
         self._latest_event_time: datetime | None = None
         self._event_count = 0

@@ -365,11 +365,11 @@ class ButtonPlatformTests(unittest.IsolatedAsyncioTestCase):
         ]
         self.assertEqual(len(intercom_buttons), 3)
         self.assertEqual(
-            [(button._attr_name, button._attr_unique_id) for button in intercom_buttons],
+            [(button._attr_translation_key, button._attr_unique_id) for button in intercom_buttons],
             [
-                ("Furtka Stop Ringing", "1234567890:intercom-action:answer_call"),
-                ("Furtka Mute Doorbell", "1234567890:intercom-action:mute_microphone"),
-                ("Furtka Unmute Doorbell", "1234567890:intercom-action:unmute_microphone"),
+                ("intercom_stop_ringing", "1234567890:intercom-action:answer_call"),
+                ("intercom_mute_doorbell", "1234567890:intercom-action:mute_microphone"),
+                ("intercom_unmute_doorbell", "1234567890:intercom-action:unmute_microphone"),
             ],
         )
 
@@ -412,7 +412,7 @@ class ButtonPlatformTests(unittest.IsolatedAsyncioTestCase):
             if isinstance(entity, button_module.LoxoneIntercomCommandButton)
         ]
         self.assertEqual(len(intercom_buttons), 1)
-        self.assertEqual(intercom_buttons[0]._attr_name, "Furtka Legacy Stop Ringing")
+        self.assertEqual(intercom_buttons[0]._attr_translation_key, "intercom_stop_ringing")
         await intercom_buttons[0].async_press()
         self.assertEqual(bridge.commands, [("intercom-legacy-action", "answer")])
 

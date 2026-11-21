@@ -196,6 +196,30 @@ class EntityDeviceInfoTests(unittest.TestCase):
         )
         self.assertEqual(intercom._attr_unique_id, "1234567890:intercom-action:device_status")
 
+    def test_intercom_label_uses_selected_language_or_native_translation(self) -> None:
+        control = LoxoneControl(
+            uuid="intercom-uuid",
+            uuid_action="intercom-action",
+            name="Entry",
+            type="IntercomV2",
+        )
+        bridge = _FakeBridge()
+        automatic = LoxoneEntity(bridge, control, "Device Status")
+        automatic._set_intercom_entity_name("sensor", "intercom_device_status")
+
+        bridge.intercom_entity_translations = {
+            "component.loxone_home_assistant.entity.sensor.intercom_device_status.name": "Gerätestatus"
+        }
+        translated = LoxoneEntity(bridge, control, "Device Status")
+        translated._set_intercom_entity_name("sensor", "intercom_device_status")
+
+        self.assertTrue(automatic._attr_has_entity_name)
+        self.assertFalse(hasattr(automatic, "_attr_name"))
+        self.assertEqual(automatic._attr_translation_key, "intercom_device_status")
+        self.assertEqual(translated._attr_name, "Gerätestatus")
+        self.assertIsNone(getattr(translated, "_attr_translation_key", None))
+        self.assertEqual(automatic._attr_unique_id, translated._attr_unique_id)
+
     def test_miniserver_device_info_is_stable(self) -> None:
         info = miniserver_device_info(_FakeBridge())
 

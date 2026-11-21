@@ -288,12 +288,14 @@ The [example dashboard](examples/intercom-dashboard.yaml) has live video, a **Ta
    | --- | --- |
    | `camera.example_intercom_live` | **Live** camera for video and two-way audio |
    | `camera.example_intercom_video` | **Video** camera for the photo gallery |
-   | `binary_sensor.example_intercom_doorbell` | **Doorbell** binary sensor |
+   | `binary_sensor.example_intercom_doorbell` | **Doorbell signal** binary sensor |
    | `text.example_intercom_tts_message` | **TTS Message** text field |
    | `button.example_intercom_send_tts` | **Send TTS** button |
 
 3. Create an empty dashboard and paste the YAML in its **Raw configuration editor**. To add the views to an existing dashboard, append the two items from the example's `views:` list to its `views:` list.
 4. Select **Talk** on the dashboard to open the camera dialog, then select **Start talking** to use the microphone. [Home Assistant camera documentation](https://www.home-assistant.io/integrations/camera/#talking-through-a-camera)
+
+To pick the language for Intercom entity names and the gallery, open **Settings → Devices & Services → Loxone → Configure → Intercom language**. Select **Polski**, **English**, **Deutsch**, or **Home Assistant** to follow Home Assistant's language settings. Device names come from the Loxone project.
 
 ### Send a TTS message
 
@@ -320,9 +322,9 @@ data:
 
 For a locally paired Intercom Gen 2, the integration reads the native activity archive through the authenticated Miniserver connection.
 
-In **Settings → Dashboards → Resources**, add `/loxone_home_assistant/intercom-gallery.js` as a **JavaScript module**. Enable Advanced Mode in your Home Assistant profile if Resources is hidden.
+On the Intercom device page in **Settings → Devices & Services → Loxone → Devices**, select **Visit** to open its photo history. Select a thumbnail to view the full photo, then use **Download photo** if you want to save it.
 
-To add the gallery by itself, create a manual card and set `entity` to the Intercom's **Video** camera.
+To place the gallery on a dashboard, add `/loxone_home_assistant/intercom-gallery.js` as a **JavaScript module** in **Settings → Dashboards → Resources**. Enable Advanced Mode in your Home Assistant profile if Resources is hidden. Then create a manual card and set `entity` to the Intercom's **Video** camera.
 
 ```yaml
 type: custom:loxone-intercom-gallery

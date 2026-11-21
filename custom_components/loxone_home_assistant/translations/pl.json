@@ -3,6 +3,79 @@
     "button": {
       "refresh_entities": {
         "name": "Odśwież encje"
+      },
+      "intercom_stop_ringing": {
+        "name": "Zatrzymaj dzwonienie"
+      },
+      "intercom_mute_doorbell": {
+        "name": "Wycisz dzwonek"
+      },
+      "intercom_unmute_doorbell": {
+        "name": "Włącz dźwięk dzwonka"
+      },
+      "intercom_send_tts": {
+        "name": "Odtwórz komunikat"
+      }
+    },
+    "binary_sensor": {
+      "intercom_doorbell": {
+        "name": "Sygnał dzwonka"
+      },
+      "intercom_proximity": {
+        "name": "Wykrycie zbliżenia"
+      },
+      "intercom_call": {
+        "name": "Połączenie"
+      },
+      "intercom_light": {
+        "name": "Stan oświetlenia"
+      }
+    },
+    "camera": {
+      "intercom_live": {
+        "name": "Na żywo"
+      },
+      "intercom_video": {
+        "name": "Podgląd"
+      }
+    },
+    "light": {
+      "intercom_light": {
+        "name": "Oświetlenie"
+      }
+    },
+    "number": {
+      "intercom_tts_volume": {
+        "name": "Głośność komunikatu"
+      }
+    },
+    "select": {
+      "intercom_history_photo": {
+        "name": "Zdjęcie z historii"
+      }
+    },
+    "sensor": {
+      "intercom_device_status": {
+        "name": "Stan domofonu",
+        "state": {
+          "unknown": "Nieznany",
+          "online": "Online",
+          "rebooting": "Ponowne uruchamianie",
+          "initializing": "Uruchamianie"
+        }
+      },
+      "intercom_history": {
+        "name": "Historia dzwonka"
+      }
+    },
+    "switch": {
+      "intercom_doorbell_mute": {
+        "name": "Wyciszenie dzwonka"
+      }
+    },
+    "text": {
+      "intercom_tts_message": {
+        "name": "Treść komunikatu"
       }
     }
   },
@@ -90,11 +163,13 @@
           "enable_light_mood_select": "Wystaw selektor nastroju LightController",
           "expose_controller_child_lights": "Wystaw indywidualne światła w LightController",
           "auto_create_automations": "Automatycznie dodawaj sugerowane automatyzacje",
-          "use_loxone_icons": "Używaj ikon Loxone jako obrazków encji"
+          "use_loxone_icons": "Używaj ikon Loxone jako obrazków encji",
+          "intercom_language": "Język domofonu"
         },
         "data_description": {
           "enable_light_mood_select": "Dodaje osobną encję typu select dla scen i nastrojów. Nie wystawia indywidualnych świateł z LightController.",
-          "expose_controller_child_lights": "Ostrzeżenie: wyłączenie tej opcji usuwa te encje z Home Assistant (mogą zniknąć z dashboardów i automatyzacji)."
+          "expose_controller_child_lights": "Ostrzeżenie: wyłączenie tej opcji usuwa te encje z Home Assistant (mogą zniknąć z dashboardów i automatyzacji).",
+          "intercom_language": "Wybierz język nazw encji domofonu i galerii zdjęć. Domyślnie obowiązują ustawienia języka Home Assistant."
         }
       }
     }

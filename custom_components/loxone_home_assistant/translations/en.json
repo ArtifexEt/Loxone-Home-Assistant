@@ -3,6 +3,79 @@
     "button": {
       "refresh_entities": {
         "name": "Refresh entities"
+      },
+      "intercom_stop_ringing": {
+        "name": "Stop ringing"
+      },
+      "intercom_mute_doorbell": {
+        "name": "Mute doorbell"
+      },
+      "intercom_unmute_doorbell": {
+        "name": "Unmute doorbell"
+      },
+      "intercom_send_tts": {
+        "name": "Send TTS"
+      }
+    },
+    "binary_sensor": {
+      "intercom_doorbell": {
+        "name": "Doorbell signal"
+      },
+      "intercom_proximity": {
+        "name": "Proximity"
+      },
+      "intercom_call": {
+        "name": "Call"
+      },
+      "intercom_light": {
+        "name": "Light status"
+      }
+    },
+    "camera": {
+      "intercom_live": {
+        "name": "Live"
+      },
+      "intercom_video": {
+        "name": "Video"
+      }
+    },
+    "light": {
+      "intercom_light": {
+        "name": "Light"
+      }
+    },
+    "number": {
+      "intercom_tts_volume": {
+        "name": "TTS volume"
+      }
+    },
+    "select": {
+      "intercom_history_photo": {
+        "name": "History photo"
+      }
+    },
+    "sensor": {
+      "intercom_device_status": {
+        "name": "Device status",
+        "state": {
+          "unknown": "Unknown",
+          "online": "Online",
+          "rebooting": "Restarting",
+          "initializing": "Initializing"
+        }
+      },
+      "intercom_history": {
+        "name": "Doorbell history"
+      }
+    },
+    "switch": {
+      "intercom_doorbell_mute": {
+        "name": "Doorbell mute"
+      }
+    },
+    "text": {
+      "intercom_tts_message": {
+        "name": "TTS message"
       }
     }
   },
@@ -90,11 +163,13 @@
           "enable_light_mood_select": "Expose LightController mood selector",
           "expose_controller_child_lights": "Expose individual lights inside LightController",
           "auto_create_automations": "Automatically add suggested automations",
-          "use_loxone_icons": "Use Loxone icons as entity pictures"
+          "use_loxone_icons": "Use Loxone icons as entity pictures",
+          "intercom_language": "Intercom language"
         },
         "data_description": {
           "enable_light_mood_select": "Adds a separate select entity for scenes and moods. It does not expose the individual child lights from a LightController.",
-          "expose_controller_child_lights": "Warning: disabling this option removes those entities from Home Assistant (they may disappear from dashboards and automations)."
+          "expose_controller_child_lights": "Warning: disabling this option removes those entities from Home Assistant (they may disappear from dashboards and automations).",
+          "intercom_language": "Select the language for Intercom entity names and the photo gallery. Home Assistant follows its own language settings by default."
         }
       }
     }

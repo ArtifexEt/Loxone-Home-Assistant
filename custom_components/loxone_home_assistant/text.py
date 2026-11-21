@@ -75,6 +75,7 @@ class LoxoneIntercomTtsMessageEntity(LoxoneEntity, TextEntity):
 
     def __init__(self, bridge, control) -> None:
         super().__init__(bridge, control, "TTS Message")
+        self._set_intercom_entity_name("text", "intercom_tts_message")
 
     @property
     def native_value(self) -> str:

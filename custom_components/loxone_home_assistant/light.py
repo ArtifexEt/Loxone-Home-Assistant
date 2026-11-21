@@ -396,6 +396,7 @@ class LoxoneIntercomLightEntity(LoxoneEntity, LightEntity):
         state_name: str,
     ) -> None:
         super().__init__(bridge, control, "Light")
+        self._set_intercom_entity_name("light", "intercom_light")
         self._state_name = state_name
         self._attr_unique_id = control_entity_unique_id(
             bridge.serial,

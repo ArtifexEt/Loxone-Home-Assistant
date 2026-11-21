@@ -19,6 +19,7 @@ from homeassistant.exceptions import (
     ServiceValidationError,
 )
 from homeassistant.helpers import config_validation as cv, device_registry as dr
+from homeassistant.helpers.translation import async_get_translations
 
 try:
     from homeassistant.core import SupportsResponse
@@ -228,6 +229,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     try:
         bridge = LoxoneBridge(hass, merge_connection_config(entry.data, entry.options))
         await bridge.async_initialize()
+        if bridge.intercom_language is not None:
+            bridge.intercom_entity_translations = await async_get_translations(
+                hass, bridge.intercom_language, "entity", {DOMAIN}
+            )
         bridge.miniserver_device_id = _async_register_miniserver_device(hass, entry, bridge)
 
         set_entry_bridge(hass, entry, bridge)

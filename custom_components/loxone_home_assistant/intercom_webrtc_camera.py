@@ -112,6 +112,7 @@ class LoxoneIntercomWebRTCCamera(LoxoneEntity, Camera):
     def __init__(self, bridge, control, snapshots: IntercomSnapshots) -> None:
         Camera.__init__(self)
         LoxoneEntity.__init__(self, bridge, control, "Live")
+        self._set_intercom_entity_name("camera", "intercom_live")
         self._snapshots = snapshots
         self._sessions: dict[str, _ClientSession] = {}
         self._closing_tasks: set[asyncio.Task] = set()

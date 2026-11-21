@@ -325,6 +325,8 @@ class LoxoneDoorbellBinaryEntity(LoxoneSingleStateBinaryEntity):
 
     def __init__(self, bridge, control: LoxoneControl, state_name: str) -> None:
         super().__init__(bridge, control, state_name, "Doorbell")
+        if is_intercom_control(control):
+            self._set_intercom_entity_name("binary_sensor", "intercom_doorbell")
 
     @property
     def extra_state_attributes(self) -> dict:
@@ -353,6 +355,7 @@ class LoxoneIntercomStateBinaryEntity(LoxoneSingleStateBinaryEntity):
     ) -> None:
         super().__init__(bridge, control, state_name, role)
         self._role = role
+        self._set_intercom_entity_name("binary_sensor", f"intercom_{role.casefold()}")
         self._attr_icon = INTERCOM_ROLE_ICONS.get(role, "mdi:video-wireless")
         if BinarySensorDeviceClass is not None:
             normalized_role = role.casefold()

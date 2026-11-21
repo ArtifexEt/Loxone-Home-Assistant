@@ -83,6 +83,7 @@ class LoxoneIntercomTtsVolumeEntity(LoxoneEntity, NumberEntity):
 
     def __init__(self, bridge, control) -> None:
         super().__init__(bridge, control, "TTS Volume")
+        self._set_intercom_entity_name("number", "intercom_tts_volume")
 
     @property
     def native_value(self) -> float:

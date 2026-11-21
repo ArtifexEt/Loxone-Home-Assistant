@@ -180,6 +180,7 @@ class LoxoneIntercomHistorySelectEntity(LoxoneEntity, SelectEntity):
 
     def __init__(self, bridge, control: LoxoneControl) -> None:
         super().__init__(bridge, control, "History Photo")
+        self._set_intercom_entity_name("select", "intercom_history_photo")
         self._attr_unique_id = control_entity_unique_id(
             bridge.serial,
             control.uuid_action,

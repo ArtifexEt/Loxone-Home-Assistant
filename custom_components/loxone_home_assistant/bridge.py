@@ -34,6 +34,7 @@ from .const import (
     APP_PERMISSION,
     CLIENT_INFO,
     CONF_CLIENT_UUID,
+    CONF_INTERCOM_LANGUAGE,
     CONF_INTERCOM_PASSWORD,
     CONF_INTERCOM_USERNAME,
     CONF_LOXAPP_VERSION,
@@ -260,6 +261,11 @@ class LoxoneBridge:
         )
         if self.intercom_password == "":
             self.intercom_password = None
+        intercom_language = data.get(CONF_INTERCOM_LANGUAGE)
+        self.intercom_language: str | None = (
+            intercom_language if intercom_language in ("pl", "en", "de") else None
+        )
+        self.intercom_entity_translations: dict[str, str] = {}
         remote = self._remote_serial is not None
         self.verify_ssl: bool = remote or bool(data.get(CONF_VERIFY_SSL, DEFAULT_VERIFY_SSL))
         self.use_tls: bool = remote or bool(data.get(CONF_USE_TLS, True))

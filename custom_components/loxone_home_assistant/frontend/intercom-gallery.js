@@ -14,6 +14,7 @@ const labels = {
     thumbnailError: "Thumbnail unavailable",
     open: (date) => `Open photo from ${date}`,
     close: "Close preview",
+    download: "Download photo",
     photo: "Intercom photo",
     photoLoading: "Loading photo…",
     photoError: "Could not load the photo.",
@@ -30,9 +31,27 @@ const labels = {
     thumbnailError: "Brak miniatury",
     open: (date) => `Otwórz zdjęcie: ${date}`,
     close: "Zamknij podgląd",
+    download: "Pobierz zdjęcie",
     photo: "Zdjęcie z domofonu",
     photoLoading: "Wczytywanie zdjęcia…",
     photoError: "Nie udało się wczytać zdjęcia.",
+  },
+  de: {
+    title: "Fotos",
+    refresh: "Fotos aktualisieren",
+    previous: "Vorherige Seite",
+    next: "Nächste Seite",
+    page: (page, pages) => `Seite ${page} von ${pages}`,
+    loading: "Fotos werden geladen…",
+    empty: "Im Archiv sind keine Fotos vorhanden.",
+    error: "Das Fotoarchiv konnte nicht geladen werden.",
+    thumbnailError: "Vorschaubild nicht verfügbar",
+    open: (date) => `Foto vom ${date} öffnen`,
+    close: "Vorschau schließen",
+    download: "Foto herunterladen",
+    photo: "Foto der Türsprechanlage",
+    photoLoading: "Foto wird geladen…",
+    photoError: "Das Foto konnte nicht geladen werden.",
   },
 };
 
@@ -42,7 +61,7 @@ template.innerHTML = `
     :host { display: block; min-inline-size: 0; }
     [hidden] { display: none !important; }
     ha-card { padding: 12px; }
-    .toolbar, .paging, .preview-toolbar {
+    .toolbar, .paging, .preview-toolbar, .preview-actions {
       display: flex;
       align-items: center;
       gap: 4px;
@@ -63,7 +82,7 @@ template.innerHTML = `
       border: 0;
       cursor: pointer;
     }
-    button:focus-visible {
+    button:focus-visible, a:focus-visible {
       outline: 2px solid var(--primary-color, #03a9f4);
       outline-offset: 2px;
     }
@@ -76,6 +95,7 @@ template.innerHTML = `
       border-radius: 50%;
       --mdc-icon-size: 20px;
     }
+    .icon-button.download { color: inherit; }
     :host(:dir(rtl)) .page-arrow { transform: scaleX(-1); }
     .icon-button[aria-disabled="true"] { cursor: default; opacity: 0.38; }
     .gallery {
@@ -166,7 +186,10 @@ template.innerHTML = `
   <dialog aria-labelledby="preview-time">
     <div class="preview-toolbar">
       <time class="preview-time" id="preview-time"></time>
-      <button class="icon-button close" type="button" autofocus><ha-icon icon="mdi:close" aria-hidden="true"></ha-icon></button>
+      <div class="preview-actions">
+        <a class="icon-button download" hidden download><ha-icon icon="mdi:download" aria-hidden="true"></ha-icon></a>
+        <button class="icon-button close" type="button" autofocus><ha-icon icon="mdi:close" aria-hidden="true"></ha-icon></button>
+      </div>
     </div>
     <p class="status preview-status" role="status"></p>
     <img class="preview-image" hidden alt="">
@@ -199,6 +222,7 @@ class LoxoneIntercomGallery extends HTMLElement {
     this._previewTime = root.querySelector(".preview-time");
     this._previewStatus = root.querySelector(".preview-status");
     this._previewImage = root.querySelector(".preview-image");
+    this._download = root.querySelector(".download");
     this._close = root.querySelector(".close");
     this._page = 1;
     this._pages = 1;
@@ -217,7 +241,7 @@ class LoxoneIntercomGallery extends HTMLElement {
       event.preventDefault();
       this._closePreview(true);
     });
-    this._applyLanguage("en");
+    this._applyLanguage();
   }
 
   setConfig(config) {
@@ -226,6 +250,8 @@ class LoxoneIntercomGallery extends HTMLElement {
     }
     if (config.entity === this._entity) return;
     this._entity = config.entity;
+    this._preferredLanguage = undefined;
+    this._applyLanguage();
     this._closePreview();
     this._clearPage();
     this._page = this._pages = 1;
@@ -234,7 +260,7 @@ class LoxoneIntercomGallery extends HTMLElement {
 
   set hass(hass) {
     this._hass = hass;
-    this._applyLanguage(hass?.locale?.language || hass?.language || "en");
+    this._applyLanguage();
     this._start();
   }
 
@@ -251,12 +277,14 @@ class LoxoneIntercomGallery extends HTMLElement {
     return 8;
   }
 
-  _applyLanguage(language) {
+  _applyLanguage() {
+    const language = this._preferredLanguage || this._hass?.locale?.language || this._hass?.language || "en";
     if (language === this._language) return;
     this._language = language;
-    this._labels = language.toLowerCase().split("-")[0] === "pl" ? labels.pl : labels.en;
+    const primaryLanguage = language.toLowerCase().split("-")[0];
+    this._labels = Object.hasOwn(labels, primaryLanguage) ? labels[primaryLanguage] : labels.en;
     this._title.textContent = this._labels.title;
-    for (const key of ["refresh", "previous", "next", "close"]) {
+    for (const key of ["refresh", "previous", "next", "close", "download"]) {
       this[`_${key}`].setAttribute("aria-label", this._labels[key]);
       this[`_${key}`].title = this._labels[key];
     }
@@ -322,6 +350,8 @@ class LoxoneIntercomGallery extends HTMLElement {
       }
       const result = await response.json();
       if (signal.aborted) return;
+      this._preferredLanguage = Object.hasOwn(labels, result.language) ? result.language : undefined;
+      this._applyLanguage();
       const locale = this._hass.locale;
       const timeZone = locale?.time_zone === "server" ? this._hass.config?.time_zone : undefined;
       const clockLanguage = locale?.time_format === "system" ? undefined : this._language;
@@ -417,7 +447,12 @@ class LoxoneIntercomGallery extends HTMLElement {
     this._dialog.showModal();
     try {
       await this._loadImage(photoPath, this._previewImage, signal);
-      if (!signal.aborted) this._previewStatus.textContent = "";
+      if (!signal.aborted) {
+        this._previewStatus.textContent = "";
+        this._download.href = this._previewImage.src;
+        this._download.download = `intercom-${dateTime.replaceAll(":", "-")}.jpg`;
+        this._download.hidden = false;
+      }
     } catch {
       if (!signal.aborted) this._previewStatus.textContent = this._labels.photoError;
     }
@@ -427,6 +462,8 @@ class LoxoneIntercomGallery extends HTMLElement {
     this._previewRequest?.abort();
     this._previewRequest = undefined;
     if (this._dialog.open) this._dialog.close();
+    this._download.hidden = true;
+    this._download.removeAttribute("href");
     releaseImage(this._previewImage);
     if (restoreFocus) this._previewSource?.focus({ preventScroll: true });
     this._previewSource = undefined;

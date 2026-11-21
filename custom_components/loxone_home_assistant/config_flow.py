@@ -33,6 +33,7 @@ from .const import (
     CONF_CLIENT_UUID,
     CONF_ENABLE_LIGHT_MOOD_SELECT,
     CONF_EXPOSE_CONTROLLER_CHILD_LIGHTS,
+    CONF_INTERCOM_LANGUAGE,
     CONF_INTERCOM_PASSWORD,
     CONF_INTERCOM_USERNAME,
     CONF_LOXAPP_VERSION,
@@ -54,6 +55,7 @@ from .const import (
     DEFAULT_VERIFY_SSL,
     DOMAIN,
     INTEGRATION_TITLE,
+    INTERCOM_LANGUAGES,
 )
 from .runtime import runtime_bridge
 from .versioning import MIN_SUPPORTED_VERSION_TEXT
@@ -428,6 +430,8 @@ class LoxoneCommunityOptionsFlow(OptionsFlow):
         port_default = _coerce_int(form_data.get(CONF_PORT), DEFAULT_PORT)
         username_default = _coerce_text(form_data.get(CONF_USERNAME), "")
         intercom_username_default = _coerce_text(form_data.get(CONF_INTERCOM_USERNAME), "")
+        language = _coerce_text(form_data.get(CONF_INTERCOM_LANGUAGE), "auto")
+        language_default = language if language in INTERCOM_LANGUAGES else "auto"
         verify_ssl_default = _coerce_bool(form_data.get(CONF_VERIFY_SSL), DEFAULT_VERIFY_SSL)
         scan_timeout_default = _coerce_int(
             form_data.get(CONF_SCAN_TIMEOUT), DEFAULT_SCAN_TIMEOUT
@@ -478,6 +482,7 @@ class LoxoneCommunityOptionsFlow(OptionsFlow):
                         default=intercom_username_default,
                     ): str,
                     vol.Optional(CONF_INTERCOM_PASSWORD, default=""): str,
+                    vol.Optional(CONF_INTERCOM_LANGUAGE, default=language_default): vol.In(INTERCOM_LANGUAGES),
                     vol.Required(CONF_VERIFY_SSL, default=verify_ssl_default): bool,
                     vol.Required(CONF_SCAN_TIMEOUT, default=scan_timeout_default): int,
                     vol.Required(

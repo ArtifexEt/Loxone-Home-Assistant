@@ -240,15 +240,13 @@ class DoorbellBinarySensorTests(unittest.IsolatedAsyncioTestCase):
             lambda new_entities: entities.extend(new_entities),
         )
 
-        role_by_name = {
-            entity._attr_name: entity  # noqa: SLF001 - test-only inspection
+        role_by_key = {
+            entity._attr_translation_key: entity
             for entity in entities
             if isinstance(entity, binary_sensor_module.LoxoneIntercomStateBinaryEntity)
         }
-        self.assertIn("Furtka Proximity", role_by_name)
-        self.assertIn("Furtka Call", role_by_name)
-        self.assertTrue(role_by_name["Furtka Proximity"].is_on)
-        self.assertTrue(role_by_name["Furtka Call"].is_on)
+        self.assertTrue(role_by_key["intercom_proximity"].is_on)
+        self.assertTrue(role_by_key["intercom_call"].is_on)
 
 
 if __name__ == "__main__":

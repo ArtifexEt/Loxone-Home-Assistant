@@ -92,6 +92,7 @@ class LoxoneIntercomMuteSwitch(LoxoneEntity, SwitchEntity):
 
     def __init__(self, bridge, control: LoxoneControl, state_name: str) -> None:
         super().__init__(bridge, control, "Doorbell Mute")
+        self._set_intercom_entity_name("switch", "intercom_doorbell_mute")
         self._state_name = state_name
 
     def relevant_state_uuids(self) -> Iterable[str]:

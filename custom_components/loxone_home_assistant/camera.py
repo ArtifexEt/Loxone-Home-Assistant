@@ -161,10 +161,18 @@ class LoxoneIntercomCameraEntity(LoxoneEntity, Camera):
     def __init__(self, bridge, control: LoxoneControl, *, native_snapshot=None) -> None:
         Camera.__init__(self)
         super().__init__(bridge, control, "Video")
+        self._set_intercom_entity_name("camera", "intercom_video")
         self._secured_details: Mapping[str, Any] | None = None
         self._last_live_image: bytes | None = None
         self._native_snapshot = native_snapshot
         self._attr_entity_picture = None
+
+    async def async_added_to_hass(self) -> None:
+        """Publish the Home Assistant history link once this camera is registered."""
+        from .intercom_gallery import async_add_intercom_history_device_link
+
+        await super().async_added_to_hass()
+        async_add_intercom_history_device_link(self.hass, self.registry_entry, self.bridge, self.control)
 
     async def stream_source(self) -> str | None:
         """Disable Home Assistant stream/WebRTC for the Intercom."""
