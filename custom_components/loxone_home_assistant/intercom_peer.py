@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from io import BytesIO
 import logging
+import re
 from typing import Any
 
 from .intercom_signaling import IntercomSignaling, IntercomSignalingError
@@ -258,8 +259,9 @@ def _accept_intercom_h264_payload_alias(offer_sdp: str, answer_sdp: str) -> str:
 
     offer = SessionDescription.parse(offer_sdp)
     answer = SessionDescription.parse(answer_sdp)
-    changed = False
-    for offered, negotiated in zip(offer.media, answer.media):
+    offered_sections = re.split(r"(?m)(?=^m=)", offer_sdp)
+    answer_sections = re.split(r"(?m)(?=^m=)", answer_sdp)
+    for index, (offered, negotiated) in enumerate(zip(offer.media, answer.media), start=1):
         if offered.kind != "video" or negotiated.kind != "video" or negotiated.port == 0:
             continue
         accepted = {codec.payloadType for codec in negotiated.rtp.codecs}
@@ -271,15 +273,29 @@ def _accept_intercom_h264_payload_alias(offer_sdp: str, answer_sdp: str) -> str:
 
         # Some Gen 2 firmware answers with H.264 payload 101 and sends 99.
         # Keep the advertised mapping and register the other offered H.264 payload.
-        for codec in offered.rtp.codecs:
-            if (
-                codec.mimeType.lower() == "video/h264"
-                and codec.payloadType in _INTERCOM_H264_PAYLOAD_TYPES - accepted
-            ):
-                negotiated.rtp.codecs.append(codec)
-                negotiated.fmt.append(codec.payloadType)
-                changed = True
-    return str(answer) if changed else answer_sdp
+        aliases = [
+            codec.payloadType
+            for codec in offered.rtp.codecs
+            if codec.mimeType.lower() == "video/h264"
+            and codec.payloadType in _INTERCOM_H264_PAYLOAD_TYPES - accepted
+        ]
+        if not aliases:
+            continue
+
+        # Re-serializing an aiortc SDP object drops a standalone a=rtcp-mux
+        # when the firmware omits the optional a=rtcp address.
+        lines = answer_sections[index].splitlines()
+        lines[0] += " " + " ".join(map(str, aliases))
+        attributes = tuple(
+            f"a={attribute}:{payload_type} "
+            for payload_type in aliases
+            for attribute in ("rtpmap", "fmtp", "rtcp-fb")
+        )
+        lines.extend(
+            line for line in offered_sections[index].splitlines() if line.startswith(attributes)
+        )
+        answer_sections[index] = "\r\n".join(lines) + "\r\n"
+    return "".join(answer_sections)
 
 
 def _sdp_ice_candidates(sdp: str) -> list[tuple[str, int, str | None]]:

@@ -256,7 +256,10 @@ class RealIntercomPeerTests(unittest.IsolatedAsyncioTestCase):
             # Reproduce the firmware advertising 101 while transmitting on 99.
             video.fmt.remove(99)
             video.rtp.codecs = [codec for codec in video.rtp.codecs if codec.payloadType != 99]
-            return str(answer)
+            # The firmware advertises RTCP multiplexing without an RTCP address.
+            return "".join(
+                line for line in str(answer).splitlines(keepends=True) if not line.startswith("a=rtcp:")
+            )
 
         async def add_candidate(value, index, mid):
             candidate = candidate_from_sdp(value.removeprefix("candidate:"))
