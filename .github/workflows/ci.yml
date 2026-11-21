@@ -25,7 +25,7 @@ jobs:
             media-packages: ""
           - home-assistant: "2026.11.2"
             python-version: "3.14"
-            media-packages: "aiortc==1.16.0 pillow"
+            media-packages: "aiortc==1.16.0 pillow PyTurboJPEG==1.8.3"
 
     steps:
       - name: Check out repository
