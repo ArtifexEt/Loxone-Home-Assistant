@@ -22,6 +22,7 @@ class FakePeerConnection:
         self.transceivers = []
         self.localDescription = None
         self.connectionState = "new"
+        self.connect_video = True
         self.video = SimpleNamespace(kind="video", recv=AsyncMock())
         self.audio = SimpleNamespace(kind="audio", recv=AsyncMock())
         self.audio_direction = "sendrecv"
@@ -51,12 +52,18 @@ class FakePeerConnection:
     async def setRemoteDescription(self, answer) -> None:
         if answer.sdp == "answer new":
             self.callbacks["track"](self.video)
+            if self.connect_video:
+                self.set_connection_state("connected")
         elif answer.sdp == "answer add_audio":
             self.transceivers[-1].currentDirection = self.audio_direction
             self.callbacks["track"](self.audio)
 
     async def addIceCandidate(self, candidate) -> None:
         self.candidates.put_nowait(candidate)
+
+    def set_connection_state(self, value: str) -> None:
+        self.connectionState = value
+        self.callbacks["connectionstatechange"]()
 
 
 class IntercomPeerTests(unittest.IsolatedAsyncioTestCase):
@@ -147,6 +154,33 @@ class IntercomPeerTests(unittest.IsolatedAsyncioTestCase):
         self.connection.close.assert_awaited_once()
         self.signaling.async_close.assert_awaited_once()
 
+    async def test_audio_wait_stops_when_video_transport_fails(self) -> None:
+        self.connection.connect_video = False
+        peer = await peer_module.IntercomPeer.async_connect(object(), "device-id")
+        self.addAsyncCleanup(peer.async_close)
+        audio = asyncio.create_task(peer.async_add_audio(SimpleNamespace(kind="audio")))
+        self.addCleanup(audio.cancel)
+
+        await asyncio.sleep(0)
+        self.connection.set_connection_state("failed")
+
+        with self.assertRaisesRegex(peer_module.IntercomPeerError, "session is closed"):
+            await asyncio.wait_for(audio, timeout=1)
+
+        self.signaling.async_call.assert_awaited_once_with("offer 1", action="new")
+
+    async def test_audio_wait_times_out_and_closes_unconnected_video(self) -> None:
+        self.connection.connect_video = False
+        peer = await peer_module.IntercomPeer.async_connect(object(), "device-id")
+
+        with patch.object(peer_module, "_NEGOTIATION_TIMEOUT", 0):
+            with self.assertRaisesRegex(peer_module.IntercomPeerError, "did not become ready"):
+                await peer.async_add_audio(SimpleNamespace(kind="audio"))
+
+        self.signaling.async_call.assert_awaited_once_with("offer 1", action="new")
+        self.connection.close.assert_awaited_once()
+        self.signaling.async_close.assert_awaited_once()
+
     async def test_remote_ice_handles_both_candidate_forms(self) -> None:
         self.notifications.put_nowait({"method": "addIceCandidate", "params": ["candidate:video", 0, "v"]})
         peer = await peer_module.IntercomPeer.async_connect(object(), "device-id")
@@ -232,6 +266,8 @@ class RealIntercomPeerTests(unittest.IsolatedAsyncioTestCase):
         microphone_at_door = asyncio.get_running_loop().create_future()
         notifications = asyncio.Queue()
         actions = []
+        initial_local_candidates = []
+        initial_remote_candidates = []
 
         @doorbell.on("track")
         def on_track(track):
@@ -256,6 +292,11 @@ class RealIntercomPeerTests(unittest.IsolatedAsyncioTestCase):
             # Reproduce the firmware advertising 101 while transmitting on 99.
             video.fmt.remove(99)
             video.rtp.codecs = [codec for codec in video.rtp.codecs if codec.payloadType != 99]
+            if action == "new":
+                # Hold both sides' initial candidates until talk is requested.
+                initial_remote_candidates.extend(peer_module._sdp_ice_candidates(doorbell.localDescription.sdp))
+                video.ice_candidates = []
+                video.ice_candidates_complete = False
             # The firmware advertises RTCP multiplexing without an RTCP address.
             return "".join(
                 line for line in str(answer).splitlines(keepends=True) if not line.startswith("a=rtcp:")
@@ -265,7 +306,10 @@ class RealIntercomPeerTests(unittest.IsolatedAsyncioTestCase):
             candidate = candidate_from_sdp(value.removeprefix("candidate:"))
             candidate.sdpMLineIndex = index
             candidate.sdpMid = mid
-            await doorbell.addIceCandidate(candidate)
+            if actions == ["new"]:
+                initial_local_candidates.append(candidate)
+            else:
+                await doorbell.addIceCandidate(candidate)
 
         signaling = SimpleNamespace(
             async_call=answer_offer,
@@ -278,12 +322,23 @@ class RealIntercomPeerTests(unittest.IsolatedAsyncioTestCase):
             peer = await peer_module.IntercomPeer.async_connect(object(), "simulated-doorbell")
         self.addAsyncCleanup(peer.async_close)
 
+        self.assertNotEqual(peer._connection.connectionState, "connected")
+        audio = asyncio.create_task(peer.async_add_audio(ToneTrack(400)))
+        self.addCleanup(audio.cancel)
+        await asyncio.sleep(0)
+        self.assertEqual(len(peer._connection.getTransceivers()), 1)
+
+        for candidate in initial_local_candidates:
+            await doorbell.addIceCandidate(candidate)
+        for value, index, mid in initial_remote_candidates:
+            notifications.put_nowait({"method": "addIceCandidate", "params": [value, index, mid]})
+        doorbell_audio = await asyncio.wait_for(audio, timeout=6)
+        self.assertEqual(actions, ["new", "add_audio"])
+
         preview = await peer.async_snapshot(width=320)
         with Image.open(BytesIO(preview)) as image:
             self.assertEqual((image.format, image.size), ("JPEG", (320, 240)))
 
-        doorbell_audio = await peer.async_add_audio(ToneTrack(400))
-        self.assertEqual(actions, ["new", "add_audio"])
         app_audio = await asyncio.wait_for(microphone_at_door, timeout=2)
         await asyncio.wait_for(asyncio.gather(
             self._assert_tone(doorbell_audio, expected=1000, other=400),

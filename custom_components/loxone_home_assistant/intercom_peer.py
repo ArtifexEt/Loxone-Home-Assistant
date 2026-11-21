@@ -35,6 +35,7 @@ class IntercomPeer:
         self._negotiation_lock = asyncio.Lock()
         self._notification_task: asyncio.Task[None] | None = None
         self._close_task: asyncio.Task[None] | None = None
+        self._connected_or_closed = asyncio.Event()
         self._disconnected = asyncio.Event()
         self._call_active = False
         self.video_track: Any | None = None
@@ -77,6 +78,16 @@ class IntercomPeer:
         if microphone_track.kind != "audio":
             raise IntercomPeerError("The microphone must provide an audio track.")
 
+        deadline = asyncio.get_running_loop().time() + _NEGOTIATION_TIMEOUT
+        try:
+            # Incoming trickle candidates also use the negotiation lock. Allow
+            # them to establish the initial transport before renegotiating it.
+            async with asyncio.timeout_at(deadline):
+                await self._connected_or_closed.wait()
+        except TimeoutError:
+            await self.async_close()
+            raise IntercomPeerError("The Intercom video connection did not become ready.") from None
+
         async with self._negotiation_lock:
             if self._close_task is not None:
                 raise IntercomPeerError("The Intercom media session is closed.")
@@ -84,7 +95,7 @@ class IntercomPeer:
                 raise IntercomPeerError("The Intercom media session already has an audio channel.")
 
             try:
-                async with asyncio.timeout(_NEGOTIATION_TIMEOUT):
+                async with asyncio.timeout_at(deadline):
                     audio = self._connection.addTransceiver(microphone_track, direction="sendrecv")
                     await self._async_negotiate("add_audio")
                     if self.audio_track is None or audio.currentDirection != "sendrecv":
@@ -143,13 +154,17 @@ class IntercomPeer:
             self.audio_track = track
 
     def _connection_state_changed(self) -> None:
-        if self._connection.connectionState in {"failed", "closed"}:
+        state = self._connection.connectionState
+        if state == "connected":
+            self._connected_or_closed.set()
+        elif state in {"failed", "closed"}:
             self._start_close()
 
     def _start_close(self) -> asyncio.Task[None]:
         if self._close_task is None:
             self._disconnected.set()
             self._close_task = asyncio.create_task(self._async_close_resources(), name="loxone_intercom_peer_close")
+            self._connected_or_closed.set()
         return self._close_task
 
     async def _async_close_resources(self) -> None:

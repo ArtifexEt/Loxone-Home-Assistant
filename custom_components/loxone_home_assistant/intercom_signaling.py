@@ -173,9 +173,13 @@ class IntercomSignaling:
         """Send a WebRTC offer for a new call or renegotiate its audio tracks."""
         if action not in {"new", "add_audio", "remove_audio"}:
             raise ValueError("Unsupported Intercom call action.")
+        params = [{"type": "offer", "sdp": sdp}, action, False]
+        if action != "new":
+            # The audio renegotiation uses the Loxone offer extension for live video.
+            params.append(0)
         result = await self.async_request(
             "call",
-            [{"type": "offer", "sdp": sdp}, action, False],
+            params,
         )
         answer = result.get("sdp") if isinstance(result, dict) else None
         if not isinstance(answer, str) or not answer:

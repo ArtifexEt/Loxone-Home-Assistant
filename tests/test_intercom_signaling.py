@@ -126,7 +126,7 @@ class IntercomSignalingTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(call.cancel)
         offer = await asyncio.wait_for(self.websocket.sent_messages.get(), 1)
         self.assertEqual(offer["method"], "call")
-        self.assertEqual(offer["params"], [{"type": "offer", "sdp": "offer SDP"}, "add_audio", False])
+        self.assertEqual(offer["params"], [{"type": "offer", "sdp": "offer SDP"}, "add_audio", False, 0])
 
         ice = ["candidate:abc", 0, "video"]
         self.websocket.receive(id=99, method="addIceCandidate", params=ice)
