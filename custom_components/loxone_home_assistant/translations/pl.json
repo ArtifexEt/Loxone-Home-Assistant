@@ -1,4 +1,11 @@
 {
+  "entity": {
+    "button": {
+      "refresh_entities": {
+        "name": "Odśwież encje"
+      }
+    }
+  },
   "config": {
     "step": {
       "user": {

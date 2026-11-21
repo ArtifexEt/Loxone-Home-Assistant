@@ -53,6 +53,14 @@ If the button does not open the flow directly, use `Settings -> Devices & Servic
 - adds a hub action button to force diagnostics refresh (`Refresh System Stats`)
 - registers integration services once in integration setup (HA-compatible service lifecycle)
 
+## Refreshing entities after a Loxone project change
+
+Save the updated project to the Miniserver. The integration checks for changes after reconnecting and every five minutes while connected. When the project version changes, Home Assistant re-imports the project.
+
+To import it immediately, open the Miniserver device in **Settings → Devices & Services → Loxone → Devices** and press **Refresh entities** under **Configuration**. You can also select **Reload** in the Loxone integration entry's menu.
+
+Existing entities keep their IDs when a Loxone block is renamed or moved. If you remove a block or recreate it with a new ID, Home Assistant may retain its previous registry entry. Check whether any dashboards or automations reference it before removing it.
+
 ## Supported platforms
 
 - `switch`

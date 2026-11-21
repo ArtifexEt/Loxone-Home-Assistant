@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import sys
 import types
 import unittest
+from unittest.mock import Mock
 
 from tests._loader import load_integration_module
 
@@ -116,7 +118,12 @@ def _install_homeassistant_stubs() -> None:
     class ConfigEntry:
         pass
 
+    class ConfigEntryState:
+        LOADED = "loaded"
+        NOT_LOADED = "not_loaded"
+
     config_entries.ConfigEntry = ConfigEntry
+    config_entries.ConfigEntryState = ConfigEntryState
     sys.modules["homeassistant.config_entries"] = config_entries
 
     core = types.ModuleType("homeassistant.core")
@@ -225,6 +232,8 @@ class _FakeBridge:
 class _FakeConfigEntry:
     def __init__(self, entry_id: str) -> None:
         self.entry_id = entry_id
+        self.state = button_module.ConfigEntryState.LOADED
+        self.setup_lock = asyncio.Lock()
 
 
 class _FakeHass:
@@ -264,7 +273,7 @@ class ButtonPlatformTests(unittest.IsolatedAsyncioTestCase):
             lambda new_entities: entities.extend(new_entities),
         )
 
-        self.assertEqual(len(entities), 2)
+        self.assertEqual(len(entities), 3)
         entity = entities[0]
         await entity.async_press()
         self.assertEqual(bridge.commands, [("button-action", "pulse")])
@@ -287,7 +296,7 @@ class ButtonPlatformTests(unittest.IsolatedAsyncioTestCase):
             lambda new_entities: entities.extend(new_entities),
         )
 
-        self.assertEqual(len(entities), 2)
+        self.assertEqual(len(entities), 3)
         refresh_buttons = [
             entity
             for entity in entities
@@ -297,6 +306,35 @@ class ButtonPlatformTests(unittest.IsolatedAsyncioTestCase):
 
         await refresh_buttons[0].async_press()
         self.assertEqual(refresh_calls, [True])
+
+    async def test_refresh_entities_schedules_only_its_miniserver_entry_when_idle(self) -> None:
+        bridge = _FakeBridge([])
+        entry = _FakeConfigEntry("entry-1")
+        hass = _FakeHass(entry.entry_id, bridge, const.DOMAIN)
+        hass.data[const.DOMAIN]["bridges"]["other-entry"] = _FakeBridge([])
+        reload_entry = Mock()
+        hass.config_entries = types.SimpleNamespace(async_schedule_reload=reload_entry)
+        entities: list = []
+        await button_module.async_setup_entry(hass, entry, entities.extend)
+
+        refresh_button, = (
+            entity for entity in entities
+            if isinstance(entity, button_module.LoxoneHubRefreshEntitiesButton)
+        )
+        refresh_button.hass = hass
+        self.assertEqual(refresh_button._attr_unique_id, "1234567890-refresh-entities")
+        self.assertEqual(refresh_button._attr_translation_key, "refresh_entities")
+
+        async with entry.setup_lock:
+            await refresh_button.async_press()
+        entry.state = button_module.ConfigEntryState.NOT_LOADED
+        await refresh_button.async_press()
+        reload_entry.assert_not_called()
+
+        entry.state = button_module.ConfigEntryState.LOADED
+        await refresh_button.async_press()
+        reload_entry.assert_called_once_with(entry.entry_id)
+        self.assertEqual(bridge.raw_commands, [])
 
     async def test_setup_adds_intercom_gen2_command_buttons(self) -> None:
         intercom = LoxoneControl(

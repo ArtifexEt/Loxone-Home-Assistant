@@ -1,4 +1,11 @@
 {
+  "entity": {
+    "button": {
+      "refresh_entities": {
+        "name": "Refresh entities"
+      }
+    }
+  },
   "config": {
     "step": {
       "user": {

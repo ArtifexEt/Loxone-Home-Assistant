@@ -6,7 +6,7 @@ from collections.abc import Sequence
 from typing import Any
 
 from homeassistant.components.button import ButtonEntity
-from homeassistant.config_entries import ConfigEntry
+from homeassistant.config_entries import ConfigEntry, ConfigEntryState
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -104,8 +104,11 @@ def _build_audio_tts_buttons(bridge) -> list[ButtonEntity]:
     ]
 
 
-def _build_hub_action_buttons(bridge) -> list[ButtonEntity]:
-    entities: list[ButtonEntity] = [LoxoneHubRestartButton(bridge)]
+def _build_hub_action_buttons(bridge, entry: ConfigEntry) -> list[ButtonEntity]:
+    entities: list[ButtonEntity] = [
+        LoxoneHubRestartButton(bridge),
+        LoxoneHubRefreshEntitiesButton(bridge, entry),
+    ]
     if callable(getattr(bridge, "async_refresh_system_stats", None)):
         entities.append(LoxoneHubRefreshSystemStatsButton(bridge))
     return entities
@@ -120,7 +123,7 @@ async def async_setup_entry(
     entities.extend(_build_intercom_command_buttons(bridge))
     entities.extend(_build_intercom_tts_buttons(bridge))
     entities.extend(_build_audio_tts_buttons(bridge))
-    entities.extend(_build_hub_action_buttons(bridge))
+    entities.extend(_build_hub_action_buttons(bridge, entry))
     async_add_entities(entities)
 
 
@@ -259,6 +262,21 @@ class LoxoneHubRestartButton(LoxoneHubActionButton):
         except LoxoneConnectionError:
             # Reboot can close the websocket before command acknowledgment arrives.
             return
+
+
+class LoxoneHubRefreshEntitiesButton(LoxoneHubActionButton):
+    """Re-import the Miniserver project through a Home Assistant entry reload."""
+
+    _attr_translation_key = "refresh_entities"
+    _attr_icon = "mdi:sync"
+
+    def __init__(self, bridge, entry: ConfigEntry) -> None:
+        super().__init__(bridge, "refresh-entities")
+        self._entry = entry
+
+    async def async_press(self) -> None:
+        if self._entry.state is ConfigEntryState.LOADED and not self._entry.setup_lock.locked():
+            self.hass.config_entries.async_schedule_reload(self._entry.entry_id)
 
 
 class LoxoneHubRefreshSystemStatsButton(LoxoneHubActionButton):
