@@ -14,8 +14,18 @@ env:
 
 jobs:
   validate:
-    name: Validate integration
+    name: Validate integration on Home Assistant ${{ matrix.home-assistant }}
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - home-assistant: "2025.1.0"
+            python-version: "3.13"
+            media-packages: ""
+          - home-assistant: "2026.11.2"
+            python-version: "3.14"
+            media-packages: "aiortc==1.16.0 pillow"
 
     steps:
       - name: Check out repository
@@ -24,12 +34,16 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
-          python-version: "3.13"
+          python-version: ${{ matrix.python-version }}
 
       - name: Install Home Assistant runtime dependencies
+        env:
+          HA_VERSION: ${{ matrix.home-assistant }}
+          MEDIA_PACKAGES: ${{ matrix.media-packages }}
         run: |
           python -m pip install --upgrade pip
-          pip install homeassistant==2025.1.0 numpy aiortc==1.16.0 pillow
+          read -r -a media_packages <<< "$MEDIA_PACKAGES"
+          python -m pip install "homeassistant==$HA_VERSION" numpy "${media_packages[@]}"
 
       - name: Run unit tests without live credentials
         run: |
@@ -72,6 +86,10 @@ jobs:
               importlib.import_module(module_name)
               print(f"Imported {module_name}")
           PY
+
+      - name: Import WebRTC camera against the Home Assistant API
+        if: matrix.media-packages != ''
+        run: python -c 'import custom_components.loxone_home_assistant.intercom_webrtc_camera'
 
       - name: Compile Python sources
         run: |
