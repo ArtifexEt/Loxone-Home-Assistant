@@ -126,6 +126,41 @@ class ParseStructureTests(unittest.TestCase):
         state_ref = structure.states["state-details"]
         self.assertEqual(state_ref.control_name, "Central Strefa 2")
 
+    def test_system_scheme_references_do_not_rename_controls(self) -> None:
+        structure = parse_structure({
+            "controls": {
+                "schema": {
+                    "name": "System diagram",
+                    "type": "SystemScheme",
+                    "uuidAction": "schema-action",
+                    "details": {"links": ["entry-action", "jdev/sps/io/entry-action/view"]},
+                    "subControls": {
+                        "schema-child": {
+                            "name": "Child",
+                            "type": "Switch",
+                            "uuidAction": "child-action",
+                        },
+                    },
+                },
+                "entry-intercom": {
+                    "name": "Entry intercom",
+                    "type": "IntercomV2",
+                    "uuidAction": "entry-action",
+                    "states": {"bell": "bell-state"},
+                },
+            },
+        })
+
+        intercom = structure.controls_by_action["entry-action"]
+        self.assertIsNone(intercom.parent_uuid_action)
+        self.assertEqual(intercom.display_name, "Entry intercom")
+        self.assertEqual(structure.states["bell-state"].control_name, "Entry intercom")
+        self.assertEqual(structure.states["bell-state"].control_uuid_action, "entry-action")
+
+        child = structure.controls_by_action["child-action"]
+        self.assertEqual(child.parent_uuid_action, "schema-action")
+        self.assertEqual(child.display_name, "System diagram Child")
+
     def test_parse_structure_detects_go_and_uses_model_based_default_name(self) -> None:
         payload = {
             "msInfo": {

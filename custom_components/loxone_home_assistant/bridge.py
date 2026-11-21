@@ -34,6 +34,7 @@ from .const import (
     APP_PERMISSION,
     CLIENT_INFO,
     CONF_CLIENT_UUID,
+    CONF_INTERCOM_LANGUAGE,
     CONF_INTERCOM_PASSWORD,
     CONF_INTERCOM_USERNAME,
     CONF_LOXAPP_VERSION,
@@ -55,13 +56,7 @@ from .const import (
     WEB_PERMISSION,
 )
 from .icons import icon_proxy_url, normalize_icon_path
-from .intercom import (
-    intercom_call_state_name,
-    intercom_doorbell_state_name,
-    intercom_light_state_name,
-    intercom_proximity_state_name,
-    is_intercom_control,
-)
+from .intercom import intercom_boolean_state_roles, is_intercom_control
 from .legacy_crypto import LegacyCryptoError, LegacySession
 from .models import LoxoneControl, LoxoneMediaServer, LoxoneStructure
 from .parser import parse_structure
@@ -266,6 +261,11 @@ class LoxoneBridge:
         )
         if self.intercom_password == "":
             self.intercom_password = None
+        intercom_language = data.get(CONF_INTERCOM_LANGUAGE)
+        self.intercom_language: str | None = (
+            intercom_language if intercom_language in ("pl", "en", "de") else None
+        )
+        self.intercom_entity_translations: dict[str, str] = {}
         remote = self._remote_serial is not None
         self.verify_ssl: bool = remote or bool(data.get(CONF_VERIFY_SSL, DEFAULT_VERIFY_SSL))
         self.use_tls: bool = remote or bool(data.get(CONF_USE_TLS, True))
@@ -274,6 +274,7 @@ class LoxoneBridge:
         )
 
         self.serial: str = str(data.get(CONF_SERIAL, "unknown"))
+        self.miniserver_device_id: str | None = None
         self.loxapp_version: str = str(data.get(CONF_LOXAPP_VERSION, ""))
         self.software_version: str | None = (
             str(data.get(CONF_SOFTWARE_VERSION))
@@ -430,6 +431,21 @@ class LoxoneBridge:
             return None
         return icon_proxy_url(self.serial, value)
 
+    def miniserver_tls_fingerprint(self) -> bytes | None:
+        """Return the SHA-256 TLS certificate fingerprint of the authenticated socket."""
+        websocket = self._ws
+        if not self.available or self._closing or not self.use_tls or websocket is None or websocket.closed:
+            return None
+
+        tls_connection = websocket.get_extra_info("ssl_object")
+        if tls_connection is None:
+            return None
+        try:
+            certificate = tls_connection.getpeercert(binary_form=True)
+        except (OSError, ValueError):
+            return None
+        return hashlib.sha256(certificate).digest() if isinstance(certificate, bytes) and certificate else None
+
     def state_value(self, state_uuid: str | None) -> Any:
         """Return the latest state value for a UUID."""
         if state_uuid is None:
@@ -475,9 +491,10 @@ class LoxoneBridge:
         """Send a control command through the authenticated websocket."""
         encoded_uuid = quote(uuid_action, safe="-")
         encoded_command = quote(command, safe="/(),:%._-")
-        return await self._send_loxone_command(
-            f"jdev/sps/io/{encoded_uuid}/{encoded_command}"
-        )
+        path = f"jdev/sps/io/{encoded_uuid}/{encoded_command}"
+        if command == "securedDetails" and not self.use_tls:
+            return await self._send_loxone_command(path, encrypt_response=True)
+        return await self._send_loxone_command(path)
 
     async def async_send_raw_command(self, command: str) -> dict[str, Any]:
         """Send a raw command through the authenticated websocket."""
@@ -1227,8 +1244,8 @@ class LoxoneBridge:
             if control is None or not is_intercom_control(control):
                 continue
 
-            event_name = _intercom_event_name_for_state(control, state_ref.state_name)
-            if event_name is None:
+            role = intercom_boolean_state_roles(control).get(state_ref.state_name)
+            if role is None:
                 continue
 
             if not _state_triggered(previous_values.get(state_uuid), new_value):
@@ -1242,8 +1259,8 @@ class LoxoneBridge:
                 "room": control.room_name,
                 "category": control.category_name,
                 "state_name": state_ref.state_name,
-                "event": event_name,
-                "value": new_value,
+                "event": role.casefold(),
+                "value": True if isinstance(new_value, Mapping) else new_value,
             }
             fire_event(EVENT_INTERCOM, event_data)
 
@@ -1306,28 +1323,6 @@ class LoxoneBridge:
                     _LOGGER.exception(
                         "Loxone listener callback failed; keeping websocket connection alive."
                     )
-
-
-def _intercom_event_name_for_state(control: LoxoneControl, state_name: str) -> str | None:
-    if state_name == intercom_doorbell_state_name(control):
-        return "doorbell"
-    if state_name == intercom_call_state_name(control):
-        return "call"
-    if state_name == intercom_proximity_state_name(control):
-        return "proximity"
-    if state_name == intercom_light_state_name(control):
-        return "light"
-
-    normalized_state_name = _normalize_state_name(state_name)
-    if "bell" in normalized_state_name or "ring" in normalized_state_name:
-        return "doorbell"
-    if "call" in normalized_state_name or "talk" in normalized_state_name:
-        return "call"
-    if "prox" in normalized_state_name or "near" in normalized_state_name:
-        return "proximity"
-    if "light" in normalized_state_name or "led" in normalized_state_name:
-        return "light"
-    return None
 
 
 def _is_access_event_control(control: LoxoneControl) -> bool:

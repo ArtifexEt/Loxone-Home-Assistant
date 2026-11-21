@@ -1,4 +1,4 @@
-"""Tests for AudioZone TTS helper entities."""
+"""Tests for TTS helper entities."""
 
 from __future__ import annotations
 
@@ -109,6 +109,7 @@ def _install_homeassistant_stubs() -> None:
         TEXT = "text"
 
     const.Platform = Platform
+    const.MAX_LENGTH_STATE_STATE = 255
     sys.modules["homeassistant.const"] = const
 
     config_entries = types.ModuleType("homeassistant.config_entries")
@@ -208,9 +209,15 @@ class AudioTtsHelperPlatformTests(unittest.IsolatedAsyncioTestCase):
             },
         )
 
-    async def test_text_platform_adds_audio_tts_message_helper(self) -> None:
+    async def test_text_platform_adds_tts_message_helpers(self) -> None:
         audio_zone = self._audio_zone()
-        bridge = _FakeBridge([audio_zone], {"state-volume": 35})
+        intercom = LoxoneControl(
+            uuid="intercom-uuid",
+            uuid_action="intercom-action",
+            name="Intercom",
+            type="IntercomV2",
+        )
+        bridge = _FakeBridge([audio_zone, intercom], {"state-volume": 35})
         entry = _FakeConfigEntry("entry-1")
         hass = _FakeHass(entry.entry_id, bridge, const.DOMAIN)
         entities: list = []
@@ -229,10 +236,17 @@ class AudioTtsHelperPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(tts_entities), 1)
         tts_entity = tts_entities[0]
         self.assertEqual(tts_entity.native_value, "")
+        self.assertEqual(tts_entity._attr_native_max, 120)
 
         await tts_entity.async_set_value("Alarm test")
 
         self.assertEqual(tts_entity.native_value, "Alarm test")
+        intercom_entity = next(
+            entity
+            for entity in entities
+            if isinstance(entity, text_module.LoxoneIntercomTtsMessageEntity)
+        )
+        self.assertEqual(intercom_entity._attr_native_max, 255)
 
     async def test_number_platform_adds_audio_tts_volume_helper(self) -> None:
         audio_zone = self._audio_zone()

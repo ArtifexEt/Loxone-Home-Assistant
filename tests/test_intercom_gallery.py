@@ -1,0 +1,210 @@
+"""Test authorization and pagination for the Intercom gallery API."""
+
+from __future__ import annotations
+
+import json
+import sys
+import unittest
+from importlib import import_module
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock, patch
+
+from tests._loader import load_integration_module
+from tests.test_camera_platform import LoxoneControl, _install_homeassistant_stubs
+
+
+def _load_gallery():
+    with patch.dict(sys.modules):
+        _install_homeassistant_stubs()
+        aiohttp = sys.modules.get("aiohttp")
+        if aiohttp is not None and not getattr(aiohttp, "__path__", None):
+            del sys.modules["aiohttp"]
+        web = import_module("aiohttp.web")
+        sys.modules["homeassistant.auth.permissions.const"] = SimpleNamespace(POLICY_READ="read")
+        sys.modules["homeassistant.components.http"] = SimpleNamespace(
+            KEY_HASS_USER="hass_user",
+            HomeAssistantView=type("HomeAssistantView", (), {"json": staticmethod(web.json_response)}),
+            StaticPathConfig=Mock(),
+        )
+        sys.modules["homeassistant.components.panel_custom"] = SimpleNamespace(async_register_panel=AsyncMock())
+        sys.modules["homeassistant.helpers.device_registry"].async_get = Mock()
+        sys.modules["homeassistant.helpers.entity_registry"] = SimpleNamespace(
+            async_get=Mock(), async_entries_for_device=Mock(),
+        )
+        return load_integration_module("custom_components.loxone_home_assistant.intercom_gallery")
+
+
+gallery = _load_gallery()
+archive = import_module("custom_components.loxone_home_assistant.intercom_archive")
+CAMERA_ID = "camera.test_intercom_video"
+ENTRY_ID = "test-config-entry"
+DEVICE_ID = "a" * 32
+LATEST = 1_800_000_018
+
+
+class IntercomGalleryTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        self.control = LoxoneControl(
+            uuid="test-intercom", uuid_action="test-action", name="Intercom",
+            type="IntercomV2", details={"deviceUuid": "test-device"},
+        )
+        self.bridge = SimpleNamespace(serial="test-server", controls=[self.control], use_tls=True)
+        self.entry = SimpleNamespace(
+            entity_id=CAMERA_ID, domain="camera", platform=gallery.DOMAIN, config_entry_id=ENTRY_ID,
+            device_id=DEVICE_ID,
+            disabled=False, unique_id="test-server:test-action:video",
+        )
+        self.registry = {CAMERA_ID: self.entry}
+        self.enterContext(patch.object(gallery.er, "async_get", return_value=SimpleNamespace(
+            async_get=self.registry.get,
+        )))
+        self.hass = SimpleNamespace(
+            data={gallery.DOMAIN: {"bridges": {ENTRY_ID: self.bridge}}},
+            http=SimpleNamespace(async_register_static_paths=AsyncMock(), register_view=Mock()),
+        )
+        self.read = Mock(return_value=True)
+        self.entries = self.enterContext(patch.object(
+            gallery, "async_gen2_archive_entries", new_callable=AsyncMock,
+        ))
+        self.image = self.enterContext(patch.object(
+            gallery, "async_gen2_archive_image", new_callable=AsyncMock,
+        ))
+        self.thumbnail = self.enterContext(patch.object(
+            gallery, "async_gen2_archive_thumbnail", new_callable=AsyncMock,
+        ))
+        self.view = gallery.IntercomGalleryView(self.hass)
+        self.device_view = gallery.IntercomHistoryDeviceView(self.hass)
+
+    def _request(self, query: dict[str, str] | None = None, *, authenticated: bool = True):
+        request = Mock(query=query or {})
+        request.get.return_value = (
+            SimpleNamespace(permissions=SimpleNamespace(check_entity=self.read))
+            if authenticated else None
+        )
+        return request
+
+    async def test_metadata_pages_return_only_ids_and_timestamps(self) -> None:
+        self.entries.return_value = tuple(
+            archive.IntercomArchiveEntry(timestamp) for timestamp in range(LATEST, LATEST - 19, -1)
+        )
+        first = await self.view.get(self._request(), CAMERA_ID)
+        last = await self.view.get(self._request({"page": "9"}), CAMERA_ID)
+        first_page = json.loads(first.body)
+        self.assertEqual((first_page["page"], first_page["page_size"], first_page["total"]), (1, 18, 19))
+        self.assertEqual(len(first_page["items"]), 18)
+        self.assertEqual(first_page["items"][0], {"id": f"gen2:{LATEST}", "timestamp": LATEST})
+        self.assertEqual(json.loads(last.body), {
+            "items": [{"id": f"gen2:{LATEST - 18}", "timestamp": LATEST - 18}],
+            "page": 2, "page_size": 18, "total": 19, "language": None,
+        })
+        self.assertEqual(first.headers["Cache-Control"], "no-store")
+        self.read.assert_called_with(CAMERA_ID, gallery.POLICY_READ)
+        self.entries.assert_awaited_with(self.bridge, self.control, require_fresh=True)
+
+    async def test_archive_outage_returns_503_instead_of_an_empty_page(self) -> None:
+        self.entries.side_effect = gallery.IntercomArchiveUnavailableError()
+        with self.assertRaises(gallery.web.HTTPServiceUnavailable) as error:
+            await self.view.get(self._request(), CAMERA_ID)
+        self.assertEqual(error.exception.headers["Cache-Control"], "no-store")
+
+    async def test_missing_and_denied_authentication_does_not_reach_archive(self) -> None:
+        self.assertTrue(self.view.requires_auth)
+        with self.assertRaises(gallery.web.HTTPUnauthorized):
+            await self.view.get(self._request(authenticated=False), CAMERA_ID)
+        self.read.return_value = False
+        with self.assertRaises(gallery.web.HTTPForbidden):
+            await self.view.get(self._request({"thumbnail": "1"}), CAMERA_ID, f"gen2:{LATEST}")
+        self.entries.assert_not_awaited()
+        self.image.assert_not_awaited()
+        self.thumbnail.assert_not_awaited()
+
+    async def test_requires_the_loaded_registered_archive_camera(self) -> None:
+        for change in (
+            {"domain": "sensor"}, {"platform": "other_integration"}, {"disabled": True},
+            {"config_entry_id": None}, {"unique_id": "test-server:test-action:live"},
+            {"unique_id": "other-server:test-action:video"},
+        ):
+            with self.subTest(change=change), patch.multiple(self.entry, **change):
+                with self.assertRaises(gallery.web.HTTPNotFound):
+                    await self.view.get(self._request(), CAMERA_ID)
+        self.entries.assert_not_awaited()
+
+    async def test_gallery_reports_an_entry_reload_as_temporarily_unavailable(self) -> None:
+        self.hass.data[gallery.DOMAIN]["bridges"].clear()
+        with self.assertRaises(gallery.web.HTTPServiceUnavailable):
+            await self.view.get(self._request(), CAMERA_ID)
+        self.entries.assert_not_awaited()
+
+    async def test_full_and_thumbnail_routes_validate_id_and_serve_jpeg(self) -> None:
+        photo_id = f"gen2:{LATEST}"
+        self.image.return_value = b"\xff\xd8full JPEG\xff\xd9"
+        self.thumbnail.return_value = b"\xff\xd8thumbnail JPEG\xff\xd9"
+        for query, handler in ((None, self.image), ({"thumbnail": "1"}, self.thumbnail)):
+            response = await self.view.get(self._request(query), CAMERA_ID, photo_id)
+            handler.assert_awaited_once_with(self.bridge, self.control, photo_id)
+            self.assertEqual(response.body, handler.return_value)
+            self.assertEqual(response.content_type, "image/jpeg")
+            self.assertEqual(response.headers["Cache-Control"], "no-store")
+        with self.assertRaises(gallery.web.HTTPNotFound):
+            await self.view.get(self._request(), CAMERA_ID, "https://example.invalid/photo.jpg")
+        with self.assertRaises(gallery.web.HTTPBadRequest):
+            await self.view.get(self._request({"page": "0"}), CAMERA_ID)
+        self.entries.assert_not_awaited()
+        self.image.assert_awaited_once()
+        self.thumbnail.assert_awaited_once()
+
+    async def test_registers_both_views_and_panel_once(self) -> None:
+        await gallery.async_setup_intercom_gallery(self.hass)
+        await gallery.async_setup_intercom_gallery(self.hass)
+        self.hass.http.async_register_static_paths.assert_awaited_once()
+        self.assertEqual(self.hass.http.register_view.call_count, 2)
+        for static_call, filename in zip(
+            gallery.StaticPathConfig.call_args_list,
+            ("intercom-gallery.js", "intercom-history-panel.js"),
+            strict=True,
+        ):
+            url, filepath = static_call.args
+            self.assertEqual(url, f"/loxone_home_assistant/{filename}")
+            self.assertTrue(filepath.endswith(f"/frontend/{filename}"))
+        gallery.async_register_panel.assert_awaited_once_with(
+            self.hass,
+            frontend_url_path="loxone-intercom-history",
+            webcomponent_name="loxone-intercom-history-panel",
+            module_url="/loxone_home_assistant/intercom-history-panel.js",
+        )
+
+    async def test_device_history_link_resolves_renamed_video_camera_only_with_read_permission(self) -> None:
+        renamed = "camera.renamed_intercom"
+        self.entry.entity_id = renamed
+        self.bridge.intercom_language = "de"
+        gallery.er.async_entries_for_device.return_value = [
+            SimpleNamespace(**vars(self.entry) | {
+                "entity_id": "camera.live", "unique_id": "test-server:test-action:live",
+            }),
+            self.entry,
+        ]
+
+        response = await self.device_view.get(self._request(), DEVICE_ID)
+        self.assertEqual(json.loads(response.body), {"entity_id": renamed, "language": "de"})
+        self.assertEqual(response.headers["Cache-Control"], "no-store")
+        self.read.assert_called_with(renamed, gallery.POLICY_READ)
+        self.entries.assert_not_awaited()
+
+        self.read.side_effect = lambda entity_id, _: entity_id == "camera.live"
+        with self.assertRaises(gallery.web.HTTPNotFound):
+            await self.device_view.get(self._request(), DEVICE_ID)
+        with self.assertRaises(gallery.web.HTTPUnauthorized):
+            await self.device_view.get(self._request(authenticated=False), DEVICE_ID)
+
+    async def test_device_shortcut_uses_only_the_opaque_home_assistant_device_id(self) -> None:
+        self.hass.data[gallery.DOMAIN][gallery._DATA_VIEW_REGISTERED] = True
+        device = SimpleNamespace(configuration_url=None)
+        registry = SimpleNamespace(async_get=Mock(return_value=device), async_update_device=Mock())
+        with patch.object(gallery.dr, "async_get", return_value=registry):
+            gallery.async_add_intercom_history_device_link(self.hass, self.entry, self.bridge, self.control)
+            url = f"homeassistant://loxone-intercom-history/{DEVICE_ID}"
+            registry.async_update_device.assert_called_once_with(DEVICE_ID, configuration_url=url)
+
+            device.configuration_url = url
+            gallery.async_add_intercom_history_device_link(self.hass, self.entry, self.bridge, self.control)
+            registry.async_update_device.assert_called_once()

@@ -69,8 +69,12 @@ def control_device_info(bridge, control: LoxoneControl) -> DeviceInfo:
         "manufacturer": MANUFACTURER,
         "model": control.type,
         "name": control.display_name,
-        "via_device": miniserver_device_identifier(bridge.serial),
     }
+    if "via_device_id" in DeviceInfo.__annotations__:
+        if (device_id := getattr(bridge, "miniserver_device_id", None)) is not None:
+            kwargs["via_device_id"] = device_id
+    else:
+        kwargs["via_device"] = miniserver_device_identifier(bridge.serial)
     if control.room_name:
         kwargs["suggested_area"] = control.room_name
     return DeviceInfo(**kwargs)
@@ -93,6 +97,16 @@ class LoxoneEntity(Entity):
         if icon_url is not None:
             self._attr_entity_picture = icon_url
         self._remove_listener = None
+
+    def _set_intercom_entity_name(self, platform: str, key: str) -> None:
+        """Use a short translated Intercom label independently of the unique ID."""
+        translations = getattr(self.bridge, "intercom_entity_translations", {})
+        name = translations.get(f"component.{DOMAIN}.entity.{platform}.{key}.name")
+        if name:
+            self._attr_name = name
+        else:
+            del self._attr_name
+            self._attr_translation_key = key
 
     @property
     def available(self) -> bool:

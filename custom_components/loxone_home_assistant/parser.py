@@ -204,7 +204,8 @@ def _infer_parent_links_from_details(
     }
 
     for parent_control in controls:
-        if not parent_control.details:
+        # System diagrams reference controls without owning them.
+        if parent_control.type.casefold() == "systemscheme" or not parent_control.details:
             continue
 
         for child_uuid_action in _extract_detail_action_references(

@@ -6,6 +6,7 @@ import sys
 import types
 import unittest
 from enum import IntFlag
+from unittest.mock import AsyncMock, patch
 
 from tests._loader import load_integration_module
 
@@ -84,6 +85,7 @@ def _install_homeassistant_stubs() -> None:
         pass
 
     core.HomeAssistant = HomeAssistant
+    core.callback = lambda func: func
     sys.modules["homeassistant.core"] = core
 
     helpers = types.ModuleType("homeassistant.helpers")
@@ -361,8 +363,9 @@ class CameraPlatformTests(unittest.IsolatedAsyncioTestCase):
         )
         entity = LoxoneIntercomCameraEntity(bridge, control)
 
-        self.assertEqual(entity.extra_state_attributes["stream_url"], expected_stream_url)
-        self.assertEqual(entity.extra_state_attributes["snapshot_url"], expected_snapshot_url)
+        self.assertEqual(entity._stream_url(), expected_stream_url)
+        self.assertNotIn("stream_url", entity.extra_state_attributes)
+        self.assertNotIn("snapshot_url", entity.extra_state_attributes)
 
         image = await entity.async_camera_image()
 
@@ -385,7 +388,7 @@ class CameraPlatformTests(unittest.IsolatedAsyncioTestCase):
         expected_snapshot_url = "https://198.51.100.70/rest/live.jpg"
         session = _FakeSession(
             {
-                (expected_snapshot_url, True): (200, b"external-live"),
+                (expected_snapshot_url, False): (200, b"external-live"),
             }
         )
         bridge = _FakeBridge(
@@ -401,8 +404,8 @@ class CameraPlatformTests(unittest.IsolatedAsyncioTestCase):
         )
         entity = LoxoneIntercomCameraEntity(bridge, control)
 
-        self.assertEqual(entity.extra_state_attributes["stream_url"], expected_stream_url)
-        self.assertEqual(entity.extra_state_attributes["snapshot_url"], expected_snapshot_url)
+        self.assertEqual(entity._stream_url(), expected_stream_url)
+        self.assertEqual(entity._snapshot_url(), expected_snapshot_url)
         self.assertEqual(await entity.async_camera_image(), b"external-live")
 
     async def test_camera_extracts_first_jpeg_frame_from_mjpeg_stream(self) -> None:
@@ -510,10 +513,75 @@ class CameraPlatformTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(image, b"history-image")
         self.assertEqual(session.calls, [(expected_history_url, True)])
-        self.assertEqual(
-            entity.extra_state_attributes["selected_history_image_url"],
-            expected_history_url,
+        self.assertNotIn("selected_history_image_url", entity.extra_state_attributes)
+
+    async def test_camera_refreshes_thumbnail_only_when_its_selection_changes(self) -> None:
+        control = LoxoneControl(
+            uuid="intercom-uuid",
+            uuid_action="intercom-action",
+            name="Doorbell",
+            type="IntercomV2",
         )
+        bridge = _FakeBridge([control], {}, _FakeSession())
+        other_bridge = _FakeBridge([control], {}, _FakeSession())
+        entity = LoxoneIntercomCameraEntity(bridge, control)
+        hass = _FakeHass("entry-1", bridge, const.DOMAIN)
+        bridge.hass = other_bridge.hass = entity.hass = hass
+        entity.registry_entry = None
+        listeners = {}
+        cleanups = []
+        updates = []
+
+        def connect(_hass, signal, listener):
+            listeners[signal] = listener
+            return lambda: listeners.pop(signal, None)
+
+        def send(_hass, signal):
+            if signal in listeners:
+                listeners[signal]()
+
+        def record(operation):
+            selection = media_module.intercom_selected_history_timestamp(
+                bridge, control.uuid_action
+            )
+            updates.append((operation, selection))
+
+        entity.async_on_remove = cleanups.append
+        entity.async_update_token = lambda: record("token")
+        entity.async_write_ha_state = lambda: record("state")
+        dependency_stubs = {
+            "homeassistant.helpers.dispatcher": types.SimpleNamespace(
+                async_dispatcher_connect=connect, async_dispatcher_send=send,
+            ),
+            "custom_components.loxone_home_assistant.intercom_gallery": types.SimpleNamespace(
+                async_add_intercom_history_device_link=lambda *args: None,
+            ),
+        }
+        first_photo = "gen2:1773451234"
+        second_photo = "gen2:1773451235"
+        with patch.dict(sys.modules, dependency_stubs):
+            await entity.async_added_to_hass()
+            media_module.set_intercom_selected_history_timestamp(
+                bridge, "other-intercom", first_photo
+            )
+            media_module.set_intercom_selected_history_timestamp(
+                other_bridge, control.uuid_action, first_photo
+            )
+            for selection in (first_photo, first_photo, second_photo, None, None):
+                media_module.set_intercom_selected_history_timestamp(
+                    bridge, control.uuid_action, selection
+                )
+            (unsubscribe,) = cleanups
+            unsubscribe()
+            media_module.set_intercom_selected_history_timestamp(
+                bridge, control.uuid_action, first_photo
+            )
+
+        self.assertEqual(updates, [
+            ("token", first_photo), ("state", first_photo),
+            ("token", second_photo), ("state", second_photo),
+            ("token", None), ("state", None),
+        ])
 
     async def test_history_selection_returns_still_response_from_live_endpoint(self) -> None:
         control = LoxoneControl(
@@ -548,6 +616,35 @@ class CameraPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.body, b"history-image")
         self.assertEqual(response.content_type, "image/jpeg")
 
+    async def test_native_archive_selection_uses_private_photo_client(self) -> None:
+        control = LoxoneControl(
+            uuid="intercom-uuid",
+            uuid_action="intercom-action",
+            name="Doorbell",
+            type="IntercomV2",
+            details={"deviceUuid": "12345678-1234-1234-1234567890123456"},
+        )
+        session = _FakeSession()
+        bridge = _FakeBridge([control], {}, session)
+        entry = _FakeConfigEntry("entry-1")
+        hass = _FakeHass(entry.entry_id, bridge, const.DOMAIN)
+        entities = []
+        await camera_module.async_setup_entry(hass, entry, entities.extend)
+        self.assertEqual(len(entities), 1)
+
+        selection = "gen2:1773451234"
+        media_module.set_intercom_selected_history_timestamp(bridge, control.uuid_action, selection)
+        with patch.object(
+            camera_module, "async_gen2_archive_image",
+            AsyncMock(side_effect=(b"\xff\xd8archive-photo\xff\xd9", None)),
+        ) as archive_image:
+            response = await entities[0].handle_async_mjpeg_stream(request=None)
+            self.assertEqual(response.status, 200)
+            self.assertEqual(response.body, b"\xff\xd8archive-photo\xff\xd9")
+            self.assertIsNone(await entities[0].async_camera_image())
+            archive_image.assert_awaited_with(bridge, control, selection)
+        self.assertEqual(session.calls, [])
+
     async def test_camera_uses_secured_details_for_media_urls(self) -> None:
         control = LoxoneControl(
             uuid="door-controller-uuid",
@@ -555,7 +652,7 @@ class CameraPlatformTests(unittest.IsolatedAsyncioTestCase):
             name="Intercom Front",
             type="DoorController",
             states={"lastBellEvents": "state-events"},
-            details={},
+            details={"securedDetails": True},
         )
         expected_snapshot_url = "https://mini.local/dev/secured-alert.jpg"
         bridge = _FakeBridge(
@@ -580,10 +677,7 @@ class CameraPlatformTests(unittest.IsolatedAsyncioTestCase):
             bridge.action_calls,
             [("door-controller-action", "securedDetails")],
         )
-        self.assertEqual(
-            entity.extra_state_attributes["snapshot_url"],
-            expected_snapshot_url,
-        )
+        self.assertNotIn("snapshot_url", entity.extra_state_attributes)
 
     async def test_camera_retries_secured_details_after_connection_failure(self) -> None:
         control = LoxoneControl(
@@ -643,6 +737,31 @@ class CameraPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status, 200)
         self.assertEqual(response.body, b"live-image")
 
+    async def test_native_frame_fallback_does_not_replace_a_selected_history_photo(self) -> None:
+        control = LoxoneControl(
+            uuid="intercom-uuid",
+            uuid_action="intercom-action",
+            name="Dzwonek",
+            type="IntercomV2",
+        )
+        historical_url = "https://mini.local/camimage/intercom-action/20260314123045"
+        session = _FakeSession({(historical_url, True): (404, b"")})
+        bridge = _FakeBridge([control], {}, session)
+        captured = []
+
+        async def snapshot():
+            captured.append(True)
+            return b"live-frame"
+
+        entity = LoxoneIntercomCameraEntity(bridge, control, native_snapshot=snapshot)
+        self.assertEqual(await entity.async_camera_image(), b"live-frame")
+
+        media_module.set_intercom_selected_history_timestamp(
+            bridge, control.uuid_action, "20260314123045"
+        )
+        self.assertIsNone(await entity.async_camera_image())
+        self.assertEqual(captured, [True])
+
     async def test_live_stream_uses_dedicated_intercom_credentials(self) -> None:
         control = LoxoneControl(
             uuid="intercom-uuid",
@@ -670,7 +789,7 @@ class CameraPlatformTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(session.auth_logins, ["camuser"])
 
-    async def test_live_stream_falls_back_to_current_user_credentials(self) -> None:
+    async def test_live_stream_never_sends_miniserver_credentials_to_camera(self) -> None:
         control = LoxoneControl(
             uuid="intercom-uuid",
             uuid_action="intercom-action",
@@ -681,7 +800,7 @@ class CameraPlatformTests(unittest.IsolatedAsyncioTestCase):
         )
         session = _FakeSession(
             {
-                ("http://192.0.2.10/mjpg/video.mjpg", True): (
+                ("http://192.0.2.10/mjpg/video.mjpg", False): (
                     200,
                     b"\xff\xd8\xff\xe0frame\xff\xd9",
                     "multipart/x-mixed-replace",
@@ -693,7 +812,7 @@ class CameraPlatformTests(unittest.IsolatedAsyncioTestCase):
 
         await entity.async_camera_image()
 
-        self.assertEqual(session.auth_logins, ["user"])
+        self.assertEqual(session.auth_logins, [None])
 
     async def test_snapshot_uses_dedicated_credentials_on_alternate_miniserver_port(self) -> None:
         url = "https://mini.local:8443/snapshot.jpg"

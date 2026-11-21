@@ -16,6 +16,7 @@
   "version": "0.1.0",
   "dependencies": [
     "network",
+    "panel_custom",
     "stream"
   ]
 }

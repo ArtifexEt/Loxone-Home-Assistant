@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import sys
 import types
 import unittest
+from unittest.mock import Mock
 
 from tests._loader import load_integration_module
 
@@ -116,7 +118,12 @@ def _install_homeassistant_stubs() -> None:
     class ConfigEntry:
         pass
 
+    class ConfigEntryState:
+        LOADED = "loaded"
+        NOT_LOADED = "not_loaded"
+
     config_entries.ConfigEntry = ConfigEntry
+    config_entries.ConfigEntryState = ConfigEntryState
     sys.modules["homeassistant.config_entries"] = config_entries
 
     core = types.ModuleType("homeassistant.core")
@@ -225,6 +232,8 @@ class _FakeBridge:
 class _FakeConfigEntry:
     def __init__(self, entry_id: str) -> None:
         self.entry_id = entry_id
+        self.state = button_module.ConfigEntryState.LOADED
+        self.setup_lock = asyncio.Lock()
 
 
 class _FakeHass:
@@ -264,7 +273,7 @@ class ButtonPlatformTests(unittest.IsolatedAsyncioTestCase):
             lambda new_entities: entities.extend(new_entities),
         )
 
-        self.assertEqual(len(entities), 2)
+        self.assertEqual(len(entities), 3)
         entity = entities[0]
         await entity.async_press()
         self.assertEqual(bridge.commands, [("button-action", "pulse")])
@@ -287,7 +296,7 @@ class ButtonPlatformTests(unittest.IsolatedAsyncioTestCase):
             lambda new_entities: entities.extend(new_entities),
         )
 
-        self.assertEqual(len(entities), 2)
+        self.assertEqual(len(entities), 3)
         refresh_buttons = [
             entity
             for entity in entities
@@ -297,6 +306,35 @@ class ButtonPlatformTests(unittest.IsolatedAsyncioTestCase):
 
         await refresh_buttons[0].async_press()
         self.assertEqual(refresh_calls, [True])
+
+    async def test_refresh_entities_schedules_only_its_miniserver_entry_when_idle(self) -> None:
+        bridge = _FakeBridge([])
+        entry = _FakeConfigEntry("entry-1")
+        hass = _FakeHass(entry.entry_id, bridge, const.DOMAIN)
+        hass.data[const.DOMAIN]["bridges"]["other-entry"] = _FakeBridge([])
+        reload_entry = Mock()
+        hass.config_entries = types.SimpleNamespace(async_schedule_reload=reload_entry)
+        entities: list = []
+        await button_module.async_setup_entry(hass, entry, entities.extend)
+
+        refresh_button, = (
+            entity for entity in entities
+            if isinstance(entity, button_module.LoxoneHubRefreshEntitiesButton)
+        )
+        refresh_button.hass = hass
+        self.assertEqual(refresh_button._attr_unique_id, "1234567890-refresh-entities")
+        self.assertEqual(refresh_button._attr_translation_key, "refresh_entities")
+
+        async with entry.setup_lock:
+            await refresh_button.async_press()
+        entry.state = button_module.ConfigEntryState.NOT_LOADED
+        await refresh_button.async_press()
+        reload_entry.assert_not_called()
+
+        entry.state = button_module.ConfigEntryState.LOADED
+        await refresh_button.async_press()
+        reload_entry.assert_called_once_with(entry.entry_id)
+        self.assertEqual(bridge.raw_commands, [])
 
     async def test_setup_adds_intercom_gen2_command_buttons(self) -> None:
         intercom = LoxoneControl(
@@ -327,11 +365,11 @@ class ButtonPlatformTests(unittest.IsolatedAsyncioTestCase):
         ]
         self.assertEqual(len(intercom_buttons), 3)
         self.assertEqual(
-            [(button._attr_name, button._attr_unique_id) for button in intercom_buttons],
+            [(button._attr_translation_key, button._attr_unique_id) for button in intercom_buttons],
             [
-                ("Furtka Stop Ringing", "1234567890:intercom-action:answer_call"),
-                ("Furtka Mute Doorbell", "1234567890:intercom-action:mute_microphone"),
-                ("Furtka Unmute Doorbell", "1234567890:intercom-action:unmute_microphone"),
+                ("intercom_stop_ringing", "1234567890:intercom-action:answer_call"),
+                ("intercom_mute_doorbell", "1234567890:intercom-action:mute_microphone"),
+                ("intercom_unmute_doorbell", "1234567890:intercom-action:unmute_microphone"),
             ],
         )
 
@@ -347,7 +385,7 @@ class ButtonPlatformTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
-    async def test_setup_skips_legacy_intercom_command_buttons(self) -> None:
+    async def test_setup_only_adds_stop_ringing_for_legacy_intercom(self) -> None:
         legacy_intercom = LoxoneControl(
             uuid="intercom-legacy-uuid",
             uuid_action="intercom-legacy-action",
@@ -373,7 +411,24 @@ class ButtonPlatformTests(unittest.IsolatedAsyncioTestCase):
             for entity in entities
             if isinstance(entity, button_module.LoxoneIntercomCommandButton)
         ]
-        self.assertEqual(intercom_buttons, [])
+        self.assertEqual(len(intercom_buttons), 1)
+        self.assertEqual(intercom_buttons[0]._attr_translation_key, "intercom_stop_ringing")
+        await intercom_buttons[0].async_press()
+        self.assertEqual(bridge.commands, [("intercom-legacy-action", "answer")])
+
+    async def test_existing_mute_buttons_are_optional_with_stateful_mute(self) -> None:
+        control = LoxoneControl(
+            uuid="intercom-uuid",
+            uuid_action="intercom-action",
+            name="Intercom",
+            type="IntercomV2",
+            states={"muted": "state-muted"},
+        )
+        buttons = button_module._build_intercom_command_buttons(_FakeBridge([control]))
+        self.assertEqual(
+            [button._attr_entity_registry_enabled_default for button in buttons],
+            [True, False, False],
+        )
 
     async def test_setup_adds_intercom_tts_button_and_sends_tts(self) -> None:
         intercom = LoxoneControl(
@@ -411,6 +466,7 @@ class ButtonPlatformTests(unittest.IsolatedAsyncioTestCase):
         intercom_module.set_intercom_tts_message(bridge, "intercom-action", "Test message")
         intercom_module.set_intercom_tts_volume(bridge, "intercom-action", 75)
 
+        self.assertNotIn("intercom_tts_message", tts_button.extra_state_attributes)
         await tts_button.async_press()
         self.assertEqual(
             bridge.commands,

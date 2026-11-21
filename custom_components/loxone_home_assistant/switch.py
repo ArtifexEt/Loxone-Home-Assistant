@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
+
 from homeassistant.components.switch import SwitchEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
@@ -14,7 +16,9 @@ from .const import (
     SWITCH_CONTROL_TYPES,
 )
 from .entity import LoxoneEntity, coerce_bool
+from .intercom import intercom_mute_state_name
 from .light import should_expose_as_light
+from .models import LoxoneControl
 from .options import option_enabled
 from .runtime import entry_bridge
 
@@ -31,12 +35,17 @@ async def async_setup_entry(
         ),
         DEFAULT_EXPOSE_CONTROLLER_CHILD_LIGHTS,
     )
-    entities = [
+    entities: list[SwitchEntity] = [
         LoxoneSwitchEntity(bridge, control)
         for control in bridge.controls
         if control.type in SWITCH_CONTROL_TYPES
         and not should_expose_as_light(bridge, control, expose_controller_children)
     ]
+    entities.extend(
+        LoxoneIntercomMuteSwitch(bridge, control, mute_state_name)
+        for control in bridge.controls
+        if (mute_state_name := intercom_mute_state_name(control)) is not None
+    )
     async_add_entities(entities)
 
 
@@ -74,4 +83,28 @@ class LoxoneSwitchEntity(LoxoneEntity, SwitchEntity):
             await self.bridge.async_send_action(self.control.uuid_action, "charge/off")
             return
         await self.bridge.async_send_action(self.control.uuid_action, "off")
+
+
+class LoxoneIntercomMuteSwitch(LoxoneEntity, SwitchEntity):
+    """Control the doorbell mute state reported by a Gen 2 Intercom."""
+
+    _attr_icon = "mdi:bell-off-outline"
+
+    def __init__(self, bridge, control: LoxoneControl, state_name: str) -> None:
+        super().__init__(bridge, control, "Doorbell Mute")
+        self._set_intercom_entity_name("switch", "intercom_doorbell_mute")
+        self._state_name = state_name
+
+    def relevant_state_uuids(self) -> Iterable[str]:
+        return (self.control.states[self._state_name],)
+
+    @property
+    def is_on(self) -> bool | None:
+        return coerce_bool(self.state_value(self._state_name))
+
+    async def async_turn_on(self, **kwargs) -> None:
+        await self.bridge.async_send_action(self.control.uuid_action, "mute/1")
+
+    async def async_turn_off(self, **kwargs) -> None:
+        await self.bridge.async_send_action(self.control.uuid_action, "mute/0")
 

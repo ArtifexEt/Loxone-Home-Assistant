@@ -142,13 +142,14 @@ class _FakeBridge:
 
     def __init__(self, controls):
         self.controls = controls
+        self.values = {}
         self.commands: list[tuple[str, str]] = []
 
     def add_listener(self, _callback_fn, _watched_uuids):
         return lambda: None
 
-    def control_state(self, _control, _state_name):
-        return None
+    def control_state(self, control, state_name):
+        return self.values.get(control.state_uuid(state_name))
 
     async def async_send_action(self, uuid_action, command):
         self.commands.append((uuid_action, command))
@@ -174,6 +175,43 @@ LoxoneControl = models.LoxoneControl
 
 class SwitchPlatformSplitTests(unittest.IsolatedAsyncioTestCase):
     """Verify child on/off lights are not duplicated as switch entities."""
+
+    async def test_intercom_exposes_stateful_mute_only_when_state_is_published(self) -> None:
+        intercom = LoxoneControl(
+            uuid="intercom-uuid",
+            uuid_action="intercom-action",
+            name="Intercom",
+            type="IntercomV2",
+            states={"Muted": "state-muted"},
+        )
+        other_intercom = LoxoneControl(
+            uuid="other-uuid",
+            uuid_action="other-action",
+            name="Intercom 2",
+            type="IntercomV2",
+            states={"bell": "state-bell"},
+        )
+        bridge = _FakeBridge([intercom, other_intercom])
+        entry = _FakeConfigEntry("entry-1", {})
+        hass = _FakeHass(entry.entry_id, bridge, const.DOMAIN)
+        entities = []
+        await switch_module.async_setup_entry(hass, entry, entities.extend)
+
+        self.assertEqual(len(entities), 1)
+        mute = entities[0]
+        self.assertEqual(mute._attr_unique_id, "1234567890:intercom-action:doorbell_mute")
+        self.assertEqual(mute.relevant_state_uuids(), ("state-muted",))
+        self.assertIsNone(mute.is_on)
+        await mute.async_turn_on()
+        bridge.values["state-muted"] = 1
+        self.assertTrue(mute.is_on)
+        await mute.async_turn_off()
+        bridge.values["state-muted"] = 0
+        self.assertFalse(mute.is_on)
+        self.assertEqual(
+            bridge.commands,
+            [("intercom-action", "mute/1"), ("intercom-action", "mute/0")],
+        )
 
     async def test_switch_platform_skips_controller_child_switches_when_light_export_enabled(self) -> None:
         controller = LoxoneControl(

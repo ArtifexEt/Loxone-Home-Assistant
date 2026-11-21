@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from hashlib import sha256
 from typing import Any
 from urllib.parse import quote, urljoin, urlsplit, urlunsplit
 
@@ -22,12 +24,18 @@ except ImportError:  # pragma: no cover - fallback for lightweight test stubs
             self.login = login
             self.password = password
 
-from .entity import normalize_state_name
+from .entity import first_matching_state_name, normalize_state_name
 from .intercom import (
     intercom_address_state_name,
+    intercom_history_state_name,
     intercom_last_bell_events_state_name,
     intercom_last_bell_timestamp_state_name,
     resolve_intercom_http_url,
+)
+from .intercom_archive import (
+    GEN2_ARCHIVE_SELECTION_PREFIX,
+    async_gen2_archive_entries,
+    is_gen2_archive_control,
 )
 from .models import LoxoneControl
 
@@ -50,6 +58,11 @@ SNAPSHOT_DETAIL_PATHS = (
 LAST_BELL_EVENTS_DETAIL_PATHS = (
     "lastBellEvents",
     "videoInfo.lastBellEvents",
+    "securedDetails.lastBellEvents",
+    "securedDetails.videoInfo.lastBellEvents",
+    "videoSettings.lastBellEvents",
+    "videoSettingsExtern.lastBellEvents",
+    "videoSettingsIntern.lastBellEvents",
 )
 HISTORY_URL_DETAIL_PATHS = (
     "eventHistoryUrl",
@@ -67,6 +80,7 @@ INTERCOM_DYNAMIC_PAYLOAD_STATE_NAMES = (
 )
 INTERCOM_HISTORY_SELECTED_ATTR = "_intercom_selected_history_timestamps"
 INTERCOM_HISTORY_DIRECT_URL_PREFIX = "url:"
+_HISTORY_REQUEST_TIMEOUT = 5
 INTERCOM_HISTORY_URL_KEY_HINTS = (
     "history",
     "event",
@@ -125,32 +139,18 @@ class IntercomHistoryEntry:
     """One Loxone Intercom history image reference."""
 
     raw_timestamp: str
-    image_url: str
+    image_url: str | None
     event_time: datetime | None
     selection_value: str
 
 
-def intercom_auth_credentials(
-    bridge, *, allow_miniserver_fallback: bool = True
-) -> tuple[str | None, str]:
-    """Return HTTP auth for the Intercom camera itself."""
-    configured_username = _coerce_text(getattr(bridge, "intercom_username", None))
-    configured_password = getattr(bridge, "intercom_password", None)
-    if not allow_miniserver_fallback or not getattr(bridge, "use_tls", True):
-        if configured_username is None or configured_password is None:
-            return None, ""
-        return configured_username, str(configured_password)
-
-    default_username = _coerce_text(getattr(bridge, "username", None))
-    default_password = getattr(bridge, "password", None)
-
-    username = configured_username or default_username
-    if username is None:
+def intercom_auth_credentials(bridge) -> tuple[str | None, str]:
+    """Return the dedicated credentials for a direct Intercom endpoint."""
+    username = _coerce_text(getattr(bridge, "intercom_username", None))
+    password = getattr(bridge, "intercom_password", None)
+    if username is None or password is None:
         return None, ""
-
-    password_source = configured_password if configured_password is not None else default_password
-    password = "" if password_source is None else str(password_source)
-    return username, password
+    return username, str(password)
 
 
 def miniserver_auth_credentials(bridge) -> tuple[str | None, str]:
@@ -164,15 +164,73 @@ def miniserver_auth_credentials(bridge) -> tuple[str | None, str]:
     return username, "" if password is None else str(password)
 
 
-def get_media_response(bridge, session, url: str, auth: BasicAuth | None):
-    """Open a media request without accepting URL credentials on a Gen1 connection."""
-    if getattr(bridge, "use_tls", True):
-        return session.get(url, auth=auth)
-
+def get_media_response(session, url: str, auth: BasicAuth | None):
+    """Open a media request with the selected credentials at its original origin."""
     parts = urlsplit(url)
     if parts.username is not None:
         url = parts._replace(netloc=parts.netloc.rsplit("@", 1)[-1]).geturl()
     return session.get(url, auth=auth, allow_redirects=False)
+
+
+def has_intercom_history_detail(control: LoxoneControl) -> bool:
+    states = (
+        "lastBellEvents",
+        "lastBellTimestamp",
+        "eventHistoryUrl",
+        *INTERCOM_DYNAMIC_PAYLOAD_STATE_NAMES,
+    )
+    if first_matching_state_name(control, states) is not None:
+        return True
+    if _mapping_value(control.details, ("securedDetails",)) is True:
+        return True
+    return _mapping_value(
+        control.details, LAST_BELL_EVENTS_DETAIL_PATHS + HISTORY_URL_DETAIL_PATHS
+    ) is not None
+
+
+def supports_intercom_history(bridge, control: LoxoneControl) -> bool:
+    """Identify controls providing a device archive or legacy history metadata."""
+    return (
+        is_gen2_archive_control(bridge, control)
+        or intercom_history_state_name(control) is not None
+        or has_intercom_history_detail(control)
+    )
+
+
+async def async_intercom_secured_details(
+    bridge, control: LoxoneControl,
+) -> Mapping[str, Any] | None:
+    """Resolve declared secured details once per Intercom on this connection."""
+    declared = _mapping_value(control.details, ("securedDetails",))
+    if isinstance(declared, Mapping):
+        return declared
+    if declared is not True:
+        return None
+
+    send_action = getattr(bridge, "async_send_action", None)
+    if send_action is None:
+        return None
+    if (cache := getattr(bridge, "_intercom_secured_details", None)) is None:
+        cache = bridge._intercom_secured_details = {}
+        bridge._intercom_secured_details_lock = asyncio.Lock()
+
+    async with bridge._intercom_secured_details_lock:
+        if control.uuid_action in cache:
+            return cache[control.uuid_action]
+        try:
+            response = await send_action(control.uuid_action, "securedDetails")
+        except Exception:  # noqa: BLE001 - upstream failures leave the lookup retryable
+            return None
+        value = response.get("value") if isinstance(response, Mapping) else None
+        if isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except (ValueError, RecursionError):
+                return None
+        if isinstance(value, Mapping):
+            cache[control.uuid_action] = value
+            return value
+    return None
 
 
 def intercom_stream_url(
@@ -251,13 +309,14 @@ def intercom_last_bell_timestamp(
     last_bell_events: tuple[str, ...] | None = None,
     state_value_getter,
 ) -> datetime | None:
-    history_tokens = last_bell_events or intercom_last_bell_events(
-        bridge,
-        control,
-        state_value_getter=state_value_getter,
-    )
-    if history_tokens:
-        return coerce_intercom_datetime(history_tokens[0])
+    history_tokens = last_bell_events
+    if history_tokens is None:
+        history_tokens = intercom_last_bell_events(
+            bridge, control, state_value_getter=state_value_getter
+        )
+    for token in history_tokens:
+        if event_time := coerce_intercom_datetime(token):
+            return event_time
 
     state_name = intercom_last_bell_timestamp_state_name(control)
     if state_name is not None:
@@ -272,13 +331,15 @@ def intercom_history_entries(
     last_bell_events: tuple[str, ...] | None = None,
     state_value_getter,
 ) -> tuple[IntercomHistoryEntry, ...]:
-    history_tokens = last_bell_events or intercom_last_bell_events(
-        bridge,
-        control,
-        state_value_getter=state_value_getter,
-    )
+    history_tokens = last_bell_events
+    if history_tokens is None:
+        history_tokens = intercom_last_bell_events(
+            bridge, control, state_value_getter=state_value_getter
+        )
     entries: list[IntercomHistoryEntry] = []
     for raw_timestamp in history_tokens:
+        if raw_timestamp.startswith(INTERCOM_HISTORY_DIRECT_URL_PREFIX):
+            continue
         image_url = intercom_history_image_url(bridge, control, raw_timestamp)
         if image_url is None:
             continue
@@ -301,8 +362,29 @@ async def async_intercom_history_entries(
     last_bell_events: tuple[str, ...] | None = None,
     state_value_getter,
 ) -> tuple[IntercomHistoryEntry, ...]:
-    """Return merged Intercom history from `lastBellEvents` and event-history payloads."""
+    """Merge the Gen 2 activity archive and legacy history metadata."""
     merged: dict[str, IntercomHistoryEntry] = {}
+    archive_timestamps: set[datetime] = set()
+    if is_gen2_archive_control(bridge, control):
+        for record in await async_gen2_archive_entries(bridge, control):
+            event_time = coerce_intercom_datetime(record.timestamp)
+            if event_time is None:
+                continue
+            archive_timestamps.add(event_time)
+            entry = IntercomHistoryEntry(
+                raw_timestamp=str(record.timestamp),
+                image_url=None,
+                event_time=event_time,
+                selection_value=record.selection_value,
+            )
+            merged.setdefault(_history_entry_key(entry), entry)
+
+    if secured_details is None:
+        secured_details = await async_intercom_secured_details(bridge, control)
+    if last_bell_events is None:
+        last_bell_events = intercom_last_bell_events(
+            bridge, control, secured_details=secured_details, state_value_getter=state_value_getter
+        )
 
     for entry in intercom_history_entries(
         bridge,
@@ -310,7 +392,8 @@ async def async_intercom_history_entries(
         last_bell_events=last_bell_events,
         state_value_getter=state_value_getter,
     ):
-        merged.setdefault(_history_entry_key(entry), entry)
+        if entry.event_time not in archive_timestamps:
+            merged.setdefault(_history_entry_key(entry), entry)
 
     history_payload_url = intercom_history_payload_url(
         bridge,
@@ -321,7 +404,7 @@ async def async_intercom_history_entries(
     if history_payload_url is None:
         return _sorted_history_entries(merged.values())
 
-    payload = await _async_fetch_json(bridge, history_payload_url)
+    payload = await _async_fetch_json(bridge, control, history_payload_url, secured_details)
     if payload is None:
         return _sorted_history_entries(merged.values())
 
@@ -333,6 +416,8 @@ async def async_intercom_history_entries(
         address_value=address_value,
         media_base_url=history_payload_url,
     ):
+        if event_entry.event_time in archive_timestamps:
+            continue
         key = _history_entry_key(event_entry)
         existing = merged.get(key)
         # Prefer a server-provided image URL over an inferred Miniserver path.
@@ -401,7 +486,7 @@ def intercom_history_image_url(
     raw_timestamp: str | None,
 ) -> str | None:
     text = _coerce_text(raw_timestamp)
-    if text is None:
+    if text is None or text.startswith(GEN2_ARCHIVE_SELECTION_PREFIX):
         return None
     if text.startswith(INTERCOM_HISTORY_DIRECT_URL_PREFIX):
         return resolve_intercom_http_url(
@@ -422,21 +507,35 @@ def intercom_selected_history_timestamp(bridge, uuid_action: str) -> str | None:
     return _coerce_text(selected.get(str(uuid_action)))
 
 
+def intercom_history_selection_signal(bridge, uuid_action: str) -> str:
+    """Identify selection changes for one Intercom on this bridge."""
+    action_digest = sha256(str(uuid_action).encode()).hexdigest()
+    return f"loxone_intercom_history_selection_{id(bridge)}_{action_digest}"
+
+
 def set_intercom_selected_history_timestamp(
     bridge,
     uuid_action: str,
     raw_timestamp: str | None,
 ) -> None:
+    text = _coerce_text(raw_timestamp)
+    if intercom_selected_history_timestamp(bridge, uuid_action) == text:
+        return
+
     selected = getattr(bridge, INTERCOM_HISTORY_SELECTED_ATTR, None)
     if not isinstance(selected, dict):
         selected = {}
         setattr(bridge, INTERCOM_HISTORY_SELECTED_ATTR, selected)
 
-    text = _coerce_text(raw_timestamp)
     if text is None:
         selected.pop(str(uuid_action), None)
-        return
-    selected[str(uuid_action)] = text
+    else:
+        selected[str(uuid_action)] = text
+
+    if (hass := getattr(bridge, "hass", None)) is not None:
+        from homeassistant.helpers.dispatcher import async_dispatcher_send
+
+        async_dispatcher_send(hass, intercom_history_selection_signal(bridge, uuid_action))
 
 
 def coerce_intercom_datetime(value: Any) -> datetime | None:
@@ -444,18 +543,24 @@ def coerce_intercom_datetime(value: Any) -> datetime | None:
         return None
     if isinstance(value, datetime):
         return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
-    if isinstance(value, (int, float)):
-        timestamp = float(value)
-        if timestamp > 10_000_000_000:
-            timestamp = timestamp / 1000
-        return datetime.fromtimestamp(timestamp, tz=timezone.utc)
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        try:
+            timestamp = float(value)
+            if timestamp > 10_000_000_000:
+                timestamp = timestamp / 1000
+            return datetime.fromtimestamp(timestamp, tz=timezone.utc)
+        except (ValueError, OverflowError, OSError):
+            return None
     if isinstance(value, str):
         raw = value.strip()
         if not raw:
             return None
-        if raw.isdigit():
+        if raw.isascii() and raw.isdigit():
             if len(raw) == 14:
-                return datetime.strptime(raw, "%Y%m%d%H%M%S").replace(tzinfo=timezone.utc)
+                try:
+                    return datetime.strptime(raw, "%Y%m%d%H%M%S").replace(tzinfo=timezone.utc)
+                except ValueError:
+                    return None
             return coerce_intercom_datetime(float(raw))
         iso_candidate = raw.replace("Z", "+00:00")
         try:
@@ -573,6 +678,11 @@ def _mapping_value(mapping: Any, detail_paths: tuple[str, ...]) -> Any:
 
 
 def _payload_value(payload: Any, detail_paths: tuple[str, ...]) -> Any:
+    if isinstance(payload, str):
+        try:
+            payload = json.loads(payload)
+        except (ValueError, RecursionError):
+            return None
     if isinstance(payload, list):
         normalized_names = {
             normalize_state_name(detail_path.rsplit(".", 1)[-1]) for detail_path in detail_paths
@@ -592,7 +702,7 @@ def _payload_value(payload: Any, detail_paths: tuple[str, ...]) -> Any:
 
 
 def _history_entry_key(entry: IntercomHistoryEntry) -> str:
-    return entry.raw_timestamp or entry.image_url
+    return entry.raw_timestamp or entry.image_url or entry.selection_value
 
 
 def _sorted_history_entries(
@@ -605,7 +715,7 @@ def _sorted_history_entries(
                 entry.event_time is not None,
                 entry.event_time or datetime.min.replace(tzinfo=timezone.utc),
                 entry.raw_timestamp,
-                entry.image_url,
+                entry.image_url or "",
             ),
             reverse=True,
         )
@@ -653,56 +763,90 @@ def _history_entries_from_payload(
     return _sorted_history_entries(entries)
 
 
-async def _async_fetch_json(bridge, url: str) -> Any | None:
+async def _async_fetch_json(
+    bridge, control: LoxoneControl, url: str, secured_details: Mapping[str, Any] | None,
+) -> Any | None:
     session = getattr(bridge, "_session", None)
     if session is None:
         return None
 
-    request_auth = intercom_request_auth(bridge, url)
     try:
-        async with get_media_response(bridge, session, url, request_auth) as response:
-            if not getattr(bridge, "use_tls", True) and 300 <= response.status < 400:
+        auth = intercom_request_auth(bridge, url, control=control, secured_details=secured_details)
+        async with asyncio.timeout(_HISTORY_REQUEST_TIMEOUT), get_media_response(
+            session, url, auth
+        ) as response:
+            if response.status != 200:
                 return None
-            response.raise_for_status()
-            response_json = getattr(response, "json", None)
-            if callable(response_json):
-                try:
-                    return await response_json(content_type=None)
-                except TypeError:
-                    return await response_json()
-                except ValueError:
-                    pass
-            response_text = getattr(response, "text", None)
-            if callable(response_text):
-                raw_text = await response_text()
-            else:
-                raw_payload = await response.read()
-                raw_text = raw_payload.decode("utf-8")
-            return json.loads(raw_text)
-    except (ClientError, TimeoutError, UnicodeDecodeError, ValueError, json.JSONDecodeError):
+            return await response.json(content_type=None)
+    except (ClientError, TimeoutError, ValueError, RecursionError):
         return None
 
 
-def intercom_request_auth(bridge, url: str) -> BasicAuth | None:
-    """Choose credentials for a Miniserver proxy or a direct Intercom URL."""
-    parsed = urlsplit(url)
-    host = str(getattr(bridge, "host", "")).strip("[]").casefold()
-    same_host = parsed.hostname == host
-    scheme = "https" if getattr(bridge, "use_tls", True) else "http"
-    port = parsed.port
+def _http_origin(url: str) -> tuple[str, str, int] | None:
+    try:
+        parts = urlsplit(url)
+        if parts.scheme not in ("http", "https") or not parts.hostname:
+            return None
+        port = parts.port
+    except ValueError:
+        return None
     if port is None:
-        port = 443 if parsed.scheme == "https" else 80
-    same_host_and_port = same_host and port == getattr(bridge, "port", 0)
+        port = 443 if parts.scheme == "https" else 80
+    return parts.scheme, parts.hostname, port
 
-    if same_host_and_port and parsed.scheme == scheme:
+
+def _miniserver_origin(bridge) -> tuple[str, str, int]:
+    tls = getattr(bridge, "use_tls", True)
+    host = str(getattr(bridge, "host", "")).strip("[]").casefold()
+    return ("https" if tls else "http"), host, getattr(bridge, "port", 443 if tls else 80)
+
+
+def intercom_request_auth(
+    bridge,
+    url: str,
+    *,
+    control: LoxoneControl | None = None,
+    secured_details: Mapping[str, Any] | None = None,
+) -> BasicAuth | None:
+    """Choose credentials for the configured Miniserver or a direct Intercom URL."""
+    origin = _http_origin(url)
+    if origin is None:
+        return None
+
+    miniserver = _miniserver_origin(bridge)
+    if origin == miniserver:
         username, password = miniserver_auth_credentials(bridge)
-    elif same_host_and_port or "/proxy/" in parsed.path:
+    elif origin[1:] == miniserver[1:] or "/proxy/" in urlsplit(url).path:
         return None
     else:
-        username, password = intercom_auth_credentials(
-            bridge, allow_miniserver_fallback=not same_host
-        )
+        username, password = intercom_auth_credentials(bridge)
+        if username is None and control is not None and secured_details is not None:
+            return _secured_video_auth(bridge, control, secured_details, origin)
     return BasicAuth(username, password) if username is not None else None
+
+
+def _secured_video_auth(
+    bridge,
+    control: LoxoneControl,
+    secured_details: Mapping[str, Any],
+    origin: tuple[str, str, int],
+) -> BasicAuth | None:
+    username = _mapping_value(secured_details, ("videoInfo.user",))
+    password = _mapping_value(secured_details, ("videoInfo.pass",))
+    if not isinstance(username, str) or not username or not isinstance(password, str):
+        return None
+
+    address_value = _address_state_value(bridge, control)
+    for path in STREAM_DETAIL_PATHS + SNAPSHOT_DETAIL_PATHS + HISTORY_URL_DETAIL_PATHS:
+        url = resolve_intercom_http_url(
+            bridge,
+            control,
+            _mapping_value(secured_details, (path,)),
+            address_value=address_value,
+        )
+        if url is not None and _http_origin(url) == origin:
+            return BasicAuth(username, password)
+    return None
 
 
 def _resolve_url_from_payload_with_key_hints(
@@ -874,47 +1018,55 @@ def _resolve_intercom_event_image_url(
     address_value: Any = None,
     media_base_url: str | None = None,
 ) -> str | None:
-    text = _coerce_text(value)
-    if text is None:
+    if not isinstance(value, str) or not (path := value.strip()):
         return None
 
-    if media_base_url is not None:
-        resolved_from_base = _resolve_media_path_from_base(media_base_url, text)
-        if resolved_from_base is not None:
-            return resolve_intercom_http_url(
-                bridge,
-                control,
-                resolved_from_base,
-                address_value=address_value,
-            )
+    if media_base_url is None:
+        return resolve_intercom_http_url(bridge, control, path, address_value=address_value)
 
-    return resolve_intercom_http_url(
-        bridge,
-        control,
-        text,
-        address_value=address_value,
+    # camimage is served by the Miniserver even when the event list is direct.
+    if path.lstrip("/").startswith("camimage/") and not path.startswith("//"):
+        return bridge.resolve_http_url(path)
+
+    url = _resolve_media_path_from_base(media_base_url, path)
+    if url is None:
+        return None
+
+    origin = _http_origin(url)
+    if origin is None:
+        return None
+
+    # Images may be served by the archive, the Miniserver, or the paired Intercom.
+    direct_url = resolve_intercom_http_url(
+        bridge, control, "/image", address_value=address_value
     )
+    if origin not in (
+        _http_origin(media_base_url),
+        _miniserver_origin(bridge),
+        _http_origin(direct_url) if direct_url is not None else None,
+    ):
+        return None
+    return url
 
 
 def _resolve_media_path_from_base(media_base_url: str, raw_path: str) -> str | None:
-    split = urlsplit(media_base_url)
-    if not split.scheme or not split.netloc:
+    try:
+        base = urlsplit(media_base_url)
+        media = urlsplit(raw_path)
+    except ValueError:
         return None
 
-    if raw_path.startswith(("http://", "https://", "//")):
-        return raw_path
+    if media.scheme or media.netloc:
+        return urljoin(media_base_url, raw_path)
 
-    proxy_prefix = _proxy_path_prefix(split.path)
-    if raw_path.startswith("/"):
-        if proxy_prefix is not None and not raw_path.startswith(f"{proxy_prefix}/"):
-            return urlunsplit((split.scheme, split.netloc, f"{proxy_prefix}{raw_path}", "", ""))
-        return urlunsplit((split.scheme, split.netloc, raw_path, "", ""))
-
-    if raw_path.startswith(("jpg/", "images/", "mjpg/", "image/", "video/")):
-        root_path = f"/{raw_path}"
-        if proxy_prefix is not None:
-            root_path = f"{proxy_prefix}{root_path}"
-        return urlunsplit((split.scheme, split.netloc, root_path, "", ""))
+    if media.path.startswith(
+        ("/", "jpg/", "images/", "mjpg/", "image/", "video/")
+    ):
+        path = "/" + media.path.lstrip("/")
+        proxy_prefix = _proxy_path_prefix(base.path)
+        if proxy_prefix is not None and not path.startswith(f"{proxy_prefix}/"):
+            path = f"{proxy_prefix}{path}"
+        return urlunsplit((base.scheme, base.netloc, path, media.query, ""))
 
     return urljoin(media_base_url, raw_path)
 

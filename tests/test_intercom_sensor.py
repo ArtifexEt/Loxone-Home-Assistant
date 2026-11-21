@@ -5,6 +5,8 @@ from __future__ import annotations
 import sys
 import types
 import unittest
+from datetime import datetime, timezone
+from unittest.mock import AsyncMock, patch
 
 from tests._loader import load_integration_module
 
@@ -111,6 +113,8 @@ def _install_homeassistant_stubs() -> None:
 
 
 class _FakeResponse:
+    status = 200
+
     def __init__(self, payload) -> None:
         self._payload = payload
 
@@ -131,9 +135,10 @@ class _FakeResponse:
 class _FakeSession:
     def __init__(self, responses: dict[str, object] | None = None) -> None:
         self.responses = responses or {}
+        self.requests = []
 
-    def get(self, url: str, auth=None):
-        del auth
+    def get(self, url: str, auth=None, *, allow_redirects=True):
+        self.requests.append((url, auth, allow_redirects))
         return _FakeResponse(self.responses[url])
 
 
@@ -188,11 +193,90 @@ _install_homeassistant_stubs()
 models = load_integration_module("custom_components.loxone_home_assistant.models")
 const = load_integration_module("custom_components.loxone_home_assistant.const")
 sensor_module = load_integration_module("custom_components.loxone_home_assistant.sensor")
+media_module = load_integration_module("custom_components.loxone_home_assistant.intercom_media")
 LoxoneControl = models.LoxoneControl
 
 
 class IntercomSensorTests(unittest.IsolatedAsyncioTestCase):
     """Verify `lastBellEvents` based history handling."""
+
+    async def test_device_status_does_not_expose_metadata_or_preset_text(self) -> None:
+        control = LoxoneControl(
+            uuid="intercom-uuid",
+            uuid_action="intercom-action",
+            name="Intercom",
+            type="IntercomV2",
+            states={
+                "address": "state-address",
+                "answers": "state-answers",
+                "deviceState": "state-device",
+            },
+        )
+        values = {
+            "state-address": "192.0.2.1",
+            "state-answers": ["Preset reply"],
+            "state-device": 1.0,
+        }
+        bridge = _FakeBridge([control], values)
+        entry = _FakeConfigEntry("entry-1")
+        hass = _FakeHass(entry.entry_id, bridge, const.DOMAIN)
+        entities = []
+        await sensor_module.async_setup_entry(hass, entry, entities.extend)
+        self.assertEqual(len(entities), 1)
+        status = entities[0]
+        self.assertEqual(status.relevant_state_uuids(), ("state-device",))
+        self.assertEqual(status.native_value, "online")
+        self.assertNotIn("192.0.2.1", str(status.extra_state_attributes))
+        self.assertNotIn("Preset reply", str(status.extra_state_attributes))
+        for value, expected in (
+            (0, "unknown"),
+            (2, "rebooting"),
+            ("3", "initializing"),
+            (2.5, None),
+            (4, None),
+            (None, None),
+        ):
+            with self.subTest(value=value):
+                values["state-device"] = value
+                self.assertEqual(status.native_value, expected)
+
+    async def test_setup_adds_gen2_archive_sensor_without_legacy_history_metadata(self) -> None:
+        control = LoxoneControl(
+            uuid="intercom-uuid",
+            uuid_action="intercom-action",
+            name="Sample Intercom",
+            type="IntercomV2",
+            states={"bell": "state-bell"},
+            details={"deviceUuid": "00000000-0000-4000-8000-000000000001"},
+        )
+        bridge = _FakeBridge([control], {"state-bell": False})
+        entry = _FakeConfigEntry("entry-1")
+        entities = []
+        await sensor_module.async_setup_entry(
+            _FakeHass(entry.entry_id, bridge, const.DOMAIN), entry, entities.extend
+        )
+        history_sensor, = entities
+        self.assertIsInstance(history_sensor, sensor_module.LoxoneIntercomHistorySensor)
+        self.assertEqual(history_sensor.relevant_state_uuids(), ["state-bell"])
+
+        timestamp = 1_773_491_445
+        archive = AsyncMock(return_value=(types.SimpleNamespace(
+            timestamp=timestamp, selection_value=f"gen2:{timestamp}",
+        ),))
+        with patch.dict(
+            sensor_module.async_intercom_history_entries.__globals__,
+            {"async_gen2_archive_entries": archive},
+        ):
+            await history_sensor.async_update()
+
+        archive.assert_awaited_once_with(bridge, control)
+        self.assertEqual(
+            history_sensor.native_value, datetime.fromtimestamp(timestamp, timezone.utc)
+        )
+        attrs = history_sensor.extra_state_attributes
+        self.assertEqual(attrs["event_count"], 1)
+        self.assertEqual(attrs["history_timestamps"], [str(timestamp)])
+        self.assertNotIn("gen2:", repr(attrs))
 
     async def test_setup_adds_intercom_history_sensor_from_last_bell_events(self) -> None:
         control = LoxoneControl(
@@ -224,12 +308,10 @@ class IntercomSensorTests(unittest.IsolatedAsyncioTestCase):
         attrs = history_entity.extra_state_attributes
 
         self.assertEqual(attrs["event_count"], 2)
+        self.assertNotIn("latest_event_image_url", attrs)
+        self.assertNotIn("recent_image_urls", attrs)
         self.assertEqual(
-            attrs["latest_event_image_url"],
-            "https://mini.local/camimage/intercom-action/20260314112000",
-        )
-        self.assertEqual(
-            attrs["recent_image_urls"],
+            await self._history_image_urls(history_entity),
             [
                 "https://mini.local/camimage/intercom-action/20260314112000",
                 "https://mini.local/camimage/intercom-action/20260313090000",
@@ -277,7 +359,7 @@ class IntercomSensorTests(unittest.IsolatedAsyncioTestCase):
         attrs = history_entity.extra_state_attributes
         self.assertEqual(attrs["event_count"], 2)
         self.assertEqual(
-            attrs["latest_event_image_url"],
+            (await self._history_image_urls(history_entity))[0],
             "https://mini.local/camimage/intercom-action/20260314123045",
         )
 
@@ -360,7 +442,7 @@ class IntercomSensorTests(unittest.IsolatedAsyncioTestCase):
         attrs = history_entity.extra_state_attributes
         self.assertEqual(attrs["event_count"], 2)
         self.assertEqual(
-            attrs["latest_event_image_url"],
+            (await self._history_image_urls(history_entity))[0],
             "https://mini.local/camimage/intercom-action/20260314123045",
         )
         self.assertEqual(
@@ -378,7 +460,7 @@ class IntercomSensorTests(unittest.IsolatedAsyncioTestCase):
             details={
                 "videoInfo": {
                     "eventHistoryUrl": "/history/intercom.json",
-                    "host": "192.168.0.50",
+                    "host": "192.0.2.50",
                 }
             },
         )
@@ -387,7 +469,7 @@ class IntercomSensorTests(unittest.IsolatedAsyncioTestCase):
             {},
             session=_FakeSession(
                 {
-                    "https://192.168.0.50/history/intercom.json": {
+                    "https://192.0.2.50/history/intercom.json": {
                         "events": [
                             {
                                 "timestamp": "20260314123045",
@@ -419,14 +501,14 @@ class IntercomSensorTests(unittest.IsolatedAsyncioTestCase):
         attrs = history_entity.extra_state_attributes
         self.assertEqual(attrs["event_count"], 2)
         self.assertEqual(
-            attrs["latest_event_image_url"],
-            "https://192.168.0.50/jpg/history/20260314123045.jpg",
+            (await self._history_image_urls(history_entity))[0],
+            "https://192.0.2.50/jpg/history/20260314123045.jpg",
         )
         self.assertEqual(
-            attrs["recent_image_urls"],
+            await self._history_image_urls(history_entity),
             [
-                "https://192.168.0.50/jpg/history/20260314123045.jpg",
-                "https://192.168.0.50/jpg/history/thumb-20260313090000.jpg",
+                "https://192.0.2.50/jpg/history/20260314123045.jpg",
+                "https://192.0.2.50/jpg/history/thumb-20260313090000.jpg",
             ],
         )
 
@@ -440,7 +522,7 @@ class IntercomSensorTests(unittest.IsolatedAsyncioTestCase):
             details={
                 "videoInfo": {
                     "eventHistoryUrl": "/history/intercom.json",
-                    "host": "192.168.0.50",
+                    "host": "192.0.2.50",
                 }
             },
         )
@@ -449,7 +531,7 @@ class IntercomSensorTests(unittest.IsolatedAsyncioTestCase):
             {},
             session=_FakeSession(
                 {
-                    "https://192.168.0.50/history/intercom.json": {
+                    "https://192.0.2.50/history/intercom.json": {
                         "events": [
                             {
                                 "timestamp": "20260312083000",
@@ -477,8 +559,8 @@ class IntercomSensorTests(unittest.IsolatedAsyncioTestCase):
         attrs = history_entity.extra_state_attributes
         self.assertEqual(attrs["event_count"], 1)
         self.assertEqual(
-            attrs["latest_event_image_url"],
-            "https://192.168.0.50/jpg/history/20260312083000.jpg",
+            (await self._history_image_urls(history_entity))[0],
+            "https://192.0.2.50/jpg/history/20260312083000.jpg",
         )
         self.assertEqual(attrs["history_timestamps"], ["20260312083000"])
 
@@ -492,7 +574,7 @@ class IntercomSensorTests(unittest.IsolatedAsyncioTestCase):
             details={
                 "videoInfo": {
                     "eventHistoryUrl": "/proxy/device-uuid/history/intercom.json",
-                    "host": "192.168.0.50",
+                    "host": "192.0.2.50",
                 }
             },
         )
@@ -525,11 +607,105 @@ class IntercomSensorTests(unittest.IsolatedAsyncioTestCase):
         history_entity = entities[0]
         await history_entity.async_update()
 
-        attrs = history_entity.extra_state_attributes
         self.assertEqual(
-            attrs["latest_event_image_url"],
-            "https://mini.local/proxy/device-uuid/images/history/20260314123045_thumb.jpg",
+            await self._history_image_urls(history_entity),
+            ["https://mini.local/proxy/device-uuid/images/history/20260314123045_thumb.jpg"],
         )
+
+    async def test_history_uses_proxied_images_and_ignores_unrelated_urls(self) -> None:
+        origin = "https://mini.local"
+        archive = f"{origin}/proxy/intercom/history.json"
+        control = LoxoneControl(
+            uuid="intercom-uuid",
+            uuid_action="intercom-action",
+            name="Doorbell",
+            type="IntercomV2",
+            details={"eventHistoryUrl": archive},
+        )
+        session = _FakeSession({
+            archive: {"events": [
+                {"timestamp": "20260314123100", "imagePath": "https://other.example/photo.jpg"},
+                {"timestamp": "20260314123045", "imagePath": "/images/photo.jpg?signature=example"},
+            ]}
+        })
+        bridge = _FakeBridge([control], {}, session)
+        entity = sensor_module.LoxoneIntercomHistorySensor(bridge, control, None)
+
+        await entity.async_update()
+
+        self.assertEqual(entity.extra_state_attributes["event_count"], 1)
+        self.assertNotIn("example", repr(entity.extra_state_attributes))
+        self.assertEqual(
+            await self._history_image_urls(entity),
+            [f"{origin}/proxy/intercom/images/photo.jpg?signature=example"],
+        )
+        self.assertTrue(all(not allow_redirects for _, _, allow_redirects in session.requests))
+
+    async def test_history_reads_declared_secured_details(self) -> None:
+        control = LoxoneControl(
+            uuid="intercom-uuid",
+            uuid_action="intercom-action",
+            name="Doorbell",
+            type="IntercomV2",
+            details={"securedDetails": True},
+        )
+        bridge = _FakeBridge([control], {}, _FakeSession())
+        calls = []
+
+        async def get_details(uuid, command):
+            calls.append((uuid, command))
+            return {"value": '{"videoInfo":{"lastBellEvents":"20260314123045"}}'}
+
+        bridge.async_send_action = get_details
+        entity = sensor_module.LoxoneIntercomHistorySensor(bridge, control, None)
+        self.assertTrue(media_module.has_intercom_history_detail(control))
+
+        await entity.async_update()
+        await entity.async_update()
+
+        self.assertEqual(entity.extra_state_attributes["event_count"], 1)
+        self.assertEqual(entity.extra_state_attributes["history_timestamps"], ["20260314123045"])
+        self.assertEqual(calls, [(control.uuid_action, "securedDetails")])
+
+    def test_secured_video_credentials_are_bound_to_the_declared_camera_origin(self) -> None:
+        control = LoxoneControl(
+            uuid="intercom-uuid",
+            uuid_action="intercom-action",
+            name="Doorbell",
+            type="Intercom",
+        )
+        bridge = _FakeBridge([control], {})
+        secured_details = {
+            "videoInfo": {
+                "user": "camera-user",
+                "pass": "camera-password",
+                "streamUrl": "http://camera.local:8080/live.mjpg",
+            }
+        }
+
+        def auth_for(url):
+            return media_module.intercom_request_auth(
+                bridge, url, control=control, secured_details=secured_details
+            )
+
+        auth = auth_for("http://camera.local:8080/preview.jpg")
+        self.assertEqual(auth.login, "camera-user")
+        self.assertEqual(auth.password, "camera-password")
+        self.assertIsNone(auth_for("https://camera.local:8080/preview.jpg"))
+        self.assertIsNone(auth_for("http://camera.local/preview.jpg"))
+        self.assertIsNone(auth_for("http://different.example:8080/preview.jpg"))
+        self.assertEqual(auth_for("https://mini.local/preview.jpg").login, bridge.username)
+
+        bridge.intercom_username = "configured-user"
+        bridge.intercom_password = "configured-password"
+        auth = auth_for("http://camera.local:8080/preview.jpg")
+        self.assertEqual(auth.login, "configured-user")
+
+    async def _history_image_urls(self, entity):
+        entries = await media_module.async_intercom_history_entries(
+            entity.bridge, entity.control, state_value_getter=entity.state_value
+        )
+        return [entry.image_url for entry in entries]
 
     async def test_intercom_system_schema_webpage_is_disabled_by_default(self) -> None:
         intercom = LoxoneControl(

@@ -32,8 +32,9 @@ If the button does not open the flow directly, use `Settings -> Devices & Servic
 - exposes Intercom/IntercomV2 (and DoorController/DoorStation variants) as dedicated doorbell entities:
   - camera stream + snapshot preview when available
   - binary sensors for ring, call, proximity, and intercom light state
-  - Intercom Gen2 action buttons (`Stop Ringing`, `Mute Doorbell`, `Unmute Doorbell`)
-  - intercom history sensor based on `lastBellEvents` (latest event timestamp + recent image URLs)
+  - `Stop Ringing` button for Intercom Gen 1 and Gen 2, plus a Gen 2 doorbell mute switch when Loxone reports the mute state
+  - Gen 2 device status, when provided by the Miniserver
+  - intercom history sensor based on `lastBellEvents` and a photo selector for the camera preview
   - Home Assistant bus events (`loxone_home_assistant_intercom_event`) for automation triggers
 - exposes access/keypad-style activity events as Home Assistant bus events (`loxone_home_assistant_access_event`) so automations can react to granted/denied attempts (for example wrong PIN)
 - exposes `AudioZone`/`AudioZoneV2`/`CentralAudioZone` as `media_player` with source selection, browseable source library, seek/progress, shuffle/repeat, TTS and event/command passthrough via `play_media`
@@ -51,6 +52,14 @@ If the button does not open the flow directly, use `Settings -> Devices & Servic
 - adds hub-level maintenance actions (for example server restart)
 - adds a hub action button to force diagnostics refresh (`Refresh System Stats`)
 - registers integration services once in integration setup (HA-compatible service lifecycle)
+
+## Refreshing entities after a Loxone project change
+
+Save the updated project to the Miniserver. The integration checks for changes after reconnecting and every five minutes while connected. When the project version changes, Home Assistant re-imports the project.
+
+To import it immediately, open the Miniserver device in **Settings → Devices & Services → Loxone → Devices** and press **Refresh entities** under **Configuration**. You can also select **Reload** in the Loxone integration entry's menu.
+
+Existing entities keep their IDs when a Loxone block is renamed or moved. If you remove a block or recreate it with a new ID, Home Assistant may retain its previous registry entry. Check whether any dashboards or automations reference it before removing it.
 
 ## Supported platforms
 
@@ -165,7 +174,7 @@ Choose **Search the local network** to discover a Miniserver or **Enter a host a
 
 For a Miniserver Gen 1 with a custom port, select **Enter a host and port**. Enter the hostname or IP in **Host** and the configured HTTP port in **Port**, for example `7778`. Manual setup is available even when a Gen 2 Miniserver is already configured.
 
-On TLS-capable Miniservers, Intercom video uses the configured Loxone user by default. With Gen 1, Miniserver media requests are anonymous. A direct Intercom endpoint can use its own separate credentials.
+Miniserver-served images use the configured Loxone user over HTTPS. For a Gen 1 Miniserver, media requests to the Miniserver are anonymous. Direct Intercom endpoints use dedicated credentials from the integration options or the camera configuration supplied by the Miniserver.
 
 If your Intercom camera stream returns `401 Unauthorized`, open integration `Options` and set dedicated Intercom video credentials (some Intercom models use separate video-module login data).
 
@@ -268,52 +277,63 @@ data:
   arguments: "Leave package at box/Call owner"
 ```
 
-## Intercom UI in Home Assistant (live video + TTS)
+## Intercom UI in Home Assistant
 
-Use parent Intercom `uuid_action` (you can copy it from any Intercom entity attributes, for example `camera.<name>_video`).
+The [example dashboard](examples/intercom-dashboard.yaml) has live video, a **Talk** tile, a doorbell indicator, a TTS message and play button, and a **History** tab with photo thumbnails. It uses a locally paired Intercom Gen 2 with [live video and two-way audio support](#intercom-live-call-scope).
 
-The integration now creates native Intercom TTS controls automatically (per Intercom):
+1. Register the [gallery JavaScript module](#intercom-gen-2-photo-gallery).
+2. Open the Intercom device in **Settings → Devices & Services → Loxone → Devices** and replace the example entity IDs in the YAML with the corresponding IDs from your installation.
+
+   | Example ID | Intercom entity |
+   | --- | --- |
+   | `camera.example_intercom_live` | **Live** camera for video and two-way audio |
+   | `camera.example_intercom_video` | **Photo preview** camera for the photo gallery |
+   | `binary_sensor.example_intercom_doorbell` | **Doorbell signal** binary sensor |
+   | `text.example_intercom_tts_message` | **TTS Message** text field |
+   | `button.example_intercom_send_tts` | **Send TTS** button |
+
+3. Create an empty dashboard and paste the YAML in its **Raw configuration editor**. To add the views to an existing dashboard, append the two items from the example's `views:` list to its `views:` list.
+4. Select **Talk** on the dashboard to open the camera dialog, then select **Start talking** to use the microphone. [Home Assistant camera documentation](https://www.home-assistant.io/integrations/camera/#talking-through-a-camera)
+
+To pick the language for Intercom entity names and the gallery, open **Settings → Devices & Services → Loxone → Configure → Intercom language**. Select **Polski**, **English**, **Deutsch**, or **Home Assistant** to follow Home Assistant's language settings. Device names come from the Loxone project.
+
+### Send a TTS message
+
+The integration creates native Intercom TTS controls. Put the text field and button on
+an Entities card to send a message from a dashboard:
 
 - `text.<intercom>_tts_message`
-- `number.<intercom>_tts_volume`
 - `button.<intercom>_send_tts`
 
-Pressing `Send TTS` sends only message text to the parent Intercom `uuid_action`.
+Enter up to 255 characters in the Home Assistant text field, then press `Send TTS`
+to play the message through the Intercom speaker. Loxone requires Internet access
+for this function. [Loxone Intercom documentation](https://www.loxone.com/enen/kb/intercom-2/)
 
-You can still call service directly if needed:
+To send a message with the integration action, copy the parent `uuid_action` from an Intercom entity such as the **Photo preview** camera.
 
 ```yaml
 service: loxone_home_assistant.send_tts
 data:
   uuid_action: intercom-v2-uuid-action
   message: "Kurier jest pod drzwiami"
-  volume: 60
 ```
 
-Lovelace card example (`camera_view: live` is important for video stream):
+### Intercom Gen 2 photo gallery
+
+For a locally paired Intercom Gen 2, the integration reads the native activity archive through the authenticated Miniserver connection.
+
+On the Intercom device page in **Settings → Devices & Services → Loxone → Devices**, select **Visit** to open its photo history. Select a thumbnail to view the full photo, then use **Download photo** if you want to save it.
+
+To place the gallery on a dashboard, add `/loxone_home_assistant/intercom-gallery.js` as a **JavaScript module** in **Settings → Dashboards → Resources**. Enable Advanced Mode in your Home Assistant profile if Resources is hidden. Then create a manual card and set `entity` to the Intercom's **Photo preview** camera.
 
 ```yaml
-type: vertical-stack
-cards:
-  - type: picture-entity
-    entity: camera.furtka_video
-    camera_view: live
-    show_state: false
-    show_name: true
-  - type: entities
-    entities:
-      - binary_sensor.furtka_doorbell
-      - sensor.furtka_history
-      - text.furtka_tts_message
-      - number.furtka_tts_volume
-      - button.furtka_send_tts
+type: custom:loxone-intercom-gallery
+entity: camera.example_intercom_video
 ```
 
-The camera can show a live JPEG or MJPEG feed when the controller provides a compatible HTTP endpoint. History images are built
-from `lastBellEvents` and fetched from Miniserver `camimage/{uuidAction}/{timestamp}`.
-The `select.<name>_history_photo` entity is enabled by default so you can switch the camera
-preview between `Live` and historical snapshots. When the Intercom also exposes an
-`eventHistoryUrl` payload, the selector includes the full history returned by that endpoint.
+Click or tap a thumbnail to open the full photo. Home Assistant serves the photos to users with read access to that camera. Loxone media URLs and credentials stay inside the integration.
+
+On the device page, select a date in **History photo** to update the **Photo preview** thumbnail. Click **Photo preview** to open the selected photo. Select `Live` to return to the current camera image. This selector also supports legacy controllers that publish `lastBellEvents`.
 
 ## Audio TTS UI in Home Assistant
 
@@ -378,7 +398,11 @@ Access/keypad events are emitted on rising edges for boolean-like states and on 
 
 ## Intercom live call scope
 
-Intercom Gen 2 uses WebRTC for live video and two-way audio in the Loxone app. Use the Loxone app or web interface for calls. The Home Assistant integration supports cameras that expose compatible HTTP media, doorbell and proximity events, text-to-speech, and available light controls. The `answer` command stops the bell, and `mute` controls the doorbell mute state. [Loxone Intercom documentation](https://www.loxone.com/enus/kb/intercom-2/) · [Network protocols](https://updatefiles.loxone.com/KnowledgeBase/Online/Common/Documents/Loxone-Required-Ports-Domains.pdf)
+On Home Assistant 2026.11 or later, a locally paired Intercom Gen 2 on an HTTPS Miniserver connection exposes a **Live** camera. It uses authenticated WebRTC for live video and can add audio when you start talking. The integration loads its optional WebRTC runtime on first use.
+
+Enable **Two-way audio** in Home Assistant Labs and open Home Assistant over HTTPS. Open the **Live** camera and select **Start talking** to start a conversation. A dashboard tile for the **Live** camera with the **More info** tap action opens the same dialog. The iOS Companion app on an HTTP Home Assistant connection can send microphone audio in a separate session. The **Photo preview** camera can capture a still from WebRTC when no HTTP snapshot is available. [Home Assistant camera documentation](https://www.home-assistant.io/integrations/camera/#talking-through-a-camera) · [iOS Companion implementation](https://github.com/home-assistant/iOS/blob/2524b83/Sources/App/Cameras/CameraPlayer/WebRTC/WebRTCClient.swift#L460)
+
+The `answer` command stops the bell, and `mute` controls the doorbell mute state. [Loxone Intercom documentation](https://www.loxone.com/enus/kb/intercom-2/) · [Network protocols](https://updatefiles.loxone.com/KnowledgeBase/Online/Common/Documents/Loxone-Required-Ports-Domains.pdf)
 
 ## Development notes
 

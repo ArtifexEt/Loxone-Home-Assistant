@@ -373,6 +373,26 @@ class BridgeConnectionTests(unittest.IsolatedAsyncioTestCase):
             heartbeat=None,
         )
 
+    def test_miniserver_tls_fingerprint_requires_an_authenticated_tls_socket(self):
+        connection = self._new_bridge(port=443)
+        certificate_der = b"test certificate DER"
+        tls = Mock(getpeercert=Mock(return_value=certificate_der))
+        socket = Mock(closed=False, get_extra_info=Mock(return_value=tls))
+        connection._ws = socket
+
+        self.assertIsNone(connection.miniserver_tls_fingerprint())
+        socket.get_extra_info.assert_not_called()
+
+        connection.available = True
+        self.assertEqual(connection.miniserver_tls_fingerprint(), hashlib.sha256(certificate_der).digest())
+        socket.get_extra_info.assert_called_once_with("ssl_object")
+        tls.getpeercert.assert_called_once_with(binary_form=True)
+
+        tls.getpeercert.return_value = None
+        self.assertIsNone(connection.miniserver_tls_fingerprint())
+        socket.closed = True
+        self.assertIsNone(connection.miniserver_tls_fingerprint())
+
     async def test_manual_setup_refuses_untrusted_legacy_certificate_before_ws(self):
         for metadata in (
             str(self.legacy_metadata),

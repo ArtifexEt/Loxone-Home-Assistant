@@ -1,4 +1,84 @@
 {
+  "entity": {
+    "button": {
+      "refresh_entities": {
+        "name": "Entitäten aktualisieren"
+      },
+      "intercom_stop_ringing": {
+        "name": "Klingeln beenden"
+      },
+      "intercom_mute_doorbell": {
+        "name": "Klingel stummschalten"
+      },
+      "intercom_unmute_doorbell": {
+        "name": "Klingelton einschalten"
+      },
+      "intercom_send_tts": {
+        "name": "Ansage abspielen"
+      }
+    },
+    "binary_sensor": {
+      "intercom_doorbell": {
+        "name": "Klingelsignal"
+      },
+      "intercom_proximity": {
+        "name": "Annäherung"
+      },
+      "intercom_call": {
+        "name": "Anruf"
+      },
+      "intercom_light": {
+        "name": "Lichtstatus"
+      }
+    },
+    "camera": {
+      "intercom_live": {
+        "name": "Livebild"
+      },
+      "intercom_video": {
+        "name": "Fotovorschau"
+      }
+    },
+    "light": {
+      "intercom_light": {
+        "name": "Licht"
+      }
+    },
+    "number": {
+      "intercom_tts_volume": {
+        "name": "Ansagelautstärke"
+      }
+    },
+    "select": {
+      "intercom_history_photo": {
+        "name": "Foto aus dem Verlauf"
+      }
+    },
+    "sensor": {
+      "intercom_device_status": {
+        "name": "Gerätestatus",
+        "state": {
+          "unknown": "Unbekannt",
+          "online": "Online",
+          "rebooting": "Wird neu gestartet",
+          "initializing": "Wird gestartet"
+        }
+      },
+      "intercom_history": {
+        "name": "Klingelverlauf"
+      }
+    },
+    "switch": {
+      "intercom_doorbell_mute": {
+        "name": "Klingel-Stummschaltung"
+      }
+    },
+    "text": {
+      "intercom_tts_message": {
+        "name": "Ansagetext"
+      }
+    }
+  },
   "config": {
     "step": {
       "user": {
@@ -83,11 +163,13 @@
           "enable_light_mood_select": "Stimmungsauswahl des LightController bereitstellen",
           "expose_controller_child_lights": "Einzelne Lichter im LightController bereitstellen",
           "auto_create_automations": "Vorgeschlagene Automatisierungen automatisch hinzufügen",
-          "use_loxone_icons": "Loxone-Symbole als Entitätsbilder verwenden"
+          "use_loxone_icons": "Loxone-Symbole als Entitätsbilder verwenden",
+          "intercom_language": "Sprache der Türsprechanlage"
         },
         "data_description": {
           "enable_light_mood_select": "Fügt eine separate Select-Entität für Szenen und Stimmungen hinzu. Einzelne Kind-Lichter eines LightController werden dadurch nicht bereitgestellt.",
-          "expose_controller_child_lights": "Warnung: Das Deaktivieren dieser Option entfernt diese Entitäten aus Home Assistant (sie können aus Dashboards und Automatisierungen verschwinden)."
+          "expose_controller_child_lights": "Warnung: Das Deaktivieren dieser Option entfernt diese Entitäten aus Home Assistant (sie können aus Dashboards und Automatisierungen verschwinden).",
+          "intercom_language": "Wähle die Sprache für Entitätsnamen der Türsprechanlage und die Fotogalerie. Standardmäßig gelten die Spracheinstellungen von Home Assistant."
         }
       }
     }

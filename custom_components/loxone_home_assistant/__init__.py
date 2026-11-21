@@ -19,6 +19,7 @@ from homeassistant.exceptions import (
     ServiceValidationError,
 )
 from homeassistant.helpers import config_validation as cv, device_registry as dr
+from homeassistant.helpers.translation import async_get_translations
 
 try:
     from homeassistant.core import SupportsResponse
@@ -57,6 +58,7 @@ from .intercom import (
     is_intercom_control,
     resolve_intercom_command,
 )
+from .intercom_gallery import async_setup_intercom_gallery
 from .media_player import build_audio_tts_command, resolve_audio_tts_target_uuid_action
 from .models import LoxoneControl
 from .runtime import bridges_by_entry_id, remove_entry_bridge, set_entry_bridge
@@ -169,6 +171,7 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
     if not hass.data[DOMAIN].get(DATA_ICON_VIEW_REGISTERED):
         hass.http.register_view(LoxoneIconProxyView())
         hass.data[DOMAIN][DATA_ICON_VIEW_REGISTERED] = True
+    await async_setup_intercom_gallery(hass)
 
     if not hass.services.has_service(DOMAIN, SERVICE_SEND_COMMAND):
         hass.services.async_register(
@@ -226,7 +229,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     try:
         bridge = LoxoneBridge(hass, merge_connection_config(entry.data, entry.options))
         await bridge.async_initialize()
-        _async_register_miniserver_device(hass, entry, bridge)
+        if bridge.intercom_language is not None:
+            bridge.intercom_entity_translations = await async_get_translations(
+                hass, bridge.intercom_language, "entity", {DOMAIN}
+            )
+        bridge.miniserver_device_id = _async_register_miniserver_device(hass, entry, bridge)
 
         set_entry_bridge(hass, entry, bridge)
         await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
@@ -508,11 +515,11 @@ def _resolve_bridge(hass: HomeAssistant, call: ServiceCall) -> LoxoneBridge:
 
 def _async_register_miniserver_device(
     hass: HomeAssistant, entry: ConfigEntry, bridge: LoxoneBridge
-) -> None:
-    """Ensure the Miniserver hub device exists in HA device registry."""
+) -> str:
+    """Return the registry ID of the registered Miniserver hub."""
     model = str(getattr(bridge, "server_model", DEFAULT_SERVER_MODEL)).strip()
     device_registry = dr.async_get(hass)
-    device_registry.async_get_or_create(
+    device = device_registry.async_get_or_create(
         config_entry_id=entry.entry_id,
         identifiers={miniserver_device_identifier(bridge.serial)},
         manufacturer=MANUFACTURER,
@@ -521,6 +528,7 @@ def _async_register_miniserver_device(
         sw_version=bridge.software_version,
         serial_number=bridge.serial,
     )
+    return device.id
 
 
 def _resolve_bridge_for_serial(hass: HomeAssistant, serial: str) -> LoxoneBridge | None:

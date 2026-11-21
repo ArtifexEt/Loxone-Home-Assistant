@@ -448,6 +448,30 @@ class ConnectionConfigFlowTests(unittest.IsolatedAsyncioTestCase):
                 bridge.async_initialize.assert_awaited_once_with(probe_legacy=True)
                 self.assertEqual(result["data"], {"port": port, "use_tls": new_tls})
 
+    async def test_intercom_language_can_be_selected_and_preserves_the_connection(self) -> None:
+        entry = types.SimpleNamespace(
+            entry_id="test-miniserver-entry",
+            title="Miniserver",
+            data={"host": "miniserver.local", "port": 443, "username": "loxone", "password": "test"},
+            options={"intercom_language": "pl"},
+        )
+        flow = config_flow.LoxoneCommunityOptionsFlow(entry)
+        flow.hass = types.SimpleNamespace(data={})
+
+        form = await flow.async_step_init()
+        self.assertEqual(_schema_defaults(form["data_schema"])["intercom_language"], "pl")
+        selector = next(
+            validator for field, validator in form["data_schema"].schema.items()
+            if field.schema == "intercom_language"
+        )
+        self.assertEqual(set(selector.container), {"auto", "pl", "en", "de"})
+
+        with patch.object(config_flow, "LoxoneBridge", return_value=_connected_bridge(use_tls=True)) as factory:
+            result = await flow.async_step_init({"intercom_language": "de"})
+
+        self.assertEqual(result["data"]["intercom_language"], "de")
+        self.assertEqual(factory.call_args.args[1]["host"], "miniserver.local")
+
     async def test_options_keep_existing_password_overrides_when_blank(self) -> None:
         config_entry = types.SimpleNamespace(
             data={

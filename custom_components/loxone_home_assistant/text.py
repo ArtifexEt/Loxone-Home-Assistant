@@ -8,6 +8,7 @@ try:
 except ImportError:  # pragma: no cover - compatibility for lightweight test stubs
     TextMode = None  # type: ignore[assignment]
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import MAX_LENGTH_STATE_STATE
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
@@ -68,12 +69,13 @@ class LoxoneIntercomTtsMessageEntity(LoxoneEntity, TextEntity):
     """Text helper storing Intercom TTS message."""
 
     _attr_icon = "mdi:message-text"
-    _attr_native_max = 120
+    _attr_native_max = MAX_LENGTH_STATE_STATE
     if TextMode is not None:
         _attr_mode = TextMode.TEXT
 
     def __init__(self, bridge, control) -> None:
         super().__init__(bridge, control, "TTS Message")
+        self._set_intercom_entity_name("text", "intercom_tts_message")
 
     @property
     def native_value(self) -> str:

@@ -7,7 +7,7 @@ import json
 import sys
 import types
 import unittest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from tests._loader import load_integration_module
 
@@ -141,6 +141,38 @@ connection_config = load_integration_module("custom_components.loxone_home_assis
 class BridgeSystemStatsTests(unittest.IsolatedAsyncioTestCase):
     """Verify bridge caches and throttles `dev/sys/*` refreshes."""
 
+    def test_intercom_events_ignore_history_and_omit_wrapped_payload(self) -> None:
+        bridge = bridge_module.LoxoneBridge.__new__(bridge_module.LoxoneBridge)
+        bridge.serial = "synthetic-miniserver"
+        bridge.structure = bridge_module.parse_structure(
+            {
+                "controls": {
+                    "control": {
+                        "type": "IntercomV2",
+                        "states": {
+                            "bell": "ringing",
+                            "call": "call",
+                            "lastBellTimestamp": "history",
+                        },
+                    }
+                }
+            }
+        )
+        bridge.hass = Mock()
+        bridge._emit_intercom_events(
+            {"ringing": {"value": 1, "metadata": "example detail"}, "history": 20260101000000},
+            {"ringing": 0},
+        )
+        bridge.hass.bus.async_fire.assert_called_once()
+        event_type, data = bridge.hass.bus.async_fire.call_args.args
+        self.assertEqual(event_type, bridge_module.EVENT_INTERCOM)
+        self.assertEqual(data["event"], "doorbell")
+        self.assertEqual(data["state_name"], "bell")
+        self.assertIs(data["value"], True)
+        bridge.hass.bus.async_fire.reset_mock()
+        bridge._emit_intercom_events({"ringing": 1, "call": 0}, {"ringing": 1, "call": 1})
+        bridge.hass.bus.async_fire.assert_not_called()
+
     async def test_refresh_system_stats_updates_synthetic_state_values(self) -> None:
         bridge = bridge_module.LoxoneBridge.__new__(bridge_module.LoxoneBridge)
         bridge.state_values = {}
@@ -254,6 +286,22 @@ class BridgeConnectionTests(unittest.IsolatedAsyncioTestCase):
             {"host": "miniserver.local", "username": "test", "password": "test"},
         )
         self.addAsyncCleanup(self.bridge.async_shutdown)
+
+    async def test_secured_intercom_details_request_encrypted_gen1_response(self) -> None:
+        self.bridge._send_loxone_command = AsyncMock()
+        self.bridge.use_tls = False
+
+        await self.bridge.async_send_action("intercom-action", "securedDetails")
+        self.bridge._send_loxone_command.assert_awaited_once_with(
+            "jdev/sps/io/intercom-action/securedDetails", encrypt_response=True
+        )
+
+        self.bridge._send_loxone_command.reset_mock()
+        self.bridge.use_tls = True
+        await self.bridge.async_send_action("intercom-action", "securedDetails")
+        self.bridge._send_loxone_command.assert_awaited_once_with(
+            "jdev/sps/io/intercom-action/securedDetails"
+        )
 
     async def test_reconnect_and_command_share_one_websocket(self) -> None:
         connect_started = asyncio.Event()
