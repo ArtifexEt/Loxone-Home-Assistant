@@ -24,12 +24,17 @@ _LOGGER = logging.getLogger(__name__)
 _ARCHIVE_LIMIT = 100
 _ARCHIVE_TIMEOUT = 15
 _ARCHIVE_REFRESH_INTERVAL = 25
+_ARCHIVE_RETRY_INTERVAL = 3
 _THUMBNAIL_DOWNLOAD_LIMIT = 3
 _PHOTO_CACHE_INTERVAL = 15
 _LATEST_TIMESTAMP = 253_402_300_799  # Last second representable by Python datetime.
 _LOXONE_EPOCH = 1_230_768_000
 _PHOTO_TOKEN_RETRY = 30
 _JWT = re.compile(r"[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+")
+
+
+class IntercomArchiveUnavailableError(Exception):
+    """The latest attempt to read the Intercom photo archive failed."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,6 +65,7 @@ class _ArchiveCache:
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     refreshed_for: tuple[Any, Any] | None = None
     next_refresh: float = 0
+    refresh_failed: bool = False
     entries: tuple[IntercomArchiveEntry, ...] = ()
     paths: dict[int, _ActivityPhotos] = field(default_factory=dict, repr=False)
     photo_timestamp: int | None = None
@@ -89,27 +95,34 @@ def is_gen2_archive_control(bridge, control: LoxoneControl) -> bool:
     )
 
 
-async def async_gen2_archive_entries(bridge, control: LoxoneControl) -> tuple[IntercomArchiveEntry, ...]:
-    """Return the native archive's timestamps, sharing refreshes between entities."""
+async def async_gen2_archive_entries(
+    bridge, control: LoxoneControl, *, require_fresh: bool = False
+) -> tuple[IntercomArchiveEntry, ...]:
+    """Return archive timestamps, optionally requiring the last refresh to succeed."""
     if not is_gen2_archive_control(bridge, control):
         return ()
 
     cache = _archive_cache(bridge, control)
     async with cache.lock:
         hint = _refresh_hint(bridge, control)
-        if monotonic() < cache.next_refresh and hint == cache.refreshed_for:
-            return cache.entries
+        if monotonic() >= cache.next_refresh or (
+            not cache.refresh_failed and hint != cache.refreshed_for
+        ):
+            try:
+                async with asyncio.timeout(_ARCHIVE_TIMEOUT), _archive_connection(bridge, control) as signaling:
+                    paths = await _async_activity_paths(signaling)
+            except (IntercomSignalingError, OSError, TimeoutError):
+                cache.refresh_failed = True
+                cache.next_refresh = monotonic() + _ARCHIVE_RETRY_INTERVAL
+            else:
+                cache.paths = paths
+                cache.entries = _entries_from_paths(paths)
+                cache.refresh_failed = False
+                cache.next_refresh = monotonic() + _ARCHIVE_REFRESH_INTERVAL
+            cache.refreshed_for = hint
 
-        try:
-            async with asyncio.timeout(_ARCHIVE_TIMEOUT), _archive_connection(bridge, control) as signaling:
-                paths = await _async_activity_paths(signaling)
-        except (IntercomSignalingError, OSError, TimeoutError):
-            cache.paths.clear()
-        else:
-            cache.paths = paths
-            cache.entries = _entries_from_paths(paths)
-        cache.next_refresh = monotonic() + _ARCHIVE_REFRESH_INTERVAL
-        cache.refreshed_for = hint
+        if require_fresh and cache.refresh_failed:
+            raise IntercomArchiveUnavailableError("The Intercom photo archive is temporarily unavailable.")
         return cache.entries
 
 
@@ -132,6 +145,7 @@ async def async_gen2_archive_image(bridge, control: LoxoneControl, selection_val
                 paths = await _async_activity_paths(signaling)
                 cache.paths = paths
                 cache.entries = _entries_from_paths(paths)
+                cache.refresh_failed = False
                 cache.next_refresh = monotonic() + _ARCHIVE_REFRESH_INTERVAL
                 cache.refreshed_for = hint
                 activity = paths.get(timestamp)

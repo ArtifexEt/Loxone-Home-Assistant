@@ -75,6 +75,57 @@ class Gen2ArchiveTests(unittest.IsolatedAsyncioTestCase):
         await archive.async_gen2_archive_entries(self.bridge, self.control)
         self.assertEqual(self.connect.await_count, 2)
 
+    async def test_cold_timeout_is_distinct_from_a_successful_empty_archive(self) -> None:
+        clock = self.enterContext(patch.object(archive, "monotonic", return_value=100))
+        self.session.async_request.side_effect = [TimeoutError(), []]
+
+        with self.assertRaises(archive.IntercomArchiveUnavailableError):
+            await archive.async_gen2_archive_entries(self.bridge, self.control, require_fresh=True)
+        self.assertEqual(await archive.async_gen2_archive_entries(self.bridge, self.control), ())
+
+        self.states["bell"] = 1
+        with self.assertRaises(archive.IntercomArchiveUnavailableError):
+            await archive.async_gen2_archive_entries(self.bridge, self.control, require_fresh=True)
+        self.connect.assert_awaited_once()
+
+        clock.return_value += 3
+        self.assertEqual(
+            await archive.async_gen2_archive_entries(self.bridge, self.control, require_fresh=True),
+            (),
+        )
+        self.assertEqual(self.connect.await_count, 2)
+
+    async def test_refresh_timeout_preserves_cached_thumbnails_and_entries(self) -> None:
+        clock = self.enterContext(patch.object(archive, "monotonic", return_value=100))
+        token = _test_jwt({"msSerial": "000000000001", "tokenRights": 0})
+        self.enterContext(patch.object(archive, "_async_archive_token", AsyncMock(return_value=token)))
+        download = self.enterContext(patch.object(
+            archive, "async_get_scoped_archive_photo", AsyncMock(return_value=JPEG)
+        ))
+        entries = await archive.async_gen2_archive_entries(self.bridge, self.control)
+
+        clock.return_value += 25
+        records = self.session.async_request.return_value
+        self.session.async_request.side_effect = [TimeoutError(), records]
+        with self.assertRaises(archive.IntercomArchiveUnavailableError):
+            await archive.async_gen2_archive_entries(self.bridge, self.control, require_fresh=True)
+        self.assertEqual(await archive.async_gen2_archive_entries(self.bridge, self.control), entries)
+        self.assertEqual(
+            await archive.async_gen2_archive_thumbnail(
+                self.bridge, self.control, entries[0].selection_value
+            ),
+            JPEG,
+        )
+        download.assert_awaited_once_with(self.bridge, DEVICE_UUID, self.thumb_path, token)
+        self.assertEqual(self.connect.await_count, 2)
+
+        clock.return_value += 3
+        self.assertEqual(
+            await archive.async_gen2_archive_entries(self.bridge, self.control, require_fresh=True),
+            entries,
+        )
+        self.assertEqual(self.connect.await_count, 3)
+
     async def test_invalid_params_uses_the_legacy_list_format(self) -> None:
         self.session.async_request.side_effect = [
             signaling.IntercomSignalingError("Invalid parameters", code=-32602),

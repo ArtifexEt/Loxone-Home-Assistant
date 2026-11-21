@@ -15,6 +15,7 @@ from .const import DOMAIN
 from .entity import control_entity_unique_id
 from .intercom_archive import (
     GEN2_ARCHIVE_SELECTION_PREFIX,
+    IntercomArchiveUnavailableError,
     async_gen2_archive_entries,
     async_gen2_archive_image,
     async_gen2_archive_thumbnail,
@@ -77,7 +78,10 @@ class IntercomGalleryView(HomeAssistantView):
             page_value = request.query.get("page", "1")
             if _PAGE_NUMBER.fullmatch(page_value) is None:
                 raise web.HTTPBadRequest(headers=_PRIVATE_HEADERS)
-            entries = await async_gen2_archive_entries(bridge, control)
+            try:
+                entries = await async_gen2_archive_entries(bridge, control, require_fresh=True)
+            except IntercomArchiveUnavailableError:
+                raise web.HTTPServiceUnavailable(headers=_PRIVATE_HEADERS) from None
             last_page = max(1, (len(entries) + _PAGE_SIZE - 1) // _PAGE_SIZE)
             page = min(int(page_value), last_page)
             start = (page - 1) * _PAGE_SIZE
@@ -118,10 +122,11 @@ class IntercomGalleryView(HomeAssistantView):
             raise web.HTTPNotFound(headers=_PRIVATE_HEADERS)
 
         bridge = bridges_by_entry_id(self._hass).get(entry.config_entry_id)
-        if bridge is not None:
-            for control in bridge.controls:
-                if is_gen2_archive_control(bridge, control) and entry.unique_id == control_entity_unique_id(
-                    bridge.serial, control.uuid_action, "Video"
-                ):
-                    return bridge, control
+        if bridge is None:
+            raise web.HTTPServiceUnavailable(headers=_PRIVATE_HEADERS)
+        for control in bridge.controls:
+            if is_gen2_archive_control(bridge, control) and entry.unique_id == control_entity_unique_id(
+                bridge.serial, control.uuid_action, "Video"
+            ):
+                return bridge, control
         raise web.HTTPNotFound(headers=_PRIVATE_HEADERS)

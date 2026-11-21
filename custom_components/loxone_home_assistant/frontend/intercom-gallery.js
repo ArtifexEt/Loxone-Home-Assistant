@@ -273,6 +273,10 @@ class LoxoneIntercomGallery extends HTMLElement {
   _clearPage() {
     this._pageRequest?.abort();
     this._pageRequest = undefined;
+    this._clearTiles();
+  }
+
+  _clearTiles() {
     for (const image of this._grid.querySelectorAll("img")) releaseImage(image);
     this._grid.replaceChildren();
   }
@@ -286,18 +290,16 @@ class LoxoneIntercomGallery extends HTMLElement {
     this._pageNumber.setAttribute("aria-label", this._labels.page(this._page, this._pages));
   }
 
-  async _request(path, signal) {
-    const response = await this._hass.fetchWithAuth(path, {
+  _request(path, signal) {
+    return this._hass.fetchWithAuth(path, {
       signal,
       cache: "no-store",
       redirect: "error",
     });
-    if (!response.ok) throw new Error(`Intercom gallery HTTP ${response.status}`);
-    return response;
   }
 
   async _loadPage(page) {
-    this._clearPage();
+    this._pageRequest?.abort();
     const controller = new AbortController();
     this._pageRequest = controller;
     const { signal } = controller;
@@ -309,10 +311,17 @@ class LoxoneIntercomGallery extends HTMLElement {
     let tiles;
     try {
       const response = await this._request(`${path}?page=${page}`, signal);
+      if (signal.aborted) return;
+      if (!response.ok) {
+        if (response.status !== 503) {
+          this._page = this._pages = 1;
+          this._clearTiles();
+        }
+        this._status.textContent = this._labels.error;
+        return;
+      }
       const result = await response.json();
       if (signal.aborted) return;
-      this._page = result.page;
-      this._pages = Math.max(1, Math.ceil(result.total / result.page_size));
       const locale = this._hass.locale;
       const timeZone = locale?.time_zone === "server" ? this._hass.config?.time_zone : undefined;
       const clockLanguage = locale?.time_format === "system" ? undefined : this._language;
@@ -323,6 +332,9 @@ class LoxoneIntercomGallery extends HTMLElement {
         const date = new Date(timestamp * 1000);
         return this._createTile(`${path}/${encodeURIComponent(id)}`, id, date, day, clock);
       });
+      this._page = result.page;
+      this._pages = Math.max(1, Math.ceil(result.total / result.page_size));
+      this._clearTiles();
       this._grid.replaceChildren(...tiles.map((tile) => tile.item));
       this._status.textContent = tiles.length ? "" : this._labels.empty;
     } catch {
@@ -380,6 +392,7 @@ class LoxoneIntercomGallery extends HTMLElement {
 
   async _loadImage(path, image, signal) {
     const response = await this._request(path, signal);
+    if (!response.ok) throw new Error(`Intercom gallery HTTP ${response.status}`);
     const photo = await response.blob();
     if (signal.aborted) return;
     if (photo.type !== "image/jpeg" || !photo.size) throw new Error("Expected a JPEG photograph");

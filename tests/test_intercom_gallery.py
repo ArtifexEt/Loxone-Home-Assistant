@@ -92,7 +92,13 @@ class IntercomGalleryTests(unittest.IsolatedAsyncioTestCase):
         })
         self.assertEqual(first.headers["Cache-Control"], "no-store")
         self.read.assert_called_with(CAMERA_ID, gallery.POLICY_READ)
-        self.entries.assert_awaited_with(self.bridge, self.control)
+        self.entries.assert_awaited_with(self.bridge, self.control, require_fresh=True)
+
+    async def test_archive_outage_returns_503_instead_of_an_empty_page(self) -> None:
+        self.entries.side_effect = gallery.IntercomArchiveUnavailableError()
+        with self.assertRaises(gallery.web.HTTPServiceUnavailable) as error:
+            await self.view.get(self._request(), CAMERA_ID)
+        self.assertEqual(error.exception.headers["Cache-Control"], "no-store")
 
     async def test_missing_and_denied_authentication_does_not_reach_archive(self) -> None:
         self.assertTrue(self.view.requires_auth)
@@ -108,12 +114,18 @@ class IntercomGalleryTests(unittest.IsolatedAsyncioTestCase):
     async def test_requires_the_loaded_registered_archive_camera(self) -> None:
         for change in (
             {"domain": "sensor"}, {"platform": "other_integration"}, {"disabled": True},
-            {"config_entry_id": "unloaded-entry"}, {"unique_id": "test-server:test-action:live"},
+            {"config_entry_id": None}, {"unique_id": "test-server:test-action:live"},
             {"unique_id": "other-server:test-action:video"},
         ):
             with self.subTest(change=change), patch.multiple(self.entry, **change):
                 with self.assertRaises(gallery.web.HTTPNotFound):
                     await self.view.get(self._request(), CAMERA_ID)
+        self.entries.assert_not_awaited()
+
+    async def test_gallery_reports_an_entry_reload_as_temporarily_unavailable(self) -> None:
+        self.hass.data[gallery.DOMAIN]["bridges"].clear()
+        with self.assertRaises(gallery.web.HTTPServiceUnavailable):
+            await self.view.get(self._request(), CAMERA_ID)
         self.entries.assert_not_awaited()
 
     async def test_full_and_thumbnail_routes_validate_id_and_serve_jpeg(self) -> None:
